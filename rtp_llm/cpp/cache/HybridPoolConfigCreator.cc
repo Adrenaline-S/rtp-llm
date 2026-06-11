@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 
 #include <algorithm>
+#include <array>
+#include <map>
+#include <utility>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
@@ -10,6 +13,25 @@
 namespace rtp_llm {
 
 namespace {
+
+bool hasDsv4KvCacheSpecs(const ModelConfig& model_config) {
+    if (model_config.kv_cache_specs.empty()) {
+        return false;
+    }
+    constexpr const char* kExpectedTags[] = {
+        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
+    for (const char* expected_tag : kExpectedTags) {
+        const auto it = std::find_if(model_config.kv_cache_specs.begin(),
+                                     model_config.kv_cache_specs.end(),
+                                     [expected_tag](const auto& spec) {
+                                         return spec != nullptr && spec->tag == expected_tag;
+                                     });
+        if (it == model_config.kv_cache_specs.end()) {
+            return false;
+        }
+    }
+    return true;
+}
 
 struct HybridPoolLayers {
     std::vector<int> full_layers;
@@ -77,7 +99,8 @@ void appendGroup(CacheConfig&            config,
                  const std::vector<int>& layer_ids,
                  CacheGroupType          group_type,
                  KVCacheSpecPtr          spec,
-                 KVCacheRegionName       region_name = KVCacheRegionName::DEFAULT) {
+                 KVCacheRegionName       region_name = KVCacheRegionName::DEFAULT,
+                 std::string             tag = "") {
     if (layer_ids.empty()) {
         return;
     }
@@ -86,6 +109,98 @@ void appendGroup(CacheConfig&            config,
     config.cache_specs.push_back(spec);
     config.group_types.push_back(group_type);
     config.group_region_names.push_back(region_name);
+    config.group_tags.push_back(std::move(tag));
+}
+
+struct Dsv4ExpectedGroupRoute {
+    const char*       tag;
+    KVCacheRegionName region_name;
+};
+
+constexpr std::array<Dsv4ExpectedGroupRoute, 7> kDsv4ExpectedGroupRoutes = {
+    Dsv4ExpectedGroupRoute{"csa_kv", KVCacheRegionName::CSA_KV},
+    Dsv4ExpectedGroupRoute{"hca_kv", KVCacheRegionName::HCA_KV},
+    Dsv4ExpectedGroupRoute{"indexer_kv", KVCacheRegionName::INDEXER_KV},
+    Dsv4ExpectedGroupRoute{"indexer_state", KVCacheRegionName::INDEXER_STATE},
+    Dsv4ExpectedGroupRoute{"csa_state", KVCacheRegionName::CSA_STATE},
+    Dsv4ExpectedGroupRoute{"hca_state", KVCacheRegionName::HCA_STATE},
+    Dsv4ExpectedGroupRoute{"swa_kv", KVCacheRegionName::SWA_KV},
+};
+
+void validateDsv4TagRegionMappings(const CacheConfig& config) {
+    RTP_LLM_CHECK_WITH_INFO(config.group_tags.size() == kDsv4ExpectedGroupRoutes.size(),
+                            "DSV4 group_tags size %zu != %zu",
+                            config.group_tags.size(),
+                            kDsv4ExpectedGroupRoutes.size());
+    RTP_LLM_CHECK_WITH_INFO(config.group_region_names.size() == kDsv4ExpectedGroupRoutes.size(),
+                            "DSV4 group_region_names size %zu != %zu",
+                            config.group_region_names.size(),
+                            kDsv4ExpectedGroupRoutes.size());
+    RTP_LLM_CHECK_WITH_INFO(config.cache_specs.size() == kDsv4ExpectedGroupRoutes.size(),
+                            "DSV4 cache_specs size %zu != %zu",
+                            config.cache_specs.size(),
+                            kDsv4ExpectedGroupRoutes.size());
+
+    const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+    RTP_LLM_CHECK_WITH_INFO(config.layer_region_to_group_id.size() >= config.layer_num,
+                            "DSV4 layer_region_to_group_id size %zu < layer_num %u",
+                            config.layer_region_to_group_id.size(),
+                            config.layer_num);
+    RTP_LLM_CHECK_WITH_INFO(config.layer_tag_to_group_id.size() >= config.layer_num,
+                            "DSV4 layer_tag_to_group_id size %zu < layer_num %u",
+                            config.layer_tag_to_group_id.size(),
+                            config.layer_num);
+
+    for (size_t gid = 0; gid < kDsv4ExpectedGroupRoutes.size(); ++gid) {
+        const auto& expected = kDsv4ExpectedGroupRoutes[gid];
+        RTP_LLM_CHECK_WITH_INFO(config.group_tags[gid] == expected.tag,
+                                "DSV4 group %zu tag %s != %s",
+                                gid,
+                                config.group_tags[gid].c_str(),
+                                expected.tag);
+        RTP_LLM_CHECK_WITH_INFO(config.group_region_names[gid] == expected.region_name,
+                                "DSV4 group %zu has unexpected legacy region id %d",
+                                gid,
+                                static_cast<int>(config.group_region_names[gid]));
+        RTP_LLM_CHECK_WITH_INFO(config.cache_specs[gid] != nullptr, "DSV4 cache_specs[%zu] is null", gid);
+        RTP_LLM_CHECK_WITH_INFO(config.cache_specs[gid]->tag == expected.tag,
+                                "DSV4 cache_specs[%zu] tag %s != %s",
+                                gid,
+                                config.cache_specs[gid]->tag.c_str(),
+                                expected.tag);
+        RTP_LLM_CHECK_WITH_INFO(config.cache_specs[gid]->layers == config.global_layer_ids[gid],
+                                "DSV4 cache_specs[%zu] layers differ from global_layer_ids",
+                                gid);
+
+        const auto region_id = static_cast<size_t>(expected.region_name);
+        RTP_LLM_CHECK_WITH_INFO(
+            region_id < region_count, "DSV4 group %zu invalid legacy region id %zu", gid, region_id);
+        for (int layer_id : config.global_layer_ids[gid]) {
+            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config.layer_num,
+                                    "DSV4 group %zu invalid layer id %d",
+                                    gid,
+                                    layer_id);
+            const auto layer = static_cast<size_t>(layer_id);
+            RTP_LLM_CHECK_WITH_INFO(config.layer_region_to_group_id[layer].size() == region_count,
+                                    "DSV4 layer %zu region route size %zu != %zu",
+                                    layer,
+                                    config.layer_region_to_group_id[layer].size(),
+                                    region_count);
+            const int region_gid = config.layer_region_to_group_id[layer][region_id];
+            const int tag_gid    = config.groupIdForLayerTag(layer_id, expected.tag);
+            RTP_LLM_CHECK_WITH_INFO(region_gid == static_cast<int>(gid),
+                                    "DSV4 layer %d region route for group %zu points to %d",
+                                    layer_id,
+                                    gid,
+                                    region_gid);
+            RTP_LLM_CHECK_WITH_INFO(tag_gid == region_gid,
+                                    "DSV4 layer %d tag route %s points to %d but region points to %d",
+                                    layer_id,
+                                    expected.tag,
+                                    tag_gid,
+                                    region_gid);
+        }
+    }
 }
 
 void populateDefaultRegionMappings(CacheConfig& config) {
@@ -95,6 +210,7 @@ void populateDefaultRegionMappings(CacheConfig& config) {
 
     const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
     config.layer_region_to_group_id.assign(config.layer_num, std::vector<int>(region_count, -1));
+    config.layer_tag_to_group_id.assign(config.layer_num, std::map<std::string, int>());
 
     for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
         const auto region_name =
@@ -109,6 +225,9 @@ void populateDefaultRegionMappings(CacheConfig& config) {
             const auto layer = static_cast<size_t>(layer_id);
             config.layer_to_group_ids[layer].push_back(static_cast<int>(gid));
             config.layer_region_to_group_id[layer][region_id] = static_cast<int>(gid);
+            if (gid < config.group_tags.size() && !config.group_tags[gid].empty()) {
+                config.layer_tag_to_group_id[layer][config.group_tags[gid]] = static_cast<int>(gid);
+            }
             if (region_name == KVCacheRegionName::DEFAULT) {
                 config.layer_to_group_id[layer] = static_cast<int>(gid);
                 config.layer_group_types[layer] = config.group_types[gid];
@@ -232,6 +351,7 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     config.layer_ids.clear();
     config.group_types.clear();
     config.group_region_names.clear();
+    config.group_tags.clear();
 
     appendGroup(config,
                 layers.full_layers,
@@ -283,20 +403,28 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.linear_step        = 1;
     config.is_sparse          = model_config.attn_config.is_sparse;
 
-    if (!model_config.attn_config.layer_compress_ratios.empty()) {
+    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.layer_compress_ratios.empty() || hasDsv4KvCacheSpecs(model_config),
+                            "DSV4 cache config requires model_config.kv_cache_specs; "
+                            "layer_compress_ratios fallback is disabled");
+
+    if (hasDsv4KvCacheSpecs(model_config)) {
         DSV4CacheConfigHelper::applyConfig(
             config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     } else {
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
-                                "HybridPoolConfigCreator requires DSV4 layer_compress_ratios or hybrid attention");
+                                "HybridPoolConfigCreator requires DSV4 kv_cache_specs or hybrid attention");
         populateHybridAttentionGroups(config, model_config, parallelism_config);
     }
 
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
+    const bool is_dsv4_config = hasDsv4KvCacheSpecs(model_config);
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
+    if (is_dsv4_config) {
+        validateDsv4TagRegionMappings(config);
+    }
     setupIndependentPoolSizes(config, is_mtp);
-    if (!model_config.attn_config.layer_compress_ratios.empty()) {
+    if (is_dsv4_config) {
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;
         config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;
     }

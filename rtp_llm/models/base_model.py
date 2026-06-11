@@ -211,6 +211,10 @@ class BaseModel(object):
         raise NotImplementedError()
 
     @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        pass
+
+    @classmethod
     def from_config(
         cls,
         model_config: ModelConfig,

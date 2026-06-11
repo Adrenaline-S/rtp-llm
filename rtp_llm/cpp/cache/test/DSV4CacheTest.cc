@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <vector>
@@ -14,6 +15,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -80,6 +82,7 @@ static ModelConfig makeProModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -102,6 +105,7 @@ static ModelConfig makeFlashModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -109,6 +113,7 @@ static ModelConfig makeFlashMtpModelConfig() {
     ModelConfig mc                       = makeFlashModelConfig();
     mc.num_layers                        = 1;
     mc.attn_config.layer_compress_ratios = {0};
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -168,6 +173,88 @@ TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     EXPECT_EQ(config.layer_to_group_id[0], 6);
     ASSERT_EQ(config.layer_region_to_group_id.size(), 1u);
     EXPECT_EQ(config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
+    ASSERT_EQ(config.group_tags.size(), 7u);
+    EXPECT_EQ(config.group_tags[6], "swa_kv");
+    EXPECT_EQ(config.groupIdForLayerTag(0, "swa_kv"), 6);
+}
+
+TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderDoesNotAffectLegacyGroupOrder) {
+    auto mc = makeFlashModelConfig();
+    std::reverse(mc.kv_cache_specs.begin(), mc.kv_cache_specs.end());
+
+    ParallelismConfig pc;
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+
+    const std::vector<KVCacheRegionName> expected_regions = {KVCacheRegionName::CSA_KV,
+                                                             KVCacheRegionName::HCA_KV,
+                                                             KVCacheRegionName::INDEXER_KV,
+                                                             KVCacheRegionName::INDEXER_STATE,
+                                                             KVCacheRegionName::CSA_STATE,
+                                                             KVCacheRegionName::HCA_STATE,
+                                                             KVCacheRegionName::SWA_KV};
+    const std::vector<std::string> expected_tags = {
+        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
+    EXPECT_EQ(config.group_region_names, expected_regions);
+    EXPECT_EQ(config.group_tags, expected_tags);
+
+    ASSERT_EQ(config.cache_specs.size(), expected_tags.size());
+    ASSERT_EQ(config.global_layer_ids.size(), expected_tags.size());
+    for (size_t gid = 0; gid < expected_tags.size(); ++gid) {
+        ASSERT_NE(config.cache_specs[gid], nullptr);
+        EXPECT_EQ(config.cache_specs[gid]->tag, expected_tags[gid]) << "gid=" << gid;
+        EXPECT_EQ(config.cache_specs[gid]->layers, config.global_layer_ids[gid]) << "gid=" << gid;
+    }
+
+    EXPECT_EQ(config.layer_region_to_group_id[2][static_cast<size_t>(KVCacheRegionName::CSA_KV)], 0);
+    EXPECT_EQ(config.layer_region_to_group_id[3][static_cast<size_t>(KVCacheRegionName::HCA_KV)], 1);
+    EXPECT_EQ(config.layer_region_to_group_id[2][static_cast<size_t>(KVCacheRegionName::INDEXER_KV)], 2);
+    EXPECT_EQ(config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
+    EXPECT_EQ(config.groupIdForLayerTag(2, "csa_kv"), 0);
+    EXPECT_EQ(config.groupIdForLayerTag(3, "hca_kv"), 1);
+    EXPECT_EQ(config.groupIdForLayerTag(0, "swa_kv"), 6);
+}
+
+TEST(HybridPoolConfigCreatorTest, Dsv4TagRegionRoutesAreConsistent) {
+    ParallelismConfig pc;
+    auto              config =
+        HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+
+    auto expect_route = [&](int layer_id, const std::string& tag, KVCacheRegionName region, int expected_gid) {
+        ASSERT_LT(static_cast<size_t>(layer_id), config.layer_region_to_group_id.size());
+        const int region_gid =
+            config.layer_region_to_group_id[static_cast<size_t>(layer_id)][static_cast<size_t>(region)];
+        EXPECT_EQ(region_gid, expected_gid) << "layer=" << layer_id << " tag=" << tag;
+        EXPECT_EQ(config.groupIdForLayerTag(layer_id, tag), region_gid) << "layer=" << layer_id << " tag=" << tag;
+    };
+
+    // Flash DSV4 test config uses layers 2,4,... as CSA and 3,5,... as HCA; 0/1 are SWA-only.
+    expect_route(2, "csa_kv", KVCacheRegionName::CSA_KV, 0);
+    expect_route(2, "indexer_kv", KVCacheRegionName::INDEXER_KV, 2);
+    expect_route(2, "indexer_state", KVCacheRegionName::INDEXER_STATE, 3);
+    expect_route(2, "csa_state", KVCacheRegionName::CSA_STATE, 4);
+    expect_route(2, "swa_kv", KVCacheRegionName::SWA_KV, 6);
+
+    expect_route(3, "hca_kv", KVCacheRegionName::HCA_KV, 1);
+    expect_route(3, "hca_state", KVCacheRegionName::HCA_STATE, 5);
+    expect_route(3, "swa_kv", KVCacheRegionName::SWA_KV, 6);
+
+    expect_route(0, "swa_kv", KVCacheRegionName::SWA_KV, 6);
+    EXPECT_EQ(config.groupIdForLayerTag(0, "csa_kv"), -1);
+    EXPECT_EQ(config.groupIdForLayerTag(0, "hca_kv"), -1);
+
+    auto mtp_config =
+        HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);
+    ASSERT_EQ(mtp_config.groupIdForLayerTag(0, "swa_kv"), 6);
+    ASSERT_EQ(mtp_config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
+}
+
+TEST(HybridPoolConfigCreatorTest, Dsv4SpecsMissingFailsFastWithoutRatioFallback) {
+    auto mc = makeFlashModelConfig();
+    mc.kv_cache_specs.clear();
+
+    ParallelismConfig pc;
+    EXPECT_THROW((void)HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0),
+                 std::exception);
 }
 
 // ============================================================
@@ -229,6 +316,7 @@ TEST(HybridPoolConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     ParallelismConfig pc;
     auto              mc          = makeProModelConfig();
     mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    setDsv4KvCacheSpecs(mc);
     auto config                   = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     ASSERT_EQ(config.cache_specs.size(), 7u);
@@ -270,6 +358,9 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     ASSERT_NE(hca_kv, nullptr);
     ASSERT_NE(idx_kv, nullptr);
     ASSERT_NE(swa_kv, nullptr);
+    EXPECT_EQ(csa_kv->compression_ratio, 4u);
+    EXPECT_EQ(hca_kv->compression_ratio, 128u);
+    EXPECT_EQ(idx_kv->compression_ratio, 4u);
     EXPECT_EQ(csa_kv->entries_per_block, 32u);
     EXPECT_EQ(hca_kv->entries_per_block, 1u);
     EXPECT_EQ(idx_kv->entries_per_block, 32u);
@@ -296,6 +387,7 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
 
     auto mc                       = makeProModelConfig();
     mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    setDsv4KvCacheSpecs(mc);
     auto config                   = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     ASSERT_EQ(config.cache_specs.size(), 7u);

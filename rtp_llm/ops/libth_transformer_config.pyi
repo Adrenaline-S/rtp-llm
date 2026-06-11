@@ -4,8 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
-                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DSV4KVSpec', 'DSV4StateSpec', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KVCacheSpec', 'KVCacheSpecType', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
 class ActivationType:
@@ -1076,6 +1075,50 @@ class MlaOpsType:
         ...
 
 
+class KVCacheSpecType:
+    MultiHeadAttention: typing.ClassVar[KVCacheSpecType]
+    MultiHeadLatentAttention: typing.ClassVar[KVCacheSpecType]
+    LinearAttention: typing.ClassVar[KVCacheSpecType]
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def value(self) -> int:
+        ...
+
+
+class KVCacheSpec:
+    tag: str
+    layers: list[int]
+    layer_num: int
+    local_head_num_kv: int
+    seq_size_per_block: int
+    type: KVCacheSpecType
+    dtype: DataType
+
+
+class DSV4KVSpec(KVCacheSpec):
+    entry_elems: int
+    entries_per_block: int
+    compression_ratio: int
+    store_dtype: DataType
+
+    def __init__(self) -> None:
+        ...
+
+
+class DSV4StateSpec(KVCacheSpec):
+    state_dim: int
+    entries_per_block: int
+    store_dtype: DataType
+    block_size_bytes_override: int
+
+    def __init__(self) -> None:
+        ...
+
+
 class ModelConfig:
     add_bias_linear: bool
     attn_config: AttentionConfigs
@@ -1093,6 +1136,7 @@ class ModelConfig:
     has_pre_decoder_layernorm: bool
     hidden_size: int
     hybrid_attention_config: HybridAttentionConfig
+    kv_cache_specs: list[KVCacheSpec]
     input_embedding_scalar: float
     input_vocab_size: int
     layernorm_eps: float

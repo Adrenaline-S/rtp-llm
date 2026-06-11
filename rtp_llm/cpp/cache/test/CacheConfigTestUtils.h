@@ -4,11 +4,75 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 
 namespace rtp_llm::test {
+
+
+inline KVCacheSpecPtr makeDsv4Spec(const std::string&     tag,
+                                       const std::string&     kind,
+                                       const std::vector<int>& layers,
+                                       uint32_t               entry_elems,
+                                       DataType               dtype,
+                                       uint32_t               compression_ratio = 1) {
+    KVCacheSpecPtr spec;
+    if (kind == "compressed_kv") {
+        auto kv_spec               = std::make_shared<DSV4KVSpec>();
+        kv_spec->entry_elems       = entry_elems;
+        kv_spec->compression_ratio = compression_ratio;
+        kv_spec->store_dtype       = dtype;
+        spec                       = kv_spec;
+    } else {
+        auto state_spec        = std::make_shared<DSV4StateSpec>();
+        state_spec->state_dim  = entry_elems;
+        state_spec->store_dtype = dtype;
+        spec                   = state_spec;
+    }
+    spec->tag                = tag;
+    spec->layers             = layers;
+    spec->dtype              = dtype;
+    return spec;
+}
+
+inline void setDsv4KvCacheSpecs(ModelConfig& model_config) {
+    std::vector<int> csa_layers;
+    std::vector<int> hca_layers;
+    std::vector<int> all_layers;
+    const int        layer_num = static_cast<int>(model_config.num_layers);
+    all_layers.reserve(static_cast<size_t>(layer_num));
+    for (int i = 0; i < layer_num; ++i) {
+        all_layers.push_back(i);
+        const int ratio = i < static_cast<int>(model_config.attn_config.layer_compress_ratios.size()) ?
+                              model_config.attn_config.layer_compress_ratios[static_cast<size_t>(i)] :
+                              0;
+        if (ratio == 4) {
+            csa_layers.push_back(i);
+        } else if (ratio == 128) {
+            hca_layers.push_back(i);
+        }
+    }
+
+    const bool     fp8_kv              = model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8;
+    const uint32_t kv_entry_elems      = fp8_kv ? 584 : static_cast<uint32_t>(model_config.attn_config.size_per_head) * 2;
+    const uint32_t indexer_entry_elems = fp8_kv ? 132 : static_cast<uint32_t>(model_config.attn_config.indexer_head_dim) * 2;
+    const uint32_t head_dim            = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+    const uint32_t indexer_head_dim    = static_cast<uint32_t>(model_config.attn_config.indexer_head_dim);
+
+    model_config.kv_cache_specs = {
+        makeDsv4Spec("csa_kv", "compressed_kv", csa_layers, kv_entry_elems, DataType::TYPE_UINT8, 4),
+        makeDsv4Spec("hca_kv", "compressed_kv", hca_layers, kv_entry_elems, DataType::TYPE_UINT8, 128),
+        makeDsv4Spec("indexer_kv", "compressed_kv", csa_layers, indexer_entry_elems, DataType::TYPE_UINT8, 4),
+        makeDsv4Spec("indexer_state", "fixed_state", csa_layers, 4 * indexer_head_dim, DataType::TYPE_FP32),
+        makeDsv4Spec("csa_state", "fixed_state", csa_layers, 4 * head_dim, DataType::TYPE_FP32),
+        makeDsv4Spec("hca_state", "fixed_state", hca_layers, 2 * head_dim, DataType::TYPE_FP32),
+        makeDsv4Spec("swa_kv", "sliding_window_kv", all_layers, kv_entry_elems, DataType::TYPE_UINT8),
+    };
+}
 
 // A tiny helper for unit tests to construct a minimal MultiHeadAttention KV cache config.
 //

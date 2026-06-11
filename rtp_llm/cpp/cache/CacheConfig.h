@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -24,8 +25,10 @@ struct CacheConfig {
     std::vector<CacheGroupType>    group_types;    // for hybrid attention
     std::vector<CacheGroupType>    layer_group_types;
     std::vector<KVCacheRegionName> group_region_names;        // group id -> cache identity
+    std::vector<std::string>       group_tags;                // group id -> semantic cache tag
     std::vector<std::vector<int>>  layer_to_group_ids;        // layer id -> all group ids needed by the layer
     std::vector<std::vector<int>>  layer_region_to_group_id;  // layer id -> region name id -> group id
+    std::vector<std::map<std::string, int>> layer_tag_to_group_id;  // layer id -> semantic tag -> group id
     std::vector<int>               layer_to_group_id;
     std::vector<int>               layer_to_block_stride_bytes;
     std::vector<size_t>            group_seq_size_per_block;
@@ -101,6 +104,15 @@ struct CacheConfig {
 
     int groupNums() const {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
+    }
+
+    int groupIdForLayerTag(int layer_id, const std::string& tag) const {
+        if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_tag_to_group_id.size()) {
+            return -1;
+        }
+        const auto& tag_to_group = layer_tag_to_group_id[static_cast<size_t>(layer_id)];
+        const auto  it           = tag_to_group.find(tag);
+        return it == tag_to_group.end() ? -1 : it->second;
     }
 
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
@@ -235,6 +247,15 @@ struct CacheConfig {
         for (size_t i = 0; i < group_region_names.size(); ++i) {
             os << static_cast<int>(group_region_names[i]);
             if (i + 1 < group_region_names.size()) {
+                os << ",";
+            }
+        }
+        os << "]\n";
+        OUTPUT_FIELD_EXPR("group_tags.size()", group_tags.size());
+        os << indent1 << "group_tags=[";
+        for (size_t i = 0; i < group_tags.size(); ++i) {
+            os << group_tags[i];
+            if (i + 1 < group_tags.size()) {
                 os << ",";
             }
         }

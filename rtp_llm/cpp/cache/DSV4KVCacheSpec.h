@@ -36,6 +36,7 @@ struct DSV4KVSpec: public KVCacheSpec {
     KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
     uint32_t          entry_elems;        // bytes per entry (1024/584 KV, 256/132 Indexer)
     uint32_t          entries_per_block;  // entries per block (64 or 2)
+    uint32_t          compression_ratio = 1;
     DataType          store_dtype;        // TYPE_UINT8
 
     DSV4KVSpec() = default;
@@ -45,10 +46,12 @@ struct DSV4KVSpec: public KVCacheSpec {
                uint32_t          entry_elements,
                uint32_t          block_entries,
                DataType          storage_dtype,
-               uint32_t          seq_size_per_blk) {
+               uint32_t          seq_size_per_blk,
+               uint32_t          cache_compression_ratio = 1) {
         cache_type        = cache_region;
         entry_elems       = entry_elements;
         entries_per_block = block_entries;
+        compression_ratio  = cache_compression_ratio;
         store_dtype       = storage_dtype;
 
         // KVCacheSpec base fields
@@ -99,6 +102,7 @@ struct DSV4KVSpec: public KVCacheSpec {
         os << std::string(indent + 2, ' ') << "cache_type=" << static_cast<int>(cache_type) << "\n";
         os << std::string(indent + 2, ' ') << "entry_elems=" << entry_elems << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
+        os << std::string(indent + 2, ' ') << "compression_ratio=" << compression_ratio << "\n";
         os << std::string(indent, ' ') << "}\n";
         return os.str();
     }

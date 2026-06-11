@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -149,6 +150,7 @@ ModelConfig makeDsv4ProModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -173,6 +175,7 @@ ModelConfig makeDsv4FlashModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 

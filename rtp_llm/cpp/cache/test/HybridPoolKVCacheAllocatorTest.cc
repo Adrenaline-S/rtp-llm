@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
@@ -135,6 +136,7 @@ static ModelConfig makeTinyDSV4ModelConfig() {
     mc.attn_config.o_groups              = 2;
     mc.attn_config.o_lora_rank           = 16;
     mc.attn_config.layer_compress_ratios = {4, 128, 4, 128, 0};
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -160,6 +162,7 @@ static ModelConfig makeProModelConfig() {
     }
     ratios.push_back(0);
     mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
