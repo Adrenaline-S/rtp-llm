@@ -134,6 +134,7 @@ static ModelConfig makeHybridAttentionModelConfig(bool independent_pool) {
     mc.linear_attention_config.linear_value_head_dim  = 16;
     mc.linear_attention_config.linear_num_key_heads   = 2;
     mc.linear_attention_config.linear_num_value_heads = 2;
+    setHybridAttentionKvCacheSpecs(mc);
     return mc;
 }
 
@@ -508,6 +509,30 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
               std::vector<KVCacheRegionName>({KVCacheRegionName::DEFAULT, KVCacheRegionName::DEFAULT}));
 }
 
+TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs) {
+    auto mc = makeHybridAttentionModelConfig(true);
+    mc.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE,
+                                                        HybridAttentionType::SLIDING_WINDOW,
+                                                        HybridAttentionType::LINEAR,
+                                                        HybridAttentionType::SLIDING_WINDOW};
+    setHybridAttentionKvCacheSpecs(mc);
+
+    ParallelismConfig pc;
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, KVCacheConfig{}, false, 0);
+
+    ASSERT_EQ(config.groupNums(), 3);
+    EXPECT_EQ(config.group_types,
+              std::vector<CacheGroupType>({CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR}));
+    ASSERT_EQ(config.cache_specs.size(), 3u);
+    EXPECT_NE(config.cache_specs[0].get(), config.cache_specs[1].get());
+    EXPECT_EQ(config.global_layer_ids[0], std::vector<int>({0}));
+    EXPECT_EQ(config.global_layer_ids[1], std::vector<int>({1, 3}));
+    EXPECT_EQ(config.global_layer_ids[2], std::vector<int>({2}));
+    EXPECT_EQ(config.cache_specs[0]->layer_num, 1u);
+    EXPECT_EQ(config.cache_specs[1]->layer_num, 2u);
+    EXPECT_EQ(config.cache_specs[2]->layer_num, 1u);
+}
+
 TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {
     ParallelismConfig pc;
     auto              config =
@@ -516,6 +541,15 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsShar
     EXPECT_FALSE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_TRUE(config.group_block_nums.empty());
+}
+
+TEST(HybridConfigCreatorTest, HybridAttentionTypesMustCoverAllLayers) {
+    auto mc = makeHybridAttentionModelConfig(false);
+    mc.hybrid_attention_config.hybrid_attention_types.pop_back();
+
+    ParallelismConfig pc;
+    EXPECT_THROW((void)CacheConfigCreator::createBasicConfig(mc, pc, KVCacheConfig{}, false, 0),
+                 std::exception);
 }
 
 // ============================================================
@@ -771,13 +805,45 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksCanBeOverriddenByConfig) {
     }
 }
 
+TEST(CacheConfigTest, ModelSpecCloneKeepsExistingConfigStable) {
+    ModelConfig model_config;
+    model_config.num_layers                   = 2;
+    model_config.attn_config.kv_head_num      = 4;
+    model_config.attn_config.size_per_head    = 16;
+    model_config.attn_config.tokens_per_block = 8;
+    setDefaultKvCacheSpec(model_config);
+
+    ParallelismConfig pc_tp1;
+    pc_tp1.tp_size = 1;
+    auto config_tp1 = CacheConfigCreator::createBasicConfig(model_config, pc_tp1, KVCacheConfig{}, false, 0);
+    ASSERT_EQ(config_tp1.cache_specs.size(), 1u);
+    EXPECT_EQ(config_tp1.cache_specs[0]->local_head_num_kv, 4u);
+
+    ParallelismConfig pc_tp2;
+    pc_tp2.tp_size = 2;
+    auto config_tp2 = CacheConfigCreator::createBasicConfig(model_config, pc_tp2, KVCacheConfig{}, false, 0);
+    ASSERT_EQ(config_tp2.cache_specs.size(), 1u);
+    EXPECT_EQ(config_tp2.cache_specs[0]->local_head_num_kv, 2u);
+
+    EXPECT_EQ(config_tp1.cache_specs[0]->local_head_num_kv, 4u);
+    EXPECT_NE(config_tp1.cache_specs[0].get(), model_config.kv_cache_specs[0].get());
+    EXPECT_NE(config_tp2.cache_specs[0].get(), model_config.kv_cache_specs[0].get());
+    EXPECT_NE(config_tp1.cache_specs[0].get(), config_tp2.cache_specs[0].get());
+}
+
 TEST(CacheConfigTest, FinalizeBlockNumsIsNoopForSingleAndSharedHybridConfig) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 8;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 4;
 
     ParallelismConfig pc;
-    auto single_config = CacheConfigCreator::createBasicConfig(ModelConfig(), pc, KVCacheConfig{}, false, 0);
+    ModelConfig       single_model_config;
+    single_model_config.num_layers                   = 1;
+    single_model_config.attn_config.kv_head_num      = 1;
+    single_model_config.attn_config.size_per_head    = 1;
+    single_model_config.attn_config.tokens_per_block = 1;
+    setDefaultKvCacheSpec(single_model_config);
+    auto single_config = CacheConfigCreator::createBasicConfig(single_model_config, pc, KVCacheConfig{}, false, 0);
     single_config.finalizeBlockNums(123, runtime_config);
     EXPECT_TRUE(single_config.group_block_nums.empty());
     EXPECT_EQ(single_config.fixed_pool_reserve_bytes, 0u);

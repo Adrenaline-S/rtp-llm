@@ -95,6 +95,10 @@ struct DSV4KVSpec: public KVCacheSpec {
         return block_size_bytes() / 2;
     }
 
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<DSV4KVSpec>(*this);
+    }
+
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4KVSpec{\n";
@@ -178,6 +182,10 @@ struct DSV4StateSpec: public KVCacheSpec {
     }
     size_t v_block_size_bytes() const override {
         return block_size_bytes() / 2;
+    }
+
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<DSV4StateSpec>(*this);
     }
 
     std::string debugString(size_t indent = 0) const override {

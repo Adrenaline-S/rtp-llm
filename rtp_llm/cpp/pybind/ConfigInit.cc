@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
@@ -1573,6 +1574,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("seq_size_per_block", &KVCacheSpec::seq_size_per_block)
         .def_readwrite("type", &KVCacheSpec::type)
         .def_readwrite("dtype", &KVCacheSpec::dtype);
+
+    py::class_<MHAKVCacheSpec, KVCacheSpec, std::shared_ptr<MHAKVCacheSpec>>(m, "MHAKVCacheSpec")
+        .def(py::init<>())
+        .def_readwrite("size_per_head", &MHAKVCacheSpec::size_per_head);
+
+    py::class_<MLAKVCacheSpec, KVCacheSpec, std::shared_ptr<MLAKVCacheSpec>>(m, "MLAKVCacheSpec")
+        .def(py::init<>())
+        .def_readwrite("kv_lora_rank", &MLAKVCacheSpec::kv_lora_rank)
+        .def_readwrite("rope_head_dim", &MLAKVCacheSpec::rope_head_dim);
+
+    py::class_<LinearKVCacheSpec, KVCacheSpec, std::shared_ptr<LinearKVCacheSpec>>(m, "LinearKVCacheSpec")
+        .def(py::init<>())
+        .def_readwrite("local_num_k_heads", &LinearKVCacheSpec::local_num_k_heads)
+        .def_readwrite("local_num_v_heads", &LinearKVCacheSpec::local_num_v_heads)
+        .def_readwrite("head_k_dim", &LinearKVCacheSpec::head_k_dim)
+        .def_readwrite("head_v_dim", &LinearKVCacheSpec::head_v_dim)
+        .def_readwrite("conv_kernel_dim", &LinearKVCacheSpec::conv_kernel_dim)
+        .def_readwrite("ssm_state_dtype", &LinearKVCacheSpec::ssm_state_dtype)
+        .def_readwrite("conv_state_dtype", &LinearKVCacheSpec::conv_state_dtype);
 
     py::class_<DSV4KVSpec, KVCacheSpec, std::shared_ptr<DSV4KVSpec>>(m, "DSV4KVSpec")
         .def(py::init<>())

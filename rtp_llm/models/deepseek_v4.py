@@ -152,6 +152,25 @@ def _build_dsv4_kv_cache_specs(config: ModelConfig) -> List[KVCacheSpec]:
 
 
 def _refresh_dsv4_kv_cache_specs(config: ModelConfig) -> None:
+    expected_tags = [
+        "csa_kv",
+        "hca_kv",
+        "indexer_kv",
+        "indexer_state",
+        "csa_state",
+        "hca_state",
+        "swa_kv",
+    ]
+    seen_tags = [spec.tag for spec in config.kv_cache_specs]
+    if any(not tag for tag in seen_tags):
+        raise ValueError("DeepSeek-V4 kv_cache spec tag must not be empty")
+    if len(seen_tags) != len(set(seen_tags)):
+        raise ValueError(f"DeepSeek-V4 kv_cache spec tag duplicated: {seen_tags}")
+    if seen_tags != expected_tags:
+        raise ValueError(
+            f"DeepSeek-V4 kv_cache specs must be exactly {expected_tags}, got {seen_tags}"
+        )
+
     fp8_kv = config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
     head_dim = int(config.attn_config.size_per_head)
     indexer_head_dim = int(config.attn_config.indexer_head_dim)

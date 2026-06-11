@@ -127,6 +127,10 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
     }
 
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<MHAKVCacheSpec>(*this);
+    }
+
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";

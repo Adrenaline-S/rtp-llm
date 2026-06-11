@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <numeric>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
@@ -69,30 +70,89 @@ HybridPoolLayers splitHybridPoolLayers(const ModelConfig& model_config) {
     return layers;
 }
 
-KVCacheSpecPtr createFullAttentionSpec(const ModelConfig&       model_config,
-                                       const ParallelismConfig& parallelism_config,
-                                       rtp_llm::DataType        dtype,
-                                       uint32_t                 layer_num) {
-    KVCacheSpecPtr spec;
-    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        spec = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config);
-    } else {
-        spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
+KVCacheSpecPtr getHybridSpecByTag(const ModelConfig& model_config, const std::string& tag) {
+    KVCacheSpecPtr result;
+    for (const auto& spec : model_config.kv_cache_specs) {
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid-pool kv_cache_specs must not contain null specs");
+        RTP_LLM_CHECK_WITH_INFO(!spec->tag.empty(), "hybrid-pool kv_cache_specs must not contain empty tags");
+        if (spec->tag == tag) {
+            RTP_LLM_CHECK_WITH_INFO(result == nullptr, "duplicate hybrid-pool kv_cache spec tag=%s", tag.c_str());
+            result = spec;
+        }
     }
-    spec->dtype     = dtype;
-    spec->layer_num = layer_num;
-    return spec;
+    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "missing hybrid-pool kv_cache spec tag=%s", tag.c_str());
+    return result->clone();
 }
 
-KVCacheSpecPtr createLinearAttentionSpec(const ModelConfig&       model_config,
-                                         const ParallelismConfig& parallelism_config,
-                                         rtp_llm::DataType        dtype,
-                                         uint32_t                 layer_num) {
-    auto spec = std::make_shared<LinearKVCacheSpec>(
-        model_config.attn_config, parallelism_config, model_config.linear_attention_config);
-    spec->dtype     = dtype;
-    spec->layer_num = layer_num;
-    return spec;
+void prepareFullAttentionSpec(KVCacheSpecPtr            spec,
+                              const ModelConfig&       model_config,
+                              const ParallelismConfig& parallelism_config,
+                              rtp_llm::DataType        dtype,
+                              uint32_t                 layer_num) {
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(spec.get());
+        RTP_LLM_CHECK_WITH_INFO(mla_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadLatentAttention,
+                                "full kv_cache spec must be MLAKVCacheSpec for MLA model");
+        spec->local_head_num_kv = 1;
+        mla_spec->kv_lora_rank  = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
+        mla_spec->rope_head_dim = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+    } else {
+        auto* mha_spec = dynamic_cast<MHAKVCacheSpec*>(spec.get());
+        RTP_LLM_CHECK_WITH_INFO(mha_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadAttention,
+                                "full kv_cache spec must be MHAKVCacheSpec for MHA/GQA model");
+        spec->local_head_num_kv = static_cast<uint32_t>(
+            (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
+                model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
+                model_config.attn_config.kv_head_num
+                    / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
+        mha_spec->size_per_head = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+    }
+    spec->dtype              = dtype;
+    spec->layer_num          = layer_num;
+    spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+}
+
+void prepareLinearAttentionSpec(KVCacheSpecPtr            spec,
+                                const ModelConfig&       model_config,
+                                const ParallelismConfig& parallelism_config,
+                                rtp_llm::DataType        dtype,
+                                uint32_t                 layer_num) {
+    auto* linear_spec = dynamic_cast<LinearKVCacheSpec*>(spec.get());
+    RTP_LLM_CHECK_WITH_INFO(linear_spec != nullptr && spec->type == KVCacheSpecType::LinearAttention,
+                            "linear kv_cache spec must be LinearKVCacheSpec");
+    const auto& linear_config = model_config.linear_attention_config;
+    RTP_LLM_CHECK_WITH_INFO(linear_config.linear_key_head_dim > 0 && linear_config.linear_value_head_dim > 0,
+                            "invalid linear head dim");
+    RTP_LLM_CHECK_WITH_INFO(linear_config.linear_conv_kernel_dim > 1,
+                            "invalid linear_conv_kernel_dim=%d",
+                            linear_config.linear_conv_kernel_dim);
+    RTP_LLM_CHECK_WITH_INFO(linear_config.linear_num_key_heads > 0 && linear_config.linear_num_value_heads > 0,
+                            "invalid linear heads");
+    RTP_LLM_CHECK_WITH_INFO(linear_config.linear_key_head_dim == linear_config.linear_value_head_dim,
+                            "linear head dims must match (current impl): k=%d v=%d",
+                            linear_config.linear_key_head_dim,
+                            linear_config.linear_value_head_dim);
+    const int tp = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
+    linear_spec->local_num_k_heads = static_cast<uint32_t>(linear_config.linear_num_key_heads / tp);
+    linear_spec->local_num_v_heads = static_cast<uint32_t>(linear_config.linear_num_value_heads / tp);
+    RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads > 0 && linear_spec->local_num_v_heads > 0,
+                            "invalid local heads for linear attention: k=%d v=%d tp=%d",
+                            linear_spec->local_num_k_heads,
+                            linear_spec->local_num_v_heads,
+                            tp);
+    spec->local_head_num_kv = static_cast<uint32_t>(std::max(
+        1,
+        (linear_config.linear_num_value_heads > 1) ?
+            static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
+            static_cast<int>(linear_config.linear_num_value_heads)));
+    spec->dtype                   = dtype;
+    spec->layer_num               = layer_num;
+    spec->seq_size_per_block      = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    linear_spec->head_k_dim       = static_cast<uint32_t>(linear_config.linear_key_head_dim);
+    linear_spec->head_v_dim       = static_cast<uint32_t>(linear_config.linear_value_head_dim);
+    linear_spec->conv_kernel_dim  = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
+    linear_spec->ssm_state_dtype  = linear_config.ssm_state_dtype;
+    linear_spec->conv_state_dtype = linear_config.conv_state_dtype;
 }
 
 void appendGroup(CacheConfig&            config,
@@ -353,21 +413,28 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     config.group_region_names.clear();
     config.group_tags.clear();
 
-    appendGroup(config,
-                layers.full_layers,
-                CacheGroupType::FULL,
-                createFullAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.full_layers.size())));
-    appendGroup(config,
-                layers.swa_layers,
-                CacheGroupType::SWA,
-                createFullAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.swa_layers.size())));
-    appendGroup(config,
-                layers.linear_layers,
-                CacheGroupType::LINEAR,
-                createLinearAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size())));
+    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_specs.size() == 2,
+                            "hybrid-pool attention requires exactly full/linear kv_cache_specs, got %zu",
+                            model_config.kv_cache_specs.size());
+    auto full_spec   = getHybridSpecByTag(model_config, "full");
+    auto swa_spec    = full_spec->clone();
+    auto linear_spec = getHybridSpecByTag(model_config, "linear");
+    prepareFullAttentionSpec(full_spec,
+                             model_config,
+                             parallelism_config,
+                             dtype,
+                             static_cast<uint32_t>(layers.full_layers.size()));
+    prepareFullAttentionSpec(swa_spec,
+                             model_config,
+                             parallelism_config,
+                             dtype,
+                             static_cast<uint32_t>(layers.swa_layers.size()));
+    prepareLinearAttentionSpec(
+        linear_spec, model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size()));
+
+    appendGroup(config, layers.full_layers, CacheGroupType::FULL, full_spec);
+    appendGroup(config, layers.swa_layers, CacheGroupType::SWA, swa_spec);
+    appendGroup(config, layers.linear_layers, CacheGroupType::LINEAR, linear_spec);
 }
 
 void setupGroupCounts(CacheConfig& config) {

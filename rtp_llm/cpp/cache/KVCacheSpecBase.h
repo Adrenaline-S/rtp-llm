@@ -32,6 +32,9 @@ inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
     }
 }
 
+struct KVCacheSpec;
+using KVCacheSpecPtr = std::shared_ptr<KVCacheSpec>;
+
 struct KVCacheSpec {
     std::string tag;
     std::vector<int> layers;
@@ -60,6 +63,8 @@ struct KVCacheSpec {
         return 0;
     }
 
+    virtual KVCacheSpecPtr clone() const = 0;
+
     virtual std::string debugString(size_t indent = 0) const = 0;
 
 protected:
@@ -84,7 +89,5 @@ protected:
         return os.str();
     }
 };
-
-typedef std::shared_ptr<KVCacheSpec> KVCacheSpecPtr;
 
 }  // namespace rtp_llm

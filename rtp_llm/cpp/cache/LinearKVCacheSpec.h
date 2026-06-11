@@ -134,6 +134,10 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         return {0, k_block_bytes, k_block_bytes, v_block_bytes};
     }
 
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<LinearKVCacheSpec>(*this);
+    }
+
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";

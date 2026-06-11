@@ -4,7 +4,65 @@
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include <numeric>
+
 namespace rtp_llm {
+
+namespace {
+
+void validateDefaultSpecLayers(const KVCacheSpecPtr& spec, int64_t layer_num) {
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "single cache config requires non-null default kv_cache spec");
+    RTP_LLM_CHECK_WITH_INFO(spec->tag == "default", "single cache config requires tag=default, got=%s", spec->tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(!spec->tag.empty(), "single cache config got empty kv_cache spec tag");
+    RTP_LLM_CHECK_WITH_INFO(spec->layers.size() == static_cast<size_t>(layer_num),
+                            "default kv_cache spec layer count %zu != num_layers %ld",
+                            spec->layers.size(),
+                            layer_num);
+    for (int64_t i = 0; i < layer_num; ++i) {
+        RTP_LLM_CHECK_WITH_INFO(spec->layers[static_cast<size_t>(i)] == static_cast<int>(i),
+                                "default kv_cache spec must cover contiguous layer ids; index %ld got %d",
+                                i,
+                                spec->layers[static_cast<size_t>(i)]);
+    }
+}
+
+KVCacheSpecPtr getDefaultSpecFromModel(const ModelConfig&       model_config,
+                                       const ParallelismConfig& parallelism_config,
+                                       rtp_llm::DataType        dtype) {
+    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_specs.size() == 1,
+                            "single cache config requires exactly one default kv_cache spec, got %zu",
+                            model_config.kv_cache_specs.size());
+    auto spec = model_config.kv_cache_specs[0];
+    validateDefaultSpecLayers(spec, model_config.num_layers);
+    spec = spec->clone();
+
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(spec.get());
+        RTP_LLM_CHECK_WITH_INFO(mla_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadLatentAttention,
+                                "default kv_cache spec must be MLAKVCacheSpec for MLA model");
+        spec->local_head_num_kv  = 1;
+        spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+        spec->layer_num          = static_cast<uint32_t>(model_config.num_layers);
+        mla_spec->kv_lora_rank   = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
+        mla_spec->rope_head_dim  = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+    } else {
+        auto* mha_spec = dynamic_cast<MHAKVCacheSpec*>(spec.get());
+        RTP_LLM_CHECK_WITH_INFO(mha_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadAttention,
+                                "default kv_cache spec must be MHAKVCacheSpec for MHA/GQA model");
+        spec->local_head_num_kv = static_cast<uint32_t>(
+            (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
+                model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
+                model_config.attn_config.kv_head_num
+                    / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
+        spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+        spec->layer_num          = static_cast<uint32_t>(model_config.num_layers);
+        mha_spec->size_per_head  = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+    }
+    spec->dtype = dtype;
+    return spec;
+}
+
+}  // namespace
 
 CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
@@ -28,13 +86,7 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.dtype     = dtype;
     config.is_sparse = model_config.attn_config.is_sparse;
 
-    KVCacheSpecPtr spec;
-    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        spec = std::make_shared<MLAKVCacheSpec>(model_config.attn_config, parallelism_config);
-    } else {
-        spec = std::make_shared<MHAKVCacheSpec>(model_config.attn_config, parallelism_config);
-    }
-    spec->dtype = dtype;
+    KVCacheSpecPtr spec = getDefaultSpecFromModel(model_config, parallelism_config, dtype);
     config.cache_specs.push_back(spec);
     config.group_types.push_back(CacheGroupType::FULL);
 

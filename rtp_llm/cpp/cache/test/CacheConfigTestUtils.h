@@ -9,7 +9,11 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::test {
 
@@ -37,6 +41,72 @@ inline KVCacheSpecPtr makeDsv4Spec(const std::string&     tag,
     spec->layers             = layers;
     spec->dtype              = dtype;
     return spec;
+}
+
+inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
+    std::vector<int> layers;
+    layers.reserve(static_cast<size_t>(model_config.num_layers));
+    for (int i = 0; i < static_cast<int>(model_config.num_layers); ++i) {
+        layers.push_back(i);
+    }
+
+    KVCacheSpecPtr spec;
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        auto mla_spec           = std::make_shared<MLAKVCacheSpec>();
+        mla_spec->type          = KVCacheSpecType::MultiHeadLatentAttention;
+        mla_spec->kv_lora_rank  = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
+        mla_spec->rope_head_dim = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+        spec                    = mla_spec;
+    } else {
+        auto mha_spec            = std::make_shared<MHAKVCacheSpec>();
+        mha_spec->type           = KVCacheSpecType::MultiHeadAttention;
+        mha_spec->size_per_head  = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+        spec                     = mha_spec;
+    }
+    spec->tag                = "default";
+    spec->layers             = std::move(layers);
+    spec->layer_num          = static_cast<uint32_t>(model_config.num_layers);
+    spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    model_config.kv_cache_specs = {spec};
+}
+
+inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
+    std::vector<int> full_layers;
+    std::vector<int> linear_layers;
+    const auto&      types = model_config.hybrid_attention_config.hybrid_attention_types;
+    RTP_LLM_CHECK_WITH_INFO(types.size() == static_cast<size_t>(model_config.num_layers),
+                            "hybrid_attention_types size %zu != num_layers %ld",
+                            types.size(),
+                            model_config.num_layers);
+    for (int i = 0; i < static_cast<int>(model_config.num_layers); ++i) {
+        if (types[static_cast<size_t>(i)] == HybridAttentionType::LINEAR) {
+            linear_layers.push_back(i);
+        } else {
+            full_layers.push_back(i);
+        }
+    }
+
+    auto full_spec                = std::make_shared<MHAKVCacheSpec>();
+    full_spec->tag                = "full";
+    full_spec->type               = KVCacheSpecType::MultiHeadAttention;
+    full_spec->layers             = full_layers;
+    full_spec->layer_num          = static_cast<uint32_t>(full_layers.size());
+    full_spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    full_spec->size_per_head      = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+
+    const auto& linear_config           = model_config.linear_attention_config;
+    auto        linear_spec             = std::make_shared<LinearKVCacheSpec>();
+    linear_spec->tag                    = "linear";
+    linear_spec->type                   = KVCacheSpecType::LinearAttention;
+    linear_spec->layers                 = linear_layers;
+    linear_spec->layer_num              = static_cast<uint32_t>(linear_layers.size());
+    linear_spec->seq_size_per_block     = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    linear_spec->head_k_dim             = static_cast<uint32_t>(linear_config.linear_key_head_dim);
+    linear_spec->head_v_dim             = static_cast<uint32_t>(linear_config.linear_value_head_dim);
+    linear_spec->conv_kernel_dim        = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
+    linear_spec->ssm_state_dtype        = linear_config.ssm_state_dtype;
+    linear_spec->conv_state_dtype       = linear_config.conv_state_dtype;
+    model_config.kv_cache_specs = {full_spec, linear_spec};
 }
 
 inline void setDsv4KvCacheSpecs(ModelConfig& model_config) {
