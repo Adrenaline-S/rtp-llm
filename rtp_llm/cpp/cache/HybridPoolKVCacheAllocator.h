@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
@@ -20,14 +21,13 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
-    BlockAddrInfo convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const override;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const override;
-    std::vector<BlockInfo> convertIndexToBuffer(int               layer_id,
-                                                KVCacheRegionName region_name,
-                                                int               block_id,
-                                                int               partition_count,
-                                                int               partition_id) const override;
+    BlockAddrInfo          convertIndexToAddr(int layer_id, const std::string& tag, int block_id) const override;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const override;
+    std::vector<BlockInfo> convertIndexToBuffer(int                layer_id,
+                                                const std::string& tag,
+                                                int                block_id,
+                                                int                partition_count,
+                                                int                partition_id) const override;
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) override;
 
     CacheLayerLayout allLayerCacheBase() const override;
@@ -61,7 +61,7 @@ private:
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
 
-    int groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
+    int groupIdForLayerTag(int layer_id, const std::string& tag) const;
     int defaultGroupIdForLayer(int layer_id) const;
     size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
 

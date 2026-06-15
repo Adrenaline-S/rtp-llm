@@ -82,6 +82,52 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{1}));
 }
 
+TEST(KVCacheResourceTest, InitGroups_ResolvesBlocksByTag) {
+    KVCacheResource resource;
+    std::vector<std::map<std::string, int>> layer_tag_to_group = {
+        {{"main", 0}, {"state", 1}},
+        {{"main", 0}},
+    };
+    resource.initGroups(/*group_num=*/2,
+                        /*layer_num=*/2,
+                        /*layer_to_group_id=*/{-1, 0},
+                        /*kernel_blocks_per_kv_block=*/2,
+                        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::SWA},
+                        /*layer_tag_to_group_id=*/layer_tag_to_group);
+
+    resource.mutableBlockIds(0).assign(BlockIndicesType{3});
+    resource.mutableBlockIds(1).assign(BlockIndicesType{7});
+
+    ASSERT_EQ(resource.groupId(0, "main"), 0);
+    ASSERT_EQ(resource.groupId(0, "state"), 1);
+    ASSERT_EQ(resource.groupId(1, "main"), 0);
+    ASSERT_EQ(resource.groupId(0, "missing"), -1);
+
+    ASSERT_EQ(resource.blocks(0, "main"), (BlockIndicesType{3}));
+    ASSERT_EQ(resource.blocks(0, "state"), (BlockIndicesType{7}));
+    ASSERT_EQ(resource.kernelBlocks(0, "main"), (BlockIndicesType{6, 7}));
+    ASSERT_EQ(resource.kernelBlocks(0, "state"), (BlockIndicesType{7}));
+}
+
+TEST(KVCacheResourceTest, BatchResource_ForwardsTagLookup) {
+    BatchKVCacheResource batch;
+    batch.resetBatchSize(1);
+    batch.initGroups(/*group_nums=*/2,
+                     /*layer_num=*/1,
+                     /*layer_to_group_id=*/{-1},
+                     /*kernel_blocks_per_kv_block=*/1,
+                     /*group_types=*/{CacheGroupType::FULL, CacheGroupType::SWA},
+                     /*layer_tag_to_group_id=*/{{{"kv", 0}, {"state", 1}}});
+
+    batch.mutableBlockIds(/*batch_id=*/0, /*group_id=*/0).assign(BlockIndicesType{11});
+    batch.mutableBlockIds(/*batch_id=*/0, /*group_id=*/1).assign(BlockIndicesType{22});
+
+    ASSERT_EQ(batch.groupId(/*batch_id=*/0, /*layer_id=*/0, "kv"), 0);
+    ASSERT_EQ(batch.groupId(/*batch_id=*/0, /*layer_id=*/0, "state"), 1);
+    ASSERT_EQ(batch.blocks(/*batch_id=*/0, /*layer_id=*/0, "kv"), (BlockIndicesType{11}));
+    ASSERT_EQ(batch.blocks(/*batch_id=*/0, /*layer_id=*/0, "state"), (BlockIndicesType{22}));
+}
+
 TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
     KVCacheResource resource;
     resource.setCacheKeys(CacheKeysType{10, 20, 30});
@@ -123,6 +169,34 @@ TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
     config.seq_size_per_block        = 8;
     config.kernel_seq_size_per_block = 2;
     ASSERT_EQ(config.kernelBlocksPerKvBlock(), 4u);
+}
+
+TEST(CacheConfigTest, FromGroupedSpecs_MultiTagLayerHasNoSingleEntryFastPath) {
+    auto make_spec = [](const std::string& tag) {
+        auto spec                = std::make_shared<MHAKVCacheSpec>();
+        spec->tag                = tag;
+        spec->type               = KVCacheSpecType::MultiHeadAttention;
+        spec->dtype              = rtp_llm::TYPE_FP16;
+        spec->local_head_num_kv  = 1;
+        spec->seq_size_per_block = 1;
+        spec->size_per_head      = 8;
+        return spec;
+    };
+
+    CacheConfig config;
+    config.layer_num     = 2;
+    config.layer_all_num = 2;
+    config.fromGroupedSpecs(/*specs=*/{make_spec("kv"), make_spec("state")},
+                            /*layers_by_group=*/{{0, 1}, {0}},
+                            /*types=*/{CacheGroupType::FULL, CacheGroupType::SWA},
+                            /*tags=*/{"kv", "state"});
+
+    ASSERT_EQ(config.groupIdForLayerTag(0, "kv"), 0);
+    ASSERT_EQ(config.groupIdForLayerTag(0, "state"), 1);
+    ASSERT_EQ(config.groupIdForLayerTag(1, "kv"), 0);
+    ASSERT_EQ(config.groupIdForLayerTag(1, "state"), -1);
+    ASSERT_GE(config.layer_to_group_id[0], 0);
+    ASSERT_EQ(config.layer_to_group_id[1], 0);
 }
 
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {

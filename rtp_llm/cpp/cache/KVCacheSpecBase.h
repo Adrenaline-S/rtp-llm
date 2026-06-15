@@ -41,6 +41,9 @@ struct KVCacheSpec {
     std::vector<int> layers;
     uint32_t local_head_num_kv = 1;
     uint32_t seq_size_per_block = 1;
+    bool     is_state_cache = false;
+    bool     is_fixed_cache = false;
+    bool     skip_prefix_reuse = false;
 
     KVCacheSpecType   type = KVCacheSpecType::MultiHeadAttention;
     rtp_llm::DataType dtype = rtp_llm::DataType::TYPE_INVALID;
@@ -80,6 +83,9 @@ protected:
         os << indent1 << "layers.size=" << layers.size() << "\n";
         os << indent1 << "local_head_num_kv=" << local_head_num_kv << "\n";
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";
+        os << indent1 << "is_state_cache=" << (is_state_cache ? "true" : "false") << "\n";
+        os << indent1 << "is_fixed_cache=" << (is_fixed_cache ? "true" : "false") << "\n";
+        os << indent1 << "skip_prefix_reuse=" << (skip_prefix_reuse ? "true" : "false") << "\n";
         os << indent1 << "block_size=" << block_size() << "\n";
         os << indent1 << "k_block_size=" << k_block_size() << "\n";
         os << indent1 << "v_block_size=" << v_block_size() << "\n";

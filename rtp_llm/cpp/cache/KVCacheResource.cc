@@ -126,10 +126,10 @@ void KVCacheResource::initGroups(int                                  group_num,
                                  const std::vector<int>&              layer_to_group_id,
                                  size_t                               kernel_blocks_per_kv_block,
                                  const std::vector<CacheGroupType>&   group_types,
-                                 const std::vector<std::vector<int>>& layer_region_to_group_id) {
+                                 const std::vector<std::map<std::string, int>>& layer_tag_to_group_id) {
     group_block_ids.clear();
     layer_block_ids.clear();
-    layer_region_block_ids.clear();
+    layer_tag_block_ids.clear();
 
     if (!group_types.empty()) {
         RTP_LLM_CHECK_WITH_INFO(group_types.size() >= static_cast<size_t>(group_num),
@@ -154,6 +154,10 @@ void KVCacheResource::initGroups(int                                  group_num,
         layer_block_ids.resize(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             int gid = layer_to_group_id.empty() ? 0 : layer_to_group_id[i];
+            if (gid < 0) {
+                layer_block_ids[i] = nullptr;
+                continue;
+            }
             RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
                                     "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",
                                     gid,
@@ -162,36 +166,29 @@ void KVCacheResource::initGroups(int                                  group_num,
             layer_block_ids[i] = group_block_ids[gid];
         }
 
-        const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-        layer_region_block_ids.resize(static_cast<size_t>(layer_num));
+        layer_tag_block_ids.resize(static_cast<size_t>(layer_num));
         for (int layer = 0; layer < layer_num; ++layer) {
-            auto& attn_blocks = layer_region_block_ids[static_cast<size_t>(layer)];
-            attn_blocks.assign(region_name_count, nullptr);
-
-            if (!layer_region_to_group_id.empty()) {
-                RTP_LLM_CHECK_WITH_INFO(layer_region_to_group_id.size() >= static_cast<size_t>(layer_num),
-                                        "KVCacheResource::initGroups: layer_region_to_group_id size %zu < layer_num %d",
-                                        layer_region_to_group_id.size(),
+            auto& tag_blocks = layer_tag_block_ids[static_cast<size_t>(layer)];
+            if (!layer_tag_to_group_id.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(layer_tag_to_group_id.size() >= static_cast<size_t>(layer_num),
+                                        "KVCacheResource::initGroups: layer_tag_to_group_id size %zu < layer_num %d",
+                                        layer_tag_to_group_id.size(),
                                         layer_num);
-                const auto&  dense_groups = layer_region_to_group_id[static_cast<size_t>(layer)];
-                const size_t n            = std::min(region_name_count, dense_groups.size());
-                for (size_t attn = 0; attn < n; ++attn) {
-                    const int gid = dense_groups[attn];
-                    if (gid < 0) {
-                        continue;
-                    }
+                for (const auto& [tag, gid] : layer_tag_to_group_id[static_cast<size_t>(layer)]) {
+                    RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "KVCacheResource::initGroups: empty tag for layer %d", layer);
                     RTP_LLM_CHECK_WITH_INFO(
-                        gid < group_num,
-                        "KVCacheResource::initGroups: invalid group id %d for layer %d region_name %zu (group_num=%d)",
+                        gid >= 0 && gid < group_num,
+                        "KVCacheResource::initGroups: invalid group id %d for layer %d tag %s (group_num=%d)",
                         gid,
                         layer,
-                        attn,
+                        tag.c_str(),
                         group_num);
-                    attn_blocks[attn] = group_block_ids[static_cast<size_t>(gid)];
+                    tag_blocks[tag] = group_block_ids[static_cast<size_t>(gid)];
                 }
             } else {
-                attn_blocks[static_cast<size_t>(KVCacheRegionName::DEFAULT)] =
-                    layer_block_ids[static_cast<size_t>(layer)];
+                if (layer_block_ids[static_cast<size_t>(layer)] != nullptr) {
+                    tag_blocks["default"] = layer_block_ids[static_cast<size_t>(layer)];
+                }
             }
         }
     }
@@ -213,8 +210,8 @@ const BlockIndicesType& KVCacheResource::blocks(int group_id) const {
     return group_block_ids[group_id]->blocks();
 }
 
-const BlockIndicesType& KVCacheResource::blocks(int layer_id, KVCacheRegionName region_name) const {
-    return mutableBlockIds(layer_id, region_name).blocks();
+const BlockIndicesType& KVCacheResource::blocks(int layer_id, const std::string& tag) const {
+    return mutableBlockIds(layer_id, tag).blocks();
 }
 
 const BlockIndicesType& KVCacheResource::kernelBlocks(int group_id) const {
@@ -222,8 +219,8 @@ const BlockIndicesType& KVCacheResource::kernelBlocks(int group_id) const {
     return group_block_ids[group_id]->kernelBlocks();
 }
 
-const BlockIndicesType& KVCacheResource::kernelBlocks(int layer_id, KVCacheRegionName region_name) const {
-    return mutableBlockIds(layer_id, region_name).kernelBlocks();
+const BlockIndicesType& KVCacheResource::kernelBlocks(int layer_id, const std::string& tag) const {
+    return mutableBlockIds(layer_id, tag).kernelBlocks();
 }
 
 BlockIds& KVCacheResource::mutableBlockIds(int group_id) const {
@@ -231,14 +228,16 @@ BlockIds& KVCacheResource::mutableBlockIds(int group_id) const {
     return *group_block_ids[group_id];
 }
 
-BlockIds& KVCacheResource::mutableBlockIds(int layer_id, KVCacheRegionName region_name) const {
-    const auto attn_id = static_cast<size_t>(region_name);
-    RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_region_block_ids.size());
-    RTP_LLM_CHECK(attn_id < layer_region_block_ids[static_cast<size_t>(layer_id)].size());
-    auto block_ids = layer_region_block_ids[static_cast<size_t>(layer_id)][attn_id];
-    RTP_LLM_CHECK_WITH_INFO(
-        block_ids != nullptr, "KVCacheResource: missing block ids for layer %d region_name %zu", layer_id, attn_id);
-    return *block_ids;
+BlockIds& KVCacheResource::mutableBlockIds(int layer_id, const std::string& tag) const {
+    RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "KVCacheResource: empty tag for layer %d", layer_id);
+    RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_tag_block_ids.size());
+    const auto& tag_blocks = layer_tag_block_ids[static_cast<size_t>(layer_id)];
+    const auto  it         = tag_blocks.find(tag);
+    RTP_LLM_CHECK_WITH_INFO(it != tag_blocks.end() && it->second != nullptr,
+                            "KVCacheResource: missing block ids for layer %d tag %s",
+                            layer_id,
+                            tag.c_str());
+    return *it->second;
 }
 
 int KVCacheResource::groupNums() const {
@@ -257,20 +256,21 @@ const LayerBlockIds& KVCacheResource::layerBlocks() const {
     return layer_block_ids;
 }
 
-const LayerAttnBlockIds& KVCacheResource::layerAttnBlocks() const {
-    return layer_region_block_ids;
+const LayerTagBlockIds& KVCacheResource::layerTagBlocks() const {
+    return layer_tag_block_ids;
 }
 
-int KVCacheResource::groupId(int layer_id, KVCacheRegionName region_name) const {
-    const auto attn_id = static_cast<size_t>(region_name);
-    RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_region_block_ids.size());
-    RTP_LLM_CHECK(attn_id < layer_region_block_ids[static_cast<size_t>(layer_id)].size());
-    const auto& block_ids = layer_region_block_ids[static_cast<size_t>(layer_id)][attn_id];
-    if (!block_ids) {
+int KVCacheResource::groupId(int layer_id, const std::string& tag) const {
+    if (tag.empty() || layer_id < 0 || static_cast<size_t>(layer_id) >= layer_tag_block_ids.size()) {
+        return -1;
+    }
+    const auto& tag_blocks = layer_tag_block_ids[static_cast<size_t>(layer_id)];
+    const auto  it         = tag_blocks.find(tag);
+    if (it == tag_blocks.end() || !it->second) {
         return -1;
     }
     for (size_t gid = 0; gid < group_block_ids.size(); ++gid) {
-        if (group_block_ids[gid] == block_ids) {
+        if (group_block_ids[gid] == it->second) {
             return static_cast<int>(gid);
         }
     }

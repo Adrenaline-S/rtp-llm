@@ -162,7 +162,6 @@ void appendGroup(CacheConfig&            config,
                  const std::vector<int>& layer_ids,
                  CacheGroupType          group_type,
                  KVCacheSpecPtr          spec,
-                 KVCacheRegionName       region_name = KVCacheRegionName::DEFAULT,
                  std::string             tag = "") {
     if (layer_ids.empty()) {
         return;
@@ -174,8 +173,10 @@ void appendGroup(CacheConfig&            config,
     config.layer_ids.push_back(layer_ids);
     config.cache_specs.push_back(spec);
     config.group_types.push_back(group_type);
-    config.group_region_names.push_back(region_name);
     config.group_tags.push_back(std::move(tag));
+    config.group_is_state_cache.push_back(spec != nullptr && spec->is_state_cache);
+    config.group_is_fixed_cache.push_back(spec != nullptr && spec->is_fixed_cache);
+    config.group_skip_prefix_reuse.push_back(spec != nullptr && spec->skip_prefix_reuse);
 }
 
 size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id) {
@@ -219,9 +220,7 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         config.group_kv_block_stride_bytes[gid] = kv_stride;
         config.group_kv_scale_stride_bytes[gid] = scale_stride;
         config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
-        const auto region =
-            gid < config.group_region_names.size() ? config.group_region_names[gid] : KVCacheRegionName::DEFAULT;
-        const bool is_state = isStateRegion(region);
+        const bool is_state = gid < config.group_is_state_cache.size() && config.group_is_state_cache[gid];
         const bool is_swa   = gid < config.group_types.size() && config.group_types[gid] == CacheGroupType::SWA;
         if (is_state) {
             state_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
@@ -252,7 +251,7 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.state_block_size_bytes  = state_kv_block_bytes + state_scale_block_bytes;
     const size_t paged_block_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     if (paged_block_bytes == 0) {
-        RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,
+        RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_tagged_cache_groups,
                                 "hybrid-pool paged groups produced zero block bytes");
         config.kv_block_size_bytes = 1;
         config.kv_scale_size_bytes = 0;
@@ -273,8 +272,10 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     config.global_layer_ids.clear();
     config.layer_ids.clear();
     config.group_types.clear();
-    config.group_region_names.clear();
     config.group_tags.clear();
+    config.group_is_state_cache.clear();
+    config.group_is_fixed_cache.clear();
+    config.group_skip_prefix_reuse.clear();
 
     auto full_spec   = getHybridSpecByTag(model_config, "full");
     auto swa_spec    = full_spec->clone();
@@ -341,9 +342,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     auto specs          = config.cache_specs;
     auto layers_by_group = config.layer_ids;
     auto types          = config.group_types;
-    auto regions        = config.group_region_names;
     auto tags           = config.group_tags;
-    config.fromGroupedSpecs(specs, layers_by_group, types, regions, tags);
+    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
     setupIndependentPoolSizes(config, is_mtp);
     if (is_dsv4_config) {
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;

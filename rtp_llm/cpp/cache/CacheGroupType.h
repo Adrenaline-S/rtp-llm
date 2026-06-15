@@ -14,32 +14,4 @@ enum class CacheGroupType : int8_t {
     SWA    = 2,
 };
 
-// Cache identity for models where one logical layer owns multiple cache entries.
-// CacheGroupType describes allocation/reuse policy, while KVCacheRegionName
-// describes which cache object a layer wants to access.
-enum class KVCacheRegionName : int8_t {
-    DEFAULT       = 0,
-    CSA_KV        = 1,
-    HCA_KV        = 2,
-    INDEXER_KV    = 3,
-    INDEXER_STATE = 4,
-    CSA_STATE     = 5,
-    HCA_STATE     = 6,
-    SWA_KV        = 7,
-    REGION_COUNT  = 8,
-};
-
-inline bool isStateRegion(KVCacheRegionName region_name) {
-    return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
-           || region_name == KVCacheRegionName::HCA_STATE;
-}
-
-inline bool isDsv4FixedRegion(KVCacheRegionName region_name) {
-    return isStateRegion(region_name) || region_name == KVCacheRegionName::SWA_KV;
-}
-
-inline bool skipReuseCacheRegion(KVCacheRegionName region_name) {
-    return region_name == KVCacheRegionName::HCA_STATE;
-}
-
 }  // namespace rtp_llm

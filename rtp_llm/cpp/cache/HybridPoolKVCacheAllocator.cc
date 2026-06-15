@@ -71,8 +71,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
             dsv4_paged_pool_group_blocks[paged_idx] = pool_config.block_num;
             dsv4_paged_pool_total_bytes += pool_config.total_size_bytes;
         }
-        if (static_cast<size_t>(gid) < config_.group_region_names.size()
-            && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)])) {
+        if (static_cast<size_t>(gid) < config_.group_is_fixed_cache.size()
+            && config_.group_is_fixed_cache[static_cast<size_t>(gid)]) {
             has_dsv4_fixed_pool = true;
             dsv4_fixed_pool_total_bytes += pool_config.total_size_bytes;
             if (gid >= 3 && gid <= 6) {
@@ -130,8 +130,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
         const auto& pool_config            = group_pool_configs[static_cast<size_t>(gid)];
         const bool  use_pinned_cpu_backing = allocation_type_ == AllocationType::DEVICE
                                             && config_.fixed_pool_uses_pinned_cpu
-                                            && static_cast<size_t>(gid) < config_.group_region_names.size()
-                                            && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+                                            && static_cast<size_t>(gid) < config_.group_is_fixed_cache.size()
+                                            && config_.group_is_fixed_cache[static_cast<size_t>(gid)];
         auto group_pool = std::make_shared<BlockPool>(pool_config,
                                                       allocation_type_,
                                                       use_pinned_cpu_backing,
@@ -183,24 +183,18 @@ int HybridPoolKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
     return gid;
 }
 
-int HybridPoolKVCacheAllocator::groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const {
-    const size_t attn_id = static_cast<size_t>(region_name);
-    if (layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_region_to_group_id.size()) {
-        const auto& dense = config_.layer_region_to_group_id[static_cast<size_t>(layer_id)];
-        if (attn_id < dense.size() && dense[attn_id] >= 0) {
-            const int gid = dense[attn_id];
-            RTP_LLM_CHECK_WITH_INFO(gid < static_cast<int>(kv_cache_groups_.size()),
-                                    "invalid group id %d for layer %d region %zu",
-                                    gid,
-                                    layer_id,
-                                    attn_id);
-            return gid;
-        }
-    }
-    if (region_name == KVCacheRegionName::DEFAULT) {
-        return defaultGroupIdForLayer(layer_id);
-    }
-    RTP_LLM_FAIL("missing group mapping for layer_id=%d region=%zu", layer_id, attn_id);
+int HybridPoolKVCacheAllocator::groupIdForLayerTag(int layer_id, const std::string& tag) const {
+    const int gid = config_.groupIdForLayerTag(layer_id, tag);
+    RTP_LLM_CHECK_WITH_INFO(gid >= 0,
+                            "missing group mapping for layer_id=%d tag=%s",
+                            layer_id,
+                            tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(gid < static_cast<int>(kv_cache_groups_.size()),
+                            "invalid group id %d for layer %d tag %s",
+                            gid,
+                            layer_id,
+                            tag.c_str());
+    return gid;
 }
 
 void HybridPoolKVCacheAllocator::referenceBlocksInGroup(int                     gid,
@@ -225,32 +219,25 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
     layout.layer_to_groups          = config_.layer_to_group_id;
     layout.layer_to_group_ids       = config_.layer_to_group_ids;
-    layout.layer_region_to_group_id = config_.layer_region_to_group_id;
+    layout.layer_tag_to_group_id    = config_.layer_tag_to_group_id;
     layout.group_types              = config_.group_types;
-    layout.group_region_names       = config_.group_region_names;
+    layout.group_tags               = config_.group_tags;
+    layout.group_is_state_cache     = config_.group_is_state_cache;
+    layout.group_is_fixed_cache     = config_.group_is_fixed_cache;
+    layout.group_skip_prefix_reuse  = config_.group_skip_prefix_reuse;
     layout.group_seq_size_per_block = config_.group_seq_size_per_block;
     layout.layer_group_types        = config_.layer_group_types;
 
-    const bool has_typed_mapping = !config_.layer_region_to_group_id.empty();
-    if (has_typed_mapping) {
-        RTP_LLM_CHECK_WITH_INFO(config_.group_region_names.size() == kv_cache_groups_.size(),
-                                "group_region_names size %zu != group num %zu for typed layer-region mapping",
-                                config_.group_region_names.size(),
-                                kv_cache_groups_.size());
-    }
-
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
-    const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-    layout.layers_to_kv_buffer_ptrs_by_attn.resize(config_.layer_all_num);
-    layout.layers_to_scale_buffer_ptrs_by_attn.resize(config_.layer_all_num);
-    for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
-        layout.layers_to_kv_buffer_ptrs_by_attn[layer_id].resize(region_name_count);
-        layout.layers_to_scale_buffer_ptrs_by_attn[layer_id].resize(region_name_count);
-    }
+    layout.layers_to_kv_buffer_ptrs_by_tag.resize(config_.layer_all_num);
+    layout.layers_to_scale_buffer_ptrs_by_tag.resize(config_.layer_all_num);
 
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
-        const int  gid           = defaultGroupIdForLayer(static_cast<int>(layer_id));
+        if (layer_id >= config_.layer_to_group_id.size() || config_.layer_to_group_id[layer_id] < 0) {
+            continue;
+        }
+        const int  gid           = config_.layer_to_group_id[layer_id];
         const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
         const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
         auto       it            = layer_tensors.find(static_cast<int>(layer_id));
@@ -266,26 +253,25 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
         const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
-        const auto region_name   = static_cast<size_t>(gid < static_cast<int>(config_.group_region_names.size()) ?
-                                                         config_.group_region_names[static_cast<size_t>(gid)] :
-                                                         KVCacheRegionName::DEFAULT);
-        RTP_LLM_CHECK_WITH_INFO(
-            region_name < region_name_count, "group %d has invalid region id %zu", gid, region_name);
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(gid) < config_.group_tags.size(),
+                                "group %d missing semantic cache tag",
+                                gid);
+        const auto& tag = config_.group_tags[static_cast<size_t>(gid)];
         for (const auto& [layer_id, tensor] : layer_tensors) {
             RTP_LLM_CHECK_WITH_INFO(
-                layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layers_to_kv_buffer_ptrs_by_attn.size(),
-                "layer_id %d out of typed kv layout range %zu",
+                layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layers_to_kv_buffer_ptrs_by_tag.size(),
+                "layer_id %d out of tagged kv layout range %zu",
                 layer_id,
-                layout.layers_to_kv_buffer_ptrs_by_attn.size());
-            layout.layers_to_kv_buffer_ptrs_by_attn[static_cast<size_t>(layer_id)][region_name] = tensor;
+                layout.layers_to_kv_buffer_ptrs_by_tag.size());
+            layout.layers_to_kv_buffer_ptrs_by_tag[static_cast<size_t>(layer_id)][tag] = tensor;
         }
         for (const auto& [layer_id, tensor] : scale_tensors) {
             RTP_LLM_CHECK_WITH_INFO(
-                layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layers_to_scale_buffer_ptrs_by_attn.size(),
-                "layer_id %d out of typed scale layout range %zu",
+                layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layers_to_scale_buffer_ptrs_by_tag.size(),
+                "layer_id %d out of tagged scale layout range %zu",
                 layer_id,
-                layout.layers_to_scale_buffer_ptrs_by_attn.size());
-            layout.layers_to_scale_buffer_ptrs_by_attn[static_cast<size_t>(layer_id)][region_name] = tensor;
+                layout.layers_to_scale_buffer_ptrs_by_tag.size());
+            layout.layers_to_scale_buffer_ptrs_by_tag[static_cast<size_t>(layer_id)][tag] = tensor;
         }
     }
     return layout;
@@ -311,20 +297,20 @@ std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(int laye
 }
 
 BlockAddrInfo
-HybridPoolKVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const {
-    const int gid = groupIdForLayerRegion(layer_id, region_name);
+HybridPoolKVCacheAllocator::convertIndexToAddr(int layer_id, const std::string& tag, int block_id) const {
+    const int gid = groupIdForLayerTag(layer_id, tag);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo>
-HybridPoolKVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const {
-    const int gid = groupIdForLayerRegion(layer_id, region_name);
+HybridPoolKVCacheAllocator::convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const {
+    const int gid = groupIdForLayerTag(layer_id, tag);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(
-    int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const {
-    const int gid = groupIdForLayerRegion(layer_id, region_name);
+    int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
+    const int gid = groupIdForLayerTag(layer_id, tag);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
 }
@@ -442,7 +428,7 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
                                config_.layer_to_group_id,
                                config_.kernelBlocksPerKvBlock(),
                                config_.group_types,
-                               config_.layer_region_to_group_id);
+                               config_.layer_tag_to_group_id);
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {
@@ -668,9 +654,7 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
 
     size_t total_reservable_available_blocks = 0;
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        const auto region =
-            gid < config_.group_region_names.size() ? config_.group_region_names[gid] : KVCacheRegionName::DEFAULT;
-        if (isDsv4FixedRegion(region)) {
+        if (gid < config_.group_is_fixed_cache.size() && config_.group_is_fixed_cache[gid]) {
             continue;
         }
         total_reservable_available_blocks += group_block_pools_[gid]->availableBlocksNum();
@@ -690,10 +674,9 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
             continue;
         }
         const size_t available_blocks     = group_block_pools_[static_cast<size_t>(gid)]->availableBlocksNum();
-        const auto   region               = static_cast<size_t>(gid) < config_.group_region_names.size() ?
-                                                config_.group_region_names[static_cast<size_t>(gid)] :
-                                                KVCacheRegionName::DEFAULT;
-        const size_t group_reserve_blocks = isDsv4FixedRegion(region) || total_reservable_available_blocks == 0 ?
+        const bool   is_fixed_group       = static_cast<size_t>(gid) < config_.group_is_fixed_cache.size()
+                                      && config_.group_is_fixed_cache[static_cast<size_t>(gid)];
+        const size_t group_reserve_blocks = is_fixed_group || total_reservable_available_blocks == 0 ?
                                                 0 :
                                                 reserve_blocks * available_blocks / total_reservable_available_blocks;
         if (available_blocks < static_cast<size_t>(need_blocks) + group_reserve_blocks) {

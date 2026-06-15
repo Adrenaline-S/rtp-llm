@@ -98,7 +98,16 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     const auto       layer_tensors = block_pool_->allLayerCacheBase();
     const auto       scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    layout.layer_to_groups = layer_to_group_id_;
+    layout.layer_to_groups          = layer_to_group_id_;
+    layout.layer_to_group_ids       = config_.layer_to_group_ids;
+    layout.layer_tag_to_group_id    = config_.layer_tag_to_group_id;
+    layout.group_types              = config_.group_types;
+    layout.group_tags               = config_.group_tags;
+    layout.group_is_state_cache     = config_.group_is_state_cache;
+    layout.group_is_fixed_cache     = config_.group_is_fixed_cache;
+    layout.group_skip_prefix_reuse  = config_.group_skip_prefix_reuse;
+    layout.group_seq_size_per_block = config_.group_seq_size_per_block;
+    layout.layer_group_types        = config_.layer_group_types;
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
 

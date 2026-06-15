@@ -133,8 +133,8 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
 }
 
 static bool isHcaStateGroup(const CacheConfig& config, int gid) {
-    return gid >= 0 && static_cast<size_t>(gid) < config.group_region_names.size()
-           && config.group_region_names[static_cast<size_t>(gid)] == KVCacheRegionName::HCA_STATE;
+    return gid >= 0 && static_cast<size_t>(gid) < config.group_tags.size()
+           && config.group_tags[static_cast<size_t>(gid)] == DSV4_TAG_HCA_STATE;
 }
 
 static int dsv4ActiveTailBlocks(const CacheConfig& config, int gid) {
@@ -198,7 +198,7 @@ static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) 
                     config.layer_to_group_id,
                     config.kernelBlocksPerKvBlock(),
                     config.group_types,
-                    config.layer_region_to_group_id);
+                    config.layer_tag_to_group_id);
     return res;
 }
 
@@ -214,13 +214,13 @@ static CompleteTokenIdsPtr makeDSV4CompleteTokenIds(int initial_seq_len, int max
     return complete_token_ids;
 }
 
-static void writeDsv4RegionPattern(const std::shared_ptr<KVCacheManager>& manager,
-                                   int                                    block_id,
-                                   int                                    layer_id,
-                                   KVCacheRegionName                      region_name,
-                                   size_t                                 bytes,
-                                   uint8_t                                pattern) {
-    auto addr_info = manager->convertIndexToAddr(block_id, layer_id, region_name);
+static void writeDsv4TagPattern(const std::shared_ptr<KVCacheManager>& manager,
+                                int                                    block_id,
+                                int                                    layer_id,
+                                std::string                            cache_tag,
+                                size_t                                 bytes,
+                                uint8_t                                pattern) {
+    auto addr_info = manager->convertIndexToAddr(block_id, layer_id, cache_tag);
     ASSERT_NE(addr_info.kv_addr, nullptr);
 
     auto dst =
@@ -230,13 +230,13 @@ static void writeDsv4RegionPattern(const std::shared_ptr<KVCacheManager>& manage
     runtimeSyncAndCheck();
 }
 
-static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& manager,
-                                      int                                    block_id,
-                                      int                                    layer_id,
-                                      KVCacheRegionName                      region_name,
-                                      size_t                                 bytes,
-                                      uint8_t                                expected) {
-    auto addr_info = manager->convertIndexToAddr(block_id, layer_id, region_name);
+static void assertDsv4TagPatternEq(const std::shared_ptr<KVCacheManager>& manager,
+                                   int                                    block_id,
+                                   int                                    layer_id,
+                                   std::string                            cache_tag,
+                                   size_t                                 bytes,
+                                   uint8_t                                expected) {
+    auto addr_info = manager->convertIndexToAddr(block_id, layer_id, cache_tag);
     ASSERT_NE(addr_info.kv_addr, nullptr);
 
     auto dev_t =
@@ -245,7 +245,7 @@ static void assertDsv4RegionPatternEq(const std::shared_ptr<KVCacheManager>& man
     const auto* ptr    = host_t.data_ptr<uint8_t>();
     for (size_t i = 0; i < bytes; ++i) {
         ASSERT_EQ(ptr[i], expected) << "mismatch at byte " << i << " layer=" << layer_id << " block=" << block_id
-                                    << " region=" << static_cast<int>(region_name);
+                                    << " tag=" << cache_tag;
     }
 }
 
@@ -284,16 +284,16 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsFixedBackingFollowsMemorySwitch) 
 
         auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
         ASSERT_NE(allocator, nullptr);
-        ASSERT_EQ(allocator->groupBlockPools().size(), config.group_region_names.size());
+        ASSERT_EQ(allocator->groupBlockPools().size(), config.group_tags.size());
 
         for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
-            const auto region_name = config.group_region_names[gid];
+            const auto cache_tag = config.group_tags[gid];
             const auto expected =
-                (fixed_pool_use_memory && isDsv4FixedRegion(region_name)) ? MemoryType::MEMORY_CPU_PINNED :
+                (fixed_pool_use_memory && config.group_is_fixed_cache[gid]) ? MemoryType::MEMORY_CPU_PINNED :
                                                                              MemoryType::MEMORY_GPU;
             EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), expected)
                 << "role=" << static_cast<int>(role_type) << " gid=" << gid
-                << " region=" << static_cast<int>(region_name);
+                << " tag=" << cache_tag;
         }
     };
 
@@ -463,7 +463,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     }
 }
 
-TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
+TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedTags) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
@@ -506,31 +506,31 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     }
 
     auto layout = manager->getMainModelCacheLayerLayout();
-    ASSERT_EQ(layout.group_region_names.size(), static_cast<size_t>(kDsv4PoolNum));
+    ASSERT_EQ(layout.group_tags.size(), static_cast<size_t>(kDsv4PoolNum));
     ASSERT_EQ(layout.group_seq_size_per_block, manager_config.group_seq_size_per_block);
-    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_attn.size(), static_cast<size_t>(manager_config.layer_num));
+    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_tag.size(), static_cast<size_t>(manager_config.layer_num));
 
     const int csa_layer = manager_config.global_layer_ids[0][0];
     const int hca_layer = manager_config.global_layer_ids[1][0];
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 0)[0], csa_layer, KVCacheRegionName::CSA_KV).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 0)[0], csa_layer, DSV4_TAG_CSA_KV).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 2)[0], csa_layer, KVCacheRegionName::INDEXER_KV).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 2)[0], csa_layer, DSV4_TAG_INDEXER_KV).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 4)[2], csa_layer, KVCacheRegionName::CSA_STATE).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 4)[2], csa_layer, DSV4_TAG_CSA_STATE).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 6)[2], csa_layer, KVCacheRegionName::SWA_KV).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 6)[2], csa_layer, DSV4_TAG_SWA_KV).kv_addr,
               nullptr);
-    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 1)[0], hca_layer, KVCacheRegionName::HCA_KV).kv_addr,
+    EXPECT_NE(manager->convertIndexToAddr(resource->blocks(0, 1)[0], hca_layer, DSV4_TAG_HCA_KV).kv_addr,
               nullptr);
     EXPECT_ANY_THROW(
-        (void)manager->convertIndexToAddr(resource->blocks(0, 1)[0], csa_layer, KVCacheRegionName::HCA_KV));
+        (void)manager->convertIndexToAddr(resource->blocks(0, 1)[0], csa_layer, DSV4_TAG_HCA_KV));
 
     FreeInfo free_info{resource, tokens};
     manager->free(free_info);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
-TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern) {
+TEST_F(KVCacheManagerTest, DSV4LayerTagBlockTablesMatchInferenceAccessPattern) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
@@ -546,43 +546,43 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
     malloc_info.enable_device_cache = false;
     ASSERT_TRUE(manager->malloc(malloc_info).success);
 
-    auto expectRegionGroup = [&](int layer_id, KVCacheRegionName region_name, int expected_gid) {
-        EXPECT_EQ(resource->groupId(/*batch_id=*/0, layer_id, region_name), expected_gid)
-            << "layer=" << layer_id << " region=" << static_cast<int>(region_name);
-        EXPECT_EQ(resource->blocks(/*batch_id=*/0, layer_id, region_name), resource->blocks(0, expected_gid))
-            << "layer=" << layer_id << " region=" << static_cast<int>(region_name);
-        EXPECT_EQ(resource->kernelBlocks(/*batch_id=*/0, layer_id, region_name),
+    auto expectTagGroup = [&](int layer_id, std::string cache_tag, int expected_gid) {
+        EXPECT_EQ(resource->groupId(/*batch_id=*/0, layer_id, cache_tag), expected_gid)
+            << "layer=" << layer_id << " tag=" << cache_tag;
+        EXPECT_EQ(resource->blocks(/*batch_id=*/0, layer_id, cache_tag), resource->blocks(0, expected_gid))
+            << "layer=" << layer_id << " tag=" << cache_tag;
+        EXPECT_EQ(resource->kernelBlocks(/*batch_id=*/0, layer_id, cache_tag),
                   resource->kernelBlocks(0, expected_gid))
-            << "layer=" << layer_id << " region=" << static_cast<int>(region_name);
+            << "layer=" << layer_id << " tag=" << cache_tag;
     };
 
     // Flash DSV4 layers 0/1 are SWA-only. Even though layer_to_group_id defaults
-    // to SWA, inference resolves typed block tables by KVCacheRegionName.
-    expectRegionGroup(/*layer_id=*/0, KVCacheRegionName::SWA_KV, /*expected_gid=*/6);
-    EXPECT_ANY_THROW((void)resource->blocks(/*batch_id=*/0, /*layer_id=*/0, KVCacheRegionName::CSA_KV));
-    EXPECT_ANY_THROW((void)resource->blocks(/*batch_id=*/0, /*layer_id=*/0, KVCacheRegionName::HCA_KV));
+    // to SWA, inference resolves typed block tables by std::string.
+    expectTagGroup(/*layer_id=*/0, DSV4_TAG_SWA_KV, /*expected_gid=*/6);
+    EXPECT_ANY_THROW((void)resource->blocks(/*batch_id=*/0, /*layer_id=*/0, DSV4_TAG_CSA_KV));
+    EXPECT_ANY_THROW((void)resource->blocks(/*batch_id=*/0, /*layer_id=*/0, DSV4_TAG_HCA_KV));
 
     // Layer 2 is CSA: CSA_KV + INDEXER_KV + INDEXER_STATE + CSA_STATE + SWA_KV.
     const int csa_layer = manager_config.global_layer_ids[0][0];
-    expectRegionGroup(csa_layer, KVCacheRegionName::CSA_KV, /*expected_gid=*/0);
-    expectRegionGroup(csa_layer, KVCacheRegionName::INDEXER_KV, /*expected_gid=*/2);
-    expectRegionGroup(csa_layer, KVCacheRegionName::INDEXER_STATE, /*expected_gid=*/3);
-    expectRegionGroup(csa_layer, KVCacheRegionName::CSA_STATE, /*expected_gid=*/4);
-    expectRegionGroup(csa_layer, KVCacheRegionName::SWA_KV, /*expected_gid=*/6);
-    EXPECT_ANY_THROW((void)resource->blocks(/*batch_id=*/0, csa_layer, KVCacheRegionName::HCA_KV));
+    expectTagGroup(csa_layer, DSV4_TAG_CSA_KV, /*expected_gid=*/0);
+    expectTagGroup(csa_layer, DSV4_TAG_INDEXER_KV, /*expected_gid=*/2);
+    expectTagGroup(csa_layer, DSV4_TAG_INDEXER_STATE, /*expected_gid=*/3);
+    expectTagGroup(csa_layer, DSV4_TAG_CSA_STATE, /*expected_gid=*/4);
+    expectTagGroup(csa_layer, DSV4_TAG_SWA_KV, /*expected_gid=*/6);
+    EXPECT_ANY_THROW((void)resource->blocks(/*batch_id=*/0, csa_layer, DSV4_TAG_HCA_KV));
 
     // Layer 3 is HCA: HCA_KV + HCA_STATE + SWA_KV.
     const int hca_layer = manager_config.global_layer_ids[1][0];
-    expectRegionGroup(hca_layer, KVCacheRegionName::HCA_KV, /*expected_gid=*/1);
-    expectRegionGroup(hca_layer, KVCacheRegionName::HCA_STATE, /*expected_gid=*/5);
-    expectRegionGroup(hca_layer, KVCacheRegionName::SWA_KV, /*expected_gid=*/6);
-    EXPECT_ANY_THROW((void)resource->blocks(/*batch_id=*/0, hca_layer, KVCacheRegionName::CSA_KV));
+    expectTagGroup(hca_layer, DSV4_TAG_HCA_KV, /*expected_gid=*/1);
+    expectTagGroup(hca_layer, DSV4_TAG_HCA_STATE, /*expected_gid=*/5);
+    expectTagGroup(hca_layer, DSV4_TAG_SWA_KV, /*expected_gid=*/6);
+    EXPECT_ANY_THROW((void)resource->blocks(/*batch_id=*/0, hca_layer, DSV4_TAG_CSA_KV));
 
     FreeInfo free_info{resource, tokens};
     manager->free(free_info);
 }
 
-TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
+TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedTagBytes) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
@@ -611,42 +611,39 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
         }
     }
 
-    struct RegionCase {
+    struct TagCase {
         int               gid;
         int               layer_id;
-        KVCacheRegionName region_name;
+        std::string cache_tag;
         uint8_t           pattern;
     };
 
-    const std::vector<RegionCase> cases = {
-        {0, csa_layer, KVCacheRegionName::CSA_KV, 0x11},
-        {2, csa_layer, KVCacheRegionName::INDEXER_KV, 0x22},
-        {3, csa_layer, KVCacheRegionName::INDEXER_STATE, 0x33},
-        {4, csa_layer, KVCacheRegionName::CSA_STATE, 0x44},
-        {6, csa_layer, KVCacheRegionName::SWA_KV, 0x55},
-        {1, hca_layer, KVCacheRegionName::HCA_KV, 0x66},
-        {5, hca_layer, KVCacheRegionName::HCA_STATE, 0x77},
-        {6, swa_only_layer, KVCacheRegionName::SWA_KV, 0x88},
+    const std::vector<TagCase> cases = {
+        {0, csa_layer, DSV4_TAG_CSA_KV, 0x11},
+        {2, csa_layer, DSV4_TAG_INDEXER_KV, 0x22},
+        {3, csa_layer, DSV4_TAG_INDEXER_STATE, 0x33},
+        {4, csa_layer, DSV4_TAG_CSA_STATE, 0x44},
+        {6, csa_layer, DSV4_TAG_SWA_KV, 0x55},
+        {1, hca_layer, DSV4_TAG_HCA_KV, 0x66},
+        {5, hca_layer, DSV4_TAG_HCA_STATE, 0x77},
+        {6, swa_only_layer, DSV4_TAG_SWA_KV, 0x88},
     };
 
-    for (const auto& region_case : cases) {
-        const size_t bytes = manager_config.cache_specs[static_cast<size_t>(region_case.gid)]->block_size_bytes();
+    for (const auto& tag_case : cases) {
+        const size_t bytes = manager_config.cache_specs[static_cast<size_t>(tag_case.gid)]->block_size_bytes();
         ASSERT_GT(bytes, 0u);
-        writeDsv4RegionPattern(
-            manager, src_block, region_case.layer_id, region_case.region_name, bytes, region_case.pattern);
-        writeDsv4RegionPattern(manager, dst_block, region_case.layer_id, region_case.region_name, bytes, 0);
-        assertDsv4RegionPatternEq(
-            manager, src_block, region_case.layer_id, region_case.region_name, bytes, region_case.pattern);
-        assertDsv4RegionPatternEq(manager, dst_block, region_case.layer_id, region_case.region_name, bytes, 0);
+        writeDsv4TagPattern(manager, src_block, tag_case.layer_id, tag_case.cache_tag, bytes, tag_case.pattern);
+        writeDsv4TagPattern(manager, dst_block, tag_case.layer_id, tag_case.cache_tag, bytes, 0);
+        assertDsv4TagPatternEq(manager, src_block, tag_case.layer_id, tag_case.cache_tag, bytes, tag_case.pattern);
+        assertDsv4TagPatternEq(manager, dst_block, tag_case.layer_id, tag_case.cache_tag, bytes, 0);
     }
 
     manager->blockCopy(src_block, dst_block);
     runtimeSyncAndCheck();
 
-    for (const auto& region_case : cases) {
-        const size_t bytes = manager_config.cache_specs[static_cast<size_t>(region_case.gid)]->block_size_bytes();
-        assertDsv4RegionPatternEq(
-            manager, dst_block, region_case.layer_id, region_case.region_name, bytes, region_case.pattern);
+    for (const auto& tag_case : cases) {
+        const size_t bytes = manager_config.cache_specs[static_cast<size_t>(tag_case.gid)]->block_size_bytes();
+        assertDsv4TagPatternEq(manager, dst_block, tag_case.layer_id, tag_case.cache_tag, bytes, tag_case.pattern);
     }
 
     FreeInfo free_info{resource, tokens};
@@ -697,7 +694,7 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
         EXPECT_EQ(second_resource->blocks(0, gid)[1], first_blocks[gid][1]);
     }
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+        if (manager_config.group_skip_prefix_reuse[static_cast<size_t>(gid)]) {
             continue;
         }
         ASSERT_GE(second_resource->blocksNum(0, gid), 3) << "tail group " << gid;
@@ -748,7 +745,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     EXPECT_EQ(reuse_result.reuse_len, 4 * spb);
 
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+        if (manager_config.group_skip_prefix_reuse[static_cast<size_t>(gid)]) {
             continue;
         }
         const auto& blocks = second_resource->blocks(0, gid);
@@ -787,7 +784,7 @@ TEST_F(KVCacheManagerTest, DSV4PopCachedBlocksPreservesGroupShape) {
     ASSERT_NE(evicted, nullptr);
     ASSERT_TRUE(evicted->hasCacheKeys());
     EXPECT_EQ(evicted->groupNums(), kDsv4PoolNum);
-    EXPECT_EQ(evicted->cacheResource(0).layerAttnBlocks().size(), static_cast<size_t>(manager_config.layer_num));
+    EXPECT_EQ(evicted->cacheResource(0).layerTagBlocks().size(), static_cast<size_t>(manager_config.layer_num));
 
     bool saw_paged_block = false;
     bool saw_tail_block  = false;
@@ -1281,7 +1278,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     EXPECT_EQ(reuse_result.reuse_len, 2 * spb);
 
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+        if (manager_config.group_skip_prefix_reuse[static_cast<size_t>(gid)]) {
             continue;
         }
         const auto& blocks = reuse_res->blocks(0, gid);

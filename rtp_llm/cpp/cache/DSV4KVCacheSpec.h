@@ -2,11 +2,21 @@
 
 #include <algorithm>
 #include <numeric>
+#include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
+
+inline constexpr const char* DSV4_TAG_DEFAULT       = "default";
+inline constexpr const char* DSV4_TAG_CSA_KV        = "csa_kv";
+inline constexpr const char* DSV4_TAG_HCA_KV        = "hca_kv";
+inline constexpr const char* DSV4_TAG_INDEXER_KV    = "indexer_kv";
+inline constexpr const char* DSV4_TAG_INDEXER_STATE = "indexer_state";
+inline constexpr const char* DSV4_TAG_CSA_STATE     = "csa_state";
+inline constexpr const char* DSV4_TAG_HCA_STATE     = "hca_state";
+inline constexpr const char* DSV4_TAG_SWA_KV        = "swa_kv";
 
 // FP8 KV slot byte sizes mirror the canonical fp8_model1_mla layout written
 // by Python (rtp_llm/models_py/modules/dsv4/fp8/_compressor_vllm_triton.py).
@@ -33,7 +43,6 @@ inline size_t alignDsv4Fp8KvBlockBytes(size_t natural, size_t extra_multiple = 1
 // FP8 mode: 584B per KV entry, 132B per Indexer entry — see constants above.
 // Each entry contains the full KV for one compressed token (one KV head).
 struct DSV4KVSpec: public KVCacheSpec {
-    KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
     uint32_t          entry_elems;        // bytes per entry (1024/584 KV, 256/132 Indexer)
     uint32_t          entries_per_block;  // entries per block (64 or 2)
     uint32_t          compression_ratio           = 1;
@@ -42,14 +51,14 @@ struct DSV4KVSpec: public KVCacheSpec {
 
     DSV4KVSpec() = default;
 
-    DSV4KVSpec(KVCacheRegionName cache_region,
+    DSV4KVSpec(std::string       cache_tag,
                uint32_t          entry_elements,
                uint32_t          block_entries,
                DataType          storage_dtype,
                uint32_t          seq_size_per_blk,
                uint32_t          cache_compression_ratio = 1,
                size_t            block_size_alignment    = 0) {
-        cache_type        = cache_region;
+        tag               = std::move(cache_tag);
         entry_elems       = entry_elements;
         entries_per_block = block_entries;
         compression_ratio = cache_compression_ratio;
@@ -105,7 +114,6 @@ struct DSV4KVSpec: public KVCacheSpec {
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4KVSpec{\n";
         os << commonDebugString(indent);
-        os << std::string(indent + 2, ' ') << "cache_type=" << static_cast<int>(cache_type) << "\n";
         os << std::string(indent + 2, ' ') << "entry_elems=" << entry_elems << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
         os << std::string(indent + 2, ' ') << "compression_ratio=" << compression_ratio << "\n";
@@ -121,7 +129,6 @@ struct DSV4KVSpec: public KVCacheSpec {
 // prefix cache. The K/V split is a placeholder for state pools because state is
 // an opaque blob.
 struct DSV4StateSpec: public KVCacheSpec {
-    KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
     uint32_t          state_dim;          // state dimension (entry_elems in pool_spec)
     uint32_t          entries_per_block;  // 4 or 8
     DataType          store_dtype                      = DataType::TYPE_INVALID;
@@ -131,15 +138,17 @@ struct DSV4StateSpec: public KVCacheSpec {
 
     DSV4StateSpec() = default;
 
-    DSV4StateSpec(KVCacheRegionName cache_region,
+    DSV4StateSpec(std::string       cache_tag,
                   uint32_t          state_elements,
                   uint32_t          block_entries,
                   DataType          storage_dtype,
                   uint32_t          seq_size_per_blk,
                   size_t            block_size_bytes_override_value = 0,
                   size_t            block_size_alignment            = 0,
-                  uint32_t          block_alignment_min_entries     = 0) {
-        cache_type        = cache_region;
+                  uint32_t          block_alignment_min_entries     = 0,
+                  bool              state_cache                    = true,
+                  bool              skip_reuse                     = false) {
+        tag               = std::move(cache_tag);
         state_dim         = state_elements;
         entries_per_block = block_entries;
         store_dtype               = storage_dtype;
@@ -152,6 +161,9 @@ struct DSV4StateSpec: public KVCacheSpec {
         seq_size_per_block = seq_size_per_blk;
         type               = KVCacheSpecType::MultiHeadAttention;
         dtype              = store_dtype;
+        is_state_cache     = state_cache;
+        is_fixed_cache     = true;
+        skip_prefix_reuse  = skip_reuse;
     }
 
     size_t block_size() const override {
@@ -200,7 +212,6 @@ struct DSV4StateSpec: public KVCacheSpec {
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4StateSpec{\n";
         os << commonDebugString(indent);
-        os << std::string(indent + 2, ' ') << "cache_type=" << static_cast<int>(cache_type) << "\n";
         os << std::string(indent + 2, ' ') << "state_dim=" << state_dim << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
         os << std::string(indent + 2, ' ') << "block_size_bytes_override=" << block_size_bytes_override << "\n";

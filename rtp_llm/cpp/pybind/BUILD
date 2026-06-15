@@ -58,6 +58,7 @@ cc_library(
     hdrs = [],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/distribute:rpc_cpu_tp_broadcaster",

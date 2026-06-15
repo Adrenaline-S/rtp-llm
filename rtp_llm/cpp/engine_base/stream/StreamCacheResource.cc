@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include <map>
 #include <thread>
 #include <torch/extension.h>
 
@@ -245,7 +246,7 @@ void StreamCacheResource::init(int batch_size) {
     int                           layer_all_num         = 0;
     std::vector<int>              layer_to_group        = {};
     std::vector<CacheGroupType>   group_types           = {};
-    std::vector<std::vector<int>> layer_region_to_group = {};
+    std::vector<std::map<std::string, int>> layer_tag_to_group = {};
 
     size_t kernel_blocks_per_kv_block = 1;
     if (resource_context_.cache_manager) {  // cache manager is null when warmup
@@ -254,12 +255,16 @@ void StreamCacheResource::init(int batch_size) {
         layer_all_num              = static_cast<int>(cache_config.layer_all_num);
         layer_to_group             = cache_config.layer_to_group_id;
         group_types                = cache_config.group_types;
-        layer_region_to_group      = cache_config.layer_region_to_group_id;
+        layer_tag_to_group         = cache_config.layer_tag_to_group_id;
         kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
 
-    batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types, layer_region_to_group);
+    batch_kv_cache_resource_->initGroups(group_nums,
+                                         layer_all_num,
+                                         layer_to_group,
+                                         kernel_blocks_per_kv_block,
+                                         group_types,
+                                         layer_tag_to_group);
     resource_released_ = false;
 }
 
@@ -581,7 +586,7 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     size_t                        kernel_blocks_per_kv_block = 1;
     std::vector<int>              layer_to_group             = {};
     std::vector<CacheGroupType>   group_types                = {};
-    std::vector<std::vector<int>> layer_region_to_group      = {};
+    std::vector<std::map<std::string, int>> layer_tag_to_group = {};
 
     if (resource_context_.cache_manager) {
         const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
@@ -589,11 +594,15 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
         layer_all_num              = static_cast<int>(cache_config.layer_all_num);
         layer_to_group             = cache_config.layer_to_group_id;
         group_types                = cache_config.group_types;
-        layer_region_to_group      = cache_config.layer_region_to_group_id;
+        layer_tag_to_group         = cache_config.layer_tag_to_group_id;
         kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
-    batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types, layer_region_to_group);
+    batch_kv_cache_resource_->initGroups(group_nums,
+                                         layer_all_num,
+                                         layer_to_group,
+                                         kernel_blocks_per_kv_block,
+                                         group_types,
+                                         layer_tag_to_group);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);

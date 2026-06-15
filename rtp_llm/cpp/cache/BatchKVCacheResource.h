@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -26,14 +27,14 @@ public:
                     const std::vector<int>&              layer_to_group_id          = {},
                     size_t                               kernel_blocks_per_kv_block = 1,
                     const std::vector<CacheGroupType>&   group_types                = {},
-                    const std::vector<std::vector<int>>& layer_region_to_group_id   = {}) {
+                    const std::vector<std::map<std::string, int>>& layer_tag_to_group_id = {}) {
         for (auto& batch : batch_resource) {
             batch.initGroups(group_nums,
                              layer_num,
                              layer_to_group_id,
                              kernel_blocks_per_kv_block,
                              group_types,
-                             layer_region_to_group_id);
+                             layer_tag_to_group_id);
         }
     }
 
@@ -73,14 +74,14 @@ public:
         return batch_resource[batch_id].blocks(group_id);
     }
 
-    const BlockIndicesType& blocks(int batch_id, int layer_id, KVCacheRegionName region_name) const {
+    const BlockIndicesType& blocks(int batch_id, int layer_id, const std::string& tag) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].blocks(layer_id, region_name);
+        return batch_resource[batch_id].blocks(layer_id, tag);
     }
 
-    const BlockIndicesType& blocks(int layer_id, KVCacheRegionName region_name) const {
+    const BlockIndicesType& blocks(int layer_id, const std::string& tag) const {
         RTP_LLM_CHECK(!batch_resource.empty());
-        return batch_resource[0].blocks(layer_id, region_name);
+        return batch_resource[0].blocks(layer_id, tag);
     }
 
     const BlockIndicesType& kernelBlocks(int batch_id, int group_id = 0) const {
@@ -88,19 +89,19 @@ public:
         return batch_resource[batch_id].kernelBlocks(group_id);
     }
 
-    const BlockIndicesType& kernelBlocks(int batch_id, int layer_id, KVCacheRegionName region_name) const {
+    const BlockIndicesType& kernelBlocks(int batch_id, int layer_id, const std::string& tag) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].kernelBlocks(layer_id, region_name);
+        return batch_resource[batch_id].kernelBlocks(layer_id, tag);
     }
 
-    int groupId(int batch_id, int layer_id, KVCacheRegionName region_name) const {
+    int groupId(int batch_id, int layer_id, const std::string& tag) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].groupId(layer_id, region_name);
+        return batch_resource[batch_id].groupId(layer_id, tag);
     }
 
-    const BlockIndicesType& kernelBlocks(int layer_id, KVCacheRegionName region_name) const {
+    const BlockIndicesType& kernelBlocks(int layer_id, const std::string& tag) const {
         RTP_LLM_CHECK(!batch_resource.empty());
-        return batch_resource[0].kernelBlocks(layer_id, region_name);
+        return batch_resource[0].kernelBlocks(layer_id, tag);
     }
 
     BlockIds& mutableBlockIds(int batch_id, int group_id = 0) {
@@ -108,14 +109,14 @@ public:
         return batch_resource[batch_id].mutableBlockIds(group_id);
     }
 
-    BlockIds& mutableBlockIds(int layer_id, KVCacheRegionName region_name) {
+    BlockIds& mutableBlockIds(int layer_id, const std::string& tag) {
         RTP_LLM_CHECK(!batch_resource.empty());
-        return batch_resource[0].mutableBlockIds(layer_id, region_name);
+        return batch_resource[0].mutableBlockIds(layer_id, tag);
     }
 
-    int groupId(int layer_id, KVCacheRegionName region_name) const {
+    int groupId(int layer_id, const std::string& tag) const {
         RTP_LLM_CHECK(!batch_resource.empty());
-        return batch_resource[0].groupId(layer_id, region_name);
+        return batch_resource[0].groupId(layer_id, tag);
     }
 
     const GroupBlockIds& groupBlocks(int batch_id = 0) const {
@@ -188,14 +189,14 @@ public:
                          const std::vector<int>&              layer_to_group_id          = {},
                          size_t                               kernel_blocks_per_kv_block = 1,
                          const std::vector<CacheGroupType>&   group_types                = {},
-                         const std::vector<std::vector<int>>& layer_region_to_group_id   = {}) {
+                         const std::vector<std::map<std::string, int>>& layer_tag_to_group_id = {}) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         batch_resource[batch_id].initGroups(group_nums,
                                             layer_num,
                                             layer_to_group_id,
                                             kernel_blocks_per_kv_block,
                                             group_types,
-                                            layer_region_to_group_id);
+                                            layer_tag_to_group_id);
     }
 
     void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {

@@ -124,16 +124,16 @@ CacheConfig createDsv4TypedConnectorConfig() {
     config.kernel_seq_size_per_block    = 128;
     config.linear_step                  = 4;
     config.use_independent_block_pools  = true;
-    config.use_typed_cache_regions      = true;
+    config.use_tagged_cache_groups      = true;
     config.use_opaque_kv_cache_store    = true;
     config.is_sparse                    = true;
-    config.group_region_names           = {KVCacheRegionName::CSA_KV,
-                                           KVCacheRegionName::HCA_KV,
-                                           KVCacheRegionName::INDEXER_KV,
-                                           KVCacheRegionName::INDEXER_STATE,
-                                           KVCacheRegionName::CSA_STATE,
-                                           KVCacheRegionName::HCA_STATE,
-                                           KVCacheRegionName::SWA_KV};
+    config.group_tags           = {DSV4_TAG_CSA_KV,
+                                           DSV4_TAG_HCA_KV,
+                                           DSV4_TAG_INDEXER_KV,
+                                           DSV4_TAG_INDEXER_STATE,
+                                           DSV4_TAG_CSA_STATE,
+                                           DSV4_TAG_HCA_STATE,
+                                           DSV4_TAG_SWA_KV};
     config.group_types                  = {CacheGroupType::FULL,
                                            CacheGroupType::FULL,
                                            CacheGroupType::FULL,
@@ -150,22 +150,22 @@ CacheConfig createDsv4TypedConnectorConfig() {
     config.cache_specs                  = std::vector<std::shared_ptr<KVCacheSpec>>(kDsv4PoolNum);
     config.layer_ids                    = std::vector<std::vector<int>>(kDsv4PoolNum);
     config.global_layer_ids             = std::vector<std::vector<int>>(kDsv4PoolNum);
-    config.layer_region_to_group_id     = std::vector<std::vector<int>>(
-        config.layer_all_num, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    config.layer_tag_to_group_id     = std::vector<std::vector<int>>(
+        config.layer_all_num, std::map<std::string, int>());
 
-    auto add_region = [&](int layer, KVCacheRegionName region_name, int gid) {
-        config.layer_region_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region_name)] = gid;
+    auto add_region = [&](int layer, std::string cache_tag, int gid) {
+        config.layer_tag_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(cache_tag)] = gid;
         config.layer_ids[static_cast<size_t>(gid)].push_back(layer);
         config.global_layer_ids[static_cast<size_t>(gid)].push_back(layer);
     };
-    add_region(0, KVCacheRegionName::HCA_KV, 1);
-    add_region(0, KVCacheRegionName::HCA_STATE, 5);
-    add_region(0, KVCacheRegionName::SWA_KV, 6);
-    add_region(1, KVCacheRegionName::CSA_KV, 0);
-    add_region(1, KVCacheRegionName::INDEXER_KV, 2);
-    add_region(1, KVCacheRegionName::INDEXER_STATE, 3);
-    add_region(1, KVCacheRegionName::CSA_STATE, 4);
-    add_region(1, KVCacheRegionName::SWA_KV, 6);
+    add_region(0, DSV4_TAG_HCA_KV, 1);
+    add_region(0, DSV4_TAG_HCA_STATE, 5);
+    add_region(0, DSV4_TAG_SWA_KV, 6);
+    add_region(1, DSV4_TAG_CSA_KV, 0);
+    add_region(1, DSV4_TAG_INDEXER_KV, 2);
+    add_region(1, DSV4_TAG_INDEXER_STATE, 3);
+    add_region(1, DSV4_TAG_CSA_STATE, 4);
+    add_region(1, DSV4_TAG_SWA_KV, 6);
 
     return config;
 }
@@ -540,11 +540,11 @@ private:
         auto res                  = std::make_shared<KVCacheResource>();
         res->cache_keys           = cache_keys;
         res->layer_block_ids      = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
-        const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-        res->layer_region_block_ids.resize(res->layer_block_ids.size());
+        const size_t region_count = static_cast<size_t>(std::string::REGION_COUNT);
+        res->layer_tag_block_ids.resize(res->layer_block_ids.size());
         for (size_t layer = 0; layer < res->layer_block_ids.size(); ++layer) {
-            res->layer_region_block_ids[layer].assign(region_count, nullptr);
-            res->layer_region_block_ids[layer][static_cast<size_t>(KVCacheRegionName::DEFAULT)] =
+            res->layer_tag_block_ids[layer].assign(region_count, nullptr);
+            res->layer_tag_block_ids[layer][DSV4_TAG_DEFAULT] =
                 res->layer_block_ids[layer];
         }
         // reuse_len in these tests means "GPU already-reused prefix length".
@@ -1273,26 +1273,26 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
                         cfg.layer_to_group_id,
                         /*kernel_blocks_per_kv_block=*/1,
                         cfg.group_types,
-                        cfg.layer_region_to_group_id);
+                        cfg.layer_tag_to_group_id);
         for (int layer = 0; layer < cfg.layer_all_num; ++layer) {
-            for (int region = 0; region < static_cast<int>(KVCacheRegionName::REGION_COUNT); ++region) {
-                if (cfg.layer_region_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region)] >= 0) {
-                    res->mutableBlockIds(layer, static_cast<KVCacheRegionName>(region)).assign({NULL_BLOCK_IDX});
+            for (int region = 0; region < static_cast<int>(std::string::REGION_COUNT); ++region) {
+                if (cfg.layer_tag_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region)] >= 0) {
+                    res->mutableBlockIds(layer, region).assign({NULL_BLOCK_IDX});
                 }
             }
         }
-        auto set_if = [&](bool enabled, int layer, KVCacheRegionName region, BlockIdxType block) {
+        auto set_if = [&](bool enabled, int layer, std::string region, BlockIdxType block) {
             if (enabled) {
                 res->mutableBlockIds(layer, region).assign({block});
             }
         };
-        set_if(compressed_required, 0, KVCacheRegionName::HCA_KV, 11);
-        set_if(compressed_required, 1, KVCacheRegionName::CSA_KV, 21);
-        set_if(compressed_required, 1, KVCacheRegionName::INDEXER_KV, 22);
-        set_if(state_required, 0, KVCacheRegionName::SWA_KV, 31);
-        set_if(state_required, 1, KVCacheRegionName::INDEXER_STATE, 32);
-        set_if(state_required, 1, KVCacheRegionName::CSA_STATE, 33);
-        set_if(state_required, 1, KVCacheRegionName::SWA_KV, 34);
+        set_if(compressed_required, 0, DSV4_TAG_HCA_KV, 11);
+        set_if(compressed_required, 1, DSV4_TAG_CSA_KV, 21);
+        set_if(compressed_required, 1, DSV4_TAG_INDEXER_KV, 22);
+        set_if(state_required, 0, DSV4_TAG_SWA_KV, 31);
+        set_if(state_required, 1, DSV4_TAG_INDEXER_STATE, 32);
+        set_if(state_required, 1, DSV4_TAG_CSA_STATE, 33);
+        set_if(state_required, 1, DSV4_TAG_SWA_KV, 34);
         res->ensureLinearBlockDependencies();
         res->setLastBlockAligned(true);
         return res;
@@ -1435,17 +1435,17 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsPartialMe
     auto slots = conn->layerRegionSlots();
     ASSERT_NE(conn->state_swa_pool_, nullptr);
 
-    auto make_mask = [&](int layer_id, KVCacheRegionName region_name) {
+    auto make_mask = [&](int layer_id, std::string cache_tag) {
         std::vector<uint8_t> mask(slots.size(), 0);
         for (size_t idx = 0; idx < slots.size(); ++idx) {
-            if (slots[idx].layer_id == layer_id && slots[idx].region_name == region_name) {
+            if (slots[idx].layer_id == layer_id && slots[idx].cache_tag == cache_tag) {
                 mask[idx] = 1;
             }
         }
         return mask;
     };
-    const auto old_mask = make_mask(0, KVCacheRegionName::SWA_KV);
-    const auto new_mask = make_mask(1, KVCacheRegionName::CSA_STATE);
+    const auto old_mask = make_mask(0, DSV4_TAG_SWA_KV);
+    const auto new_mask = make_mask(1, DSV4_TAG_CSA_STATE);
     ASSERT_TRUE(std::any_of(old_mask.begin(), old_mask.end(), [](uint8_t valid) { return valid != 0; }));
     ASSERT_TRUE(std::any_of(new_mask.begin(), new_mask.end(), [](uint8_t valid) { return valid != 0; }));
 
@@ -1496,15 +1496,15 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsPartialMe
                          cfg.layer_to_group_id,
                          /*kernel_blocks_per_kv_block=*/1,
                          cfg.group_types,
-                         cfg.layer_region_to_group_id);
+                         cfg.layer_tag_to_group_id);
     for (int layer = 0; layer < cfg.layer_all_num; ++layer) {
-        for (int region = 0; region < static_cast<int>(KVCacheRegionName::REGION_COUNT); ++region) {
-            if (cfg.layer_region_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region)] >= 0) {
-                resource->mutableBlockIds(layer, static_cast<KVCacheRegionName>(region)).assign({NULL_BLOCK_IDX});
+        for (int region = 0; region < static_cast<int>(std::string::REGION_COUNT); ++region) {
+            if (cfg.layer_tag_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region)] >= 0) {
+                resource->mutableBlockIds(layer, region).assign({NULL_BLOCK_IDX});
             }
         }
     }
-    resource->mutableBlockIds(1, KVCacheRegionName::CSA_STATE).assign({7001});
+    resource->mutableBlockIds(1, DSV4_TAG_CSA_STATE).assign({7001});
     resource->ensureLinearBlockDependencies();
     resource->setLastBlockAligned(true);
 
@@ -1557,17 +1557,17 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
     auto disk_pool = conn->diskPoolFor(CacheBlockKind::STATE_SWA_KV);
     ASSERT_NE(disk_pool, nullptr);
 
-    auto make_mask = [&](int layer_id, KVCacheRegionName region_name) {
+    auto make_mask = [&](int layer_id, std::string cache_tag) {
         std::vector<uint8_t> mask(slots.size(), 0);
         for (size_t idx = 0; idx < slots.size(); ++idx) {
-            if (slots[idx].layer_id == layer_id && slots[idx].region_name == region_name) {
+            if (slots[idx].layer_id == layer_id && slots[idx].cache_tag == cache_tag) {
                 mask[idx] = 1;
             }
         }
         return mask;
     };
-    const auto old_mask = make_mask(0, KVCacheRegionName::SWA_KV);
-    const auto new_mask = make_mask(1, KVCacheRegionName::CSA_STATE);
+    const auto old_mask = make_mask(0, DSV4_TAG_SWA_KV);
+    const auto new_mask = make_mask(1, DSV4_TAG_CSA_STATE);
     ASSERT_TRUE(std::any_of(old_mask.begin(), old_mask.end(), [](uint8_t valid) { return valid != 0; }));
     ASSERT_TRUE(std::any_of(new_mask.begin(), new_mask.end(), [](uint8_t valid) { return valid != 0; }));
 
@@ -1623,15 +1623,15 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
                          cfg.layer_to_group_id,
                          /*kernel_blocks_per_kv_block=*/1,
                          cfg.group_types,
-                         cfg.layer_region_to_group_id);
+                         cfg.layer_tag_to_group_id);
     for (int layer = 0; layer < cfg.layer_all_num; ++layer) {
-        for (int region = 0; region < static_cast<int>(KVCacheRegionName::REGION_COUNT); ++region) {
-            if (cfg.layer_region_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region)] >= 0) {
-                resource->mutableBlockIds(layer, static_cast<KVCacheRegionName>(region)).assign({NULL_BLOCK_IDX});
+        for (int region = 0; region < static_cast<int>(std::string::REGION_COUNT); ++region) {
+            if (cfg.layer_tag_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region)] >= 0) {
+                resource->mutableBlockIds(layer, region).assign({NULL_BLOCK_IDX});
             }
         }
     }
-    resource->mutableBlockIds(1, KVCacheRegionName::CSA_STATE).assign({7001});
+    resource->mutableBlockIds(1, DSV4_TAG_CSA_STATE).assign({7001});
     resource->ensureLinearBlockDependencies();
     resource->setLastBlockAligned(true);
 
@@ -1688,9 +1688,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
                          cfg.layer_to_group_id,
                          /*kernel_blocks_per_kv_block=*/1,
                          cfg.group_types,
-                         cfg.layer_region_to_group_id);
+                         cfg.layer_tag_to_group_id);
     for (const auto& slot : slots) {
-        resource->mutableBlockIds(slot.layer_id, slot.region_name)
+        resource->mutableBlockIds(slot.layer_id, slot.tag)
             .assign({static_cast<BlockIdxType>(100 + slot.group_id),
                      static_cast<BlockIdxType>(200 + slot.group_id),
                      static_cast<BlockIdxType>(300 + slot.group_id)});
@@ -1747,9 +1747,9 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     cfg.layer_all_num = 1;
     cfg.layer_to_group_id.assign(1, 0);
     cfg.layer_to_group_ids.assign(1, std::vector<int>{0, 1});
-    cfg.layer_region_to_group_id.assign(1, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
-    cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::CSA_KV)] = 0;
-    cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 1;
+    cfg.layer_tag_to_group_id.assign(1, std::map<std::string, int>());
+    cfg.layer_tag_to_group_id[0][DSV4_TAG_CSA_KV] = 0;
+    cfg.layer_tag_to_group_id[0][DSV4_TAG_SWA_KV] = 1;
     cfg.group_types                 = {CacheGroupType::FULL, CacheGroupType::FULL};
     cfg.group_kv_block_stride_bytes = {16, 32};
     cfg.group_kv_scale_stride_bytes = {0, 0};
@@ -1765,11 +1765,11 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     auto slots = conn->layerRegionSlots();
     ASSERT_EQ(slots.size(), 2u);
     EXPECT_EQ(slots[0].layer_id, 0);
-    EXPECT_EQ(slots[0].region_name, KVCacheRegionName::CSA_KV);
+    EXPECT_EQ(slots[0].cache_tag, DSV4_TAG_CSA_KV);
     EXPECT_EQ(slots[0].group_id, 0);
     EXPECT_EQ(slots[0].stride_bytes, 16u);
     EXPECT_EQ(slots[1].layer_id, 0);
-    EXPECT_EQ(slots[1].region_name, KVCacheRegionName::SWA_KV);
+    EXPECT_EQ(slots[1].cache_tag, DSV4_TAG_SWA_KV);
     EXPECT_EQ(slots[1].group_id, 1);
     EXPECT_EQ(slots[1].stride_bytes, 32u);
 
@@ -1780,7 +1780,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
                          cfg.layer_to_group_id,
                          /*kernel_blocks_per_kv_block=*/1,
                          cfg.group_types,
-                         cfg.layer_region_to_group_id);
+                         cfg.layer_tag_to_group_id);
     resource->mutableBlockIds(/*group_id=*/0).assign({11, 12, 13});
     resource->mutableBlockIds(/*group_id=*/1).assign({21, NULL_BLOCK_IDX, 23});
 
@@ -1813,7 +1813,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
     auto slots = conn->layerRegionSlots();
     ASSERT_EQ(slots.size(), 7u);
     for (const auto& slot : slots) {
-        EXPECT_NE(slot.region_name, KVCacheRegionName::HCA_STATE);
+        EXPECT_NE(slot.tag, DSV4_TAG_HCA_STATE);
     }
     EXPECT_TRUE(conn->isDsv4TypedCacheLayout(slots));
 
@@ -1824,14 +1824,14 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
                          cfg.layer_to_group_id,
                          /*kernel_blocks_per_kv_block=*/1,
                          cfg.group_types,
-                         cfg.layer_region_to_group_id);
-    resource->mutableBlockIds(0, KVCacheRegionName::HCA_KV).assign({11, 12});
-    resource->mutableBlockIds(0, KVCacheRegionName::HCA_STATE).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
-    resource->mutableBlockIds(0, KVCacheRegionName::SWA_KV).assign({61, 62});
-    resource->mutableBlockIds(1, KVCacheRegionName::CSA_KV).assign({1, 2});
-    resource->mutableBlockIds(1, KVCacheRegionName::INDEXER_KV).assign({21, 22});
-    resource->mutableBlockIds(1, KVCacheRegionName::INDEXER_STATE).assign({31, 32});
-    resource->mutableBlockIds(1, KVCacheRegionName::CSA_STATE).assign({41, 42});
+                         cfg.layer_tag_to_group_id);
+    resource->mutableBlockIds(0, DSV4_TAG_HCA_KV).assign({11, 12});
+    resource->mutableBlockIds(0, DSV4_TAG_HCA_STATE).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource->mutableBlockIds(0, DSV4_TAG_SWA_KV).assign({61, 62});
+    resource->mutableBlockIds(1, DSV4_TAG_CSA_KV).assign({1, 2});
+    resource->mutableBlockIds(1, DSV4_TAG_INDEXER_KV).assign({21, 22});
+    resource->mutableBlockIds(1, DSV4_TAG_INDEXER_STATE).assign({31, 32});
+    resource->mutableBlockIds(1, DSV4_TAG_CSA_STATE).assign({41, 42});
 
     bool no_need_write = true;
     auto plan          = conn->buildCopyPlanForWrite(
@@ -3272,7 +3272,7 @@ protected:
 
         config.cache_specs        = {full_spec, swa_spec};
         config.group_types        = {CacheGroupType::FULL, CacheGroupType::SWA};
-        config.group_region_names = {KVCacheRegionName::DEFAULT, KVCacheRegionName::SWA_KV};
+        config.group_tags = {DSV4_TAG_DEFAULT, DSV4_TAG_SWA_KV};
 
         const size_t full_stride           = full_spec->block_size_bytes();
         const size_t swa_stride            = swa_spec->block_size_bytes();
@@ -3298,12 +3298,12 @@ protected:
 
         config.layer_to_group_id.assign(layer_num, 0);
         config.layer_to_group_ids.resize(layer_num);
-        const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-        config.layer_region_to_group_id.assign(layer_num, std::vector<int>(region_count, -1));
+        const size_t region_count = static_cast<size_t>(std::string::REGION_COUNT);
+        config.layer_tag_to_group_id.assign(layer_num, std::vector<int>(region_count, -1));
         for (int i = 0; i < layer_num; ++i) {
             config.layer_to_group_ids[i]                                                        = {0, 1};
-            config.layer_region_to_group_id[i][static_cast<size_t>(KVCacheRegionName::DEFAULT)] = 0;
-            config.layer_region_to_group_id[i][static_cast<size_t>(KVCacheRegionName::SWA_KV)]  = 1;
+            config.layer_tag_to_group_id[i][DSV4_TAG_DEFAULT] = 0;
+            config.layer_tag_to_group_id[i][DSV4_TAG_SWA_KV]  = 1;
         }
         config.layer_group_types.assign(layer_num, CacheGroupType::FULL);
         config.layer_to_block_stride_bytes.assign(layer_num, static_cast<int>(full_stride));
@@ -3352,7 +3352,7 @@ protected:
             cfg.layer_to_group_id,
             /*kernel_blocks_per_kv_block=*/1,
             cfg.group_types,
-            cfg.layer_region_to_group_id);
+            cfg.layer_tag_to_group_id);
 
         res->resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
 
@@ -3362,14 +3362,14 @@ protected:
                 for (size_t k = 0; k < std::min(cache_keys.size(), full_blocks[l].size()); ++k) {
                     padded[k] = full_blocks[l][k];
                 }
-                res->mutableBlockIds(static_cast<int>(l), KVCacheRegionName::DEFAULT).assign(padded);
+                res->mutableBlockIds(static_cast<int>(l), DSV4_TAG_DEFAULT).assign(padded);
             }
             if (l < swa_blocks.size()) {
                 BlockIndicesType padded(cache_keys.size(), NULL_BLOCK_IDX);
                 for (size_t k = 0; k < std::min(cache_keys.size(), swa_blocks[l].size()); ++k) {
                     padded[k] = swa_blocks[l][k];
                 }
-                res->mutableBlockIds(static_cast<int>(l), KVCacheRegionName::SWA_KV).assign(padded);
+                res->mutableBlockIds(static_cast<int>(l), DSV4_TAG_SWA_KV).assign(padded);
             }
         }
 

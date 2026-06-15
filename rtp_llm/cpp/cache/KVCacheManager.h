@@ -4,6 +4,7 @@
 #include <cassert>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -66,11 +67,11 @@ public:
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
-                  convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, KVCacheRegionName region_name) const;
-    std::vector<BlockInfo> convertIndexToBuffer(
-        int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
+    convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
 
     CacheLayerLayout allLayerCacheBase() const;
 

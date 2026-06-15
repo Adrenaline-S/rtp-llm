@@ -74,10 +74,10 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
     return plan;
 }
 
-std::string layerRegionCacheTransferKey(size_t request_id, size_t layer_id, KVCacheRegionName region_name) {
+std::string layerTagCacheTransferKey(size_t request_id, size_t layer_id, const std::string& tag) {
     auto key = std::to_string(request_id) + "-" + std::to_string(layer_id);
-    if (region_name != KVCacheRegionName::DEFAULT) {
-        key += "-" + std::to_string(static_cast<int>(region_name));
+    if (!tag.empty() && tag != "default") {
+        key += "-" + tag;
     }
     return key;
 }

@@ -46,7 +46,7 @@ bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
     }
     const auto dsv4_state_spec = std::dynamic_pointer_cast<DSV4StateSpec>(kvcache_spec_);
     if (dsv4_state_spec != nullptr) {
-        return !skipReuseCacheRegion(dsv4_state_spec->cache_type);
+        return !dsv4_state_spec->skip_prefix_reuse;
     }
     return true;
 }
@@ -56,12 +56,12 @@ bool SWAKVCacheGroup::effectiveReuseCacheForAllocation(bool enable_reuse_cache) 
         return false;
     }
     const auto dsv4_state_spec = std::dynamic_pointer_cast<DSV4StateSpec>(kvcache_spec_);
-    return dsv4_state_spec == nullptr || !skipReuseCacheRegion(dsv4_state_spec->cache_type);
+    return dsv4_state_spec == nullptr || !dsv4_state_spec->skip_prefix_reuse;
 }
 
 int SWAKVCacheGroup::activeTailBlocks() const {
     const auto dsv4_state_spec = std::dynamic_pointer_cast<DSV4StateSpec>(kvcache_spec_);
-    if (dsv4_state_spec != nullptr && dsv4_state_spec->cache_type == KVCacheRegionName::HCA_STATE) {
+    if (dsv4_state_spec != nullptr && dsv4_state_spec->tag == DSV4_TAG_HCA_STATE) {
         return kHcaStateActiveTailBlocks;
     }
     return kSwaActiveTailBlocks;

@@ -313,6 +313,15 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
 
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
+    layout.layer_to_group_ids       = config_.layer_to_group_ids;
+    layout.layer_tag_to_group_id    = config_.layer_tag_to_group_id;
+    layout.group_types              = config_.group_types;
+    layout.group_tags               = config_.group_tags;
+    layout.group_is_state_cache     = config_.group_is_state_cache;
+    layout.group_is_fixed_cache     = config_.group_is_fixed_cache;
+    layout.group_skip_prefix_reuse  = config_.group_skip_prefix_reuse;
+    layout.group_seq_size_per_block = config_.group_seq_size_per_block;
+    layout.layer_group_types        = config_.layer_group_types;
 
     for (int layer_id = 0; layer_id < config_.layer_all_num; ++layer_id) {
         if (layer_tensors[layer_id].defined() && layer_tensors[layer_id].numel() > 0) {
@@ -368,8 +377,12 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
-    selected_resource->initGroups(
-        1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
+    selected_resource->initGroups(1,
+                                  config_.layer_all_num,
+                                  config_.layer_to_group_id,
+                                  config_.kernelBlocksPerKvBlock(),
+                                  config_.group_types,
+                                  config_.layer_tag_to_group_id);
 
     CacheKeysType          selected_cache_keys;
     BlockDependenciesType  selected_dependencies;
@@ -494,8 +507,12 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
 
     // init for all batch
-    kv_cache_resource->initGroups(
-        1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
+    kv_cache_resource->initGroups(1,
+                                  config_.layer_all_num,
+                                  config_.layer_to_group_id,
+                                  config_.kernelBlocksPerKvBlock(),
+                                  config_.group_types,
+                                  config_.layer_tag_to_group_id);
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];

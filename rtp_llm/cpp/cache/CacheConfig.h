@@ -24,12 +24,13 @@ struct CacheConfig {
     std::vector<std::vector<int>>  layer_ids;
     std::vector<std::vector<int>>  linear_groups;  // for hybrid attention
     std::vector<std::vector<int>>  full_groups;    // for hybrid attention
-    std::vector<CacheGroupType>    group_types;    // for hybrid attention
+    std::vector<CacheGroupType>    group_types;       // for hybrid attention
     std::vector<CacheGroupType>    layer_group_types;
-    std::vector<KVCacheRegionName> group_region_names;        // group id -> cache identity
-    std::vector<std::string>       group_tags;                // group id -> semantic cache tag
-    std::vector<std::vector<int>>  layer_to_group_ids;        // layer id -> all group ids needed by the layer
-    std::vector<std::vector<int>>  layer_region_to_group_id;  // layer id -> region name id -> group id
+    std::vector<std::string>       group_tags;         // group id -> semantic cache tag
+    std::vector<bool>              group_is_state_cache;
+    std::vector<bool>              group_is_fixed_cache;
+    std::vector<bool>              group_skip_prefix_reuse;
+    std::vector<std::vector<int>>  layer_to_group_ids;  // layer id -> all group ids needed by the layer
     std::vector<std::map<std::string, int>> layer_tag_to_group_id;  // layer id -> semantic tag -> group id
     std::vector<int>               layer_to_group_id;
     std::vector<int>               layer_to_block_stride_bytes;
@@ -41,7 +42,7 @@ struct CacheConfig {
     uint32_t                       dsv4_fixed_pool_blocks                  = 0;
     uint32_t                       dsv4_hca_state_pool_blocks              = 0;
     bool                           use_independent_block_pools              = false;
-    bool                           use_typed_cache_regions                  = false;
+    bool                           use_tagged_cache_groups                  = false;
     bool                           use_opaque_kv_cache_store                = false;
     bool                           disable_decode_first_malloc_device_reuse = false;
 
@@ -136,43 +137,32 @@ struct CacheConfig {
                << ";linear.ssm_state_dtype=" << static_cast<int>(linear->ssm_state_dtype)
                << ";linear.conv_state_dtype=" << static_cast<int>(linear->conv_state_dtype);
         } else if (const auto* dsv4_kv = dynamic_cast<const DSV4KVSpec*>(spec.get())) {
-            os << ";dsv4kv.cache_type=" << static_cast<int>(dsv4_kv->cache_type)
-               << ";dsv4kv.entry_elems=" << dsv4_kv->entry_elems
+            os << ";dsv4kv.entry_elems=" << dsv4_kv->entry_elems
                << ";dsv4kv.compression_ratio=" << dsv4_kv->compression_ratio
                << ";dsv4kv.store_dtype=" << static_cast<int>(dsv4_kv->store_dtype)
                << ";dsv4kv.block_size_bytes_alignment=" << dsv4_kv->block_size_bytes_alignment;
         } else if (const auto* dsv4_state = dynamic_cast<const DSV4StateSpec*>(spec.get())) {
-            os << ";dsv4state.cache_type=" << static_cast<int>(dsv4_state->cache_type)
-               << ";dsv4state.state_dim=" << dsv4_state->state_dim
+            os << ";dsv4state.state_dim=" << dsv4_state->state_dim
                << ";dsv4state.store_dtype=" << static_cast<int>(dsv4_state->store_dtype)
                << ";dsv4state.block_size_bytes_override=" << dsv4_state->block_size_bytes_override
                << ";dsv4state.block_size_bytes_alignment=" << dsv4_state->block_size_bytes_alignment
                << ";dsv4state.block_size_alignment_min_entries=" << dsv4_state->block_size_alignment_min_entries;
         }
+        os << ";is_state_cache=" << spec->is_state_cache << ";is_fixed_cache=" << spec->is_fixed_cache
+           << ";skip_prefix_reuse=" << spec->skip_prefix_reuse;
         return os.str();
     }
 
-    static CacheGroupType inferGroupType(const KVCacheSpecPtr& spec, KVCacheRegionName region_name) {
-        if (region_name == KVCacheRegionName::SWA_KV || isStateRegion(region_name)) {
+    static CacheGroupType inferGroupType(const KVCacheSpecPtr& spec) {
+        if (spec->is_fixed_cache) {
             return CacheGroupType::SWA;
         }
         return spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
     }
 
-    static KVCacheRegionName inferRegionName(const KVCacheSpecPtr& spec) {
-        if (const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(spec.get())) {
-            return kv_spec->cache_type;
-        }
-        if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(spec.get())) {
-            return state_spec->cache_type;
-        }
-        return KVCacheRegionName::DEFAULT;
-    }
-
     void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&             specs,
                           const std::vector<std::vector<int>>&          layers_by_group,
                           const std::vector<CacheGroupType>&            types,
-                          const std::vector<KVCacheRegionName>&         regions = {},
                           const std::vector<std::string>&               tags    = {}) {
         const size_t group_num = specs.size();
         RTP_LLM_CHECK_WITH_INFO(group_num > 0, "CacheConfig::fromGroupedSpecs requires at least one cache spec");
@@ -184,10 +174,6 @@ struct CacheConfig {
                                 "CacheConfig::fromGroupedSpecs group type count %zu != spec count %zu",
                                 types.size(),
                                 group_num);
-        RTP_LLM_CHECK_WITH_INFO(regions.empty() || regions.size() == group_num,
-                                "CacheConfig::fromGroupedSpecs region count %zu != spec count %zu",
-                                regions.size(),
-                                group_num);
         RTP_LLM_CHECK_WITH_INFO(tags.empty() || tags.size() == group_num,
                                 "CacheConfig::fromGroupedSpecs tag count %zu != spec count %zu",
                                 tags.size(),
@@ -198,35 +184,30 @@ struct CacheConfig {
         global_layer_ids.clear();
         layer_ids.clear();
         group_types.clear();
-        group_region_names.clear();
         group_tags.clear();
+        group_is_state_cache.clear();
+        group_is_fixed_cache.clear();
+        group_skip_prefix_reuse.clear();
 
         cache_specs.reserve(group_num);
         global_layer_ids.reserve(group_num);
         layer_ids.reserve(group_num);
         group_types.reserve(group_num);
-        group_region_names.reserve(group_num);
         group_tags.reserve(group_num);
+        group_is_state_cache.reserve(group_num);
+        group_is_fixed_cache.reserve(group_num);
+        group_skip_prefix_reuse.reserve(group_num);
 
         layer_to_group_id.assign(layer_num, -1);
         layer_to_group_ids.assign(layer_num, std::vector<int>());
         layer_group_types.assign(layer_num, CacheGroupType::FULL);
 
-        const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-        layer_region_to_group_id.assign(layer_num, std::vector<int>(region_count, -1));
         layer_tag_to_group_id.assign(layer_num, std::map<std::string, int>());
 
         std::map<std::string, std::string> tag_fingerprints;
         for (size_t gid = 0; gid < group_num; ++gid) {
             const auto& spec = specs[gid];
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig::fromGroupedSpecs got null spec at group %zu", gid);
-
-            const auto region_name = regions.empty() ? inferRegionName(spec) : regions[gid];
-            const auto region_id   = static_cast<size_t>(region_name);
-            RTP_LLM_CHECK_WITH_INFO(region_id < region_count,
-                                    "CacheConfig::fromGroupedSpecs invalid region id %zu for group %zu",
-                                    region_id,
-                                    gid);
 
             std::string tag = tags.empty() ? spec->tag : tags[gid];
             if (tag.empty() && group_num == 1) {
@@ -253,8 +234,10 @@ struct CacheConfig {
             global_layer_ids.push_back(layers_by_group[gid]);
             layer_ids.push_back(layers_by_group[gid]);
             group_types.push_back(types[gid]);
-            group_region_names.push_back(region_name);
             group_tags.push_back(tag);
+            group_is_state_cache.push_back(stored_spec->is_state_cache);
+            group_is_fixed_cache.push_back(stored_spec->is_fixed_cache);
+            group_skip_prefix_reuse.push_back(stored_spec->skip_prefix_reuse);
 
             std::vector<bool> seen_layer(static_cast<size_t>(layer_num), false);
             for (int layer_id : layers_by_group[gid]) {
@@ -271,26 +254,17 @@ struct CacheConfig {
                 seen_layer[layer] = true;
 
                 layer_to_group_ids[layer].push_back(static_cast<int>(gid));
-                const int current_region_gid = layer_region_to_group_id[layer][region_id];
-                RTP_LLM_CHECK_WITH_INFO(current_region_gid < 0 || current_region_gid == static_cast<int>(gid),
-                                        "CacheConfig::fromGroupedSpecs layer %d region %zu maps to both group %d and %zu",
-                                        layer_id,
-                                        region_id,
-                                        current_region_gid,
-                                        gid);
-                layer_region_to_group_id[layer][region_id] = static_cast<int>(gid);
                 layer_tag_to_group_id[layer][tag]          = static_cast<int>(gid);
-                if (region_name == KVCacheRegionName::DEFAULT) {
+                if (tag == "default" && layer_to_group_id[layer] < 0) {
                     layer_to_group_id[layer] = static_cast<int>(gid);
                     layer_group_types[layer] = types[gid];
                 }
             }
         }
 
-        const auto swa_region_id = static_cast<size_t>(KVCacheRegionName::SWA_KV);
         for (size_t layer = 0; layer < static_cast<size_t>(layer_num); ++layer) {
-            if (layer_to_group_id[layer] < 0 && swa_region_id < layer_region_to_group_id[layer].size()) {
-                layer_to_group_id[layer] = layer_region_to_group_id[layer][swa_region_id];
+            if (layer_to_group_id[layer] < 0 && layer_tag_to_group_id[layer].size() == 1) {
+                layer_to_group_id[layer] = layer_tag_to_group_id[layer].begin()->second;
             }
             if (layer_to_group_id[layer] < 0 && !layer_to_group_ids[layer].empty()) {
                 layer_to_group_id[layer] = layer_to_group_ids[layer].back();
@@ -315,7 +289,6 @@ struct CacheConfig {
         std::vector<KVCacheSpecPtr> specs;
         std::vector<std::vector<int>> layers_by_group;
         std::vector<CacheGroupType> types;
-        std::vector<KVCacheRegionName> regions;
         std::vector<std::string> tags;
         std::map<std::string, size_t> tag_to_group;
         std::map<std::string, std::string> tag_fingerprints;
@@ -361,9 +334,7 @@ struct CacheConfig {
                     tag_to_group.emplace(tag, gid);
                     specs.push_back(spec);
                     layers_by_group.emplace_back();
-                    const auto region_name = inferRegionName(spec);
-                    regions.push_back(region_name);
-                    types.push_back(inferGroupType(spec, region_name));
+                    types.push_back(inferGroupType(spec));
                     tags.push_back(tag);
                     group_it = tag_to_group.find(tag);
                 }
@@ -371,7 +342,7 @@ struct CacheConfig {
             }
         }
 
-        fromGroupedSpecs(specs, layers_by_group, types, regions, tags);
+        fromGroupedSpecs(specs, layers_by_group, types, tags);
     }
 
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
@@ -385,18 +356,17 @@ struct CacheConfig {
         size_t    reserve = 0;
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
             const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
-            const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
-            const bool is_dsv4_fixed_region       = isDsv4FixedRegion(region);
-            const bool use_explicit_hca_blocks    = region == KVCacheRegionName::HCA_STATE
-                                                 && dsv4_hca_state_pool_blocks > 0;
-            const bool use_explicit_fixed_blocks  = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
+            const bool is_fixed_cache             = gid < group_is_fixed_cache.size() && group_is_fixed_cache[gid];
+            const bool is_hca_state               = gid < group_tags.size() && group_tags[gid] == DSV4_TAG_HCA_STATE;
+            const bool use_explicit_hca_blocks    = is_hca_state && dsv4_hca_state_pool_blocks > 0;
+            const bool use_explicit_fixed_blocks  = is_fixed_cache && dsv4_fixed_pool_blocks > 0;
             const bool use_explicit_dsv4_blocks   = use_explicit_hca_blocks || use_explicit_fixed_blocks;
             uint32_t   rule_blocks;
             if (use_explicit_hca_blocks) {
                 rule_blocks = dsv4_hca_state_pool_blocks;
             } else if (use_explicit_fixed_blocks) {
                 rule_blocks = dsv4_fixed_pool_blocks;
-            } else if ((is_swa || is_dsv4_fixed_region) && step > 1 && global_block_num > 0) {
+            } else if ((is_swa || is_fixed_cache) && step > 1 && global_block_num > 0) {
                 rule_blocks = std::max(1u, global_block_num / static_cast<uint32_t>(step));
             } else {
                 rule_blocks = global_block_num;
@@ -406,7 +376,7 @@ struct CacheConfig {
             // Explicit DSV4 fixed pools are allocated outside the paged FULL
             // pool budget. The linear-step fallback is accounted by the
             // effective block-size formula instead, so no reserve is needed.
-            const bool exclude_from_reserve = is_dsv4_fixed_region && fixed_pool_uses_pinned_cpu;
+            const bool exclude_from_reserve = is_fixed_cache && fixed_pool_uses_pinned_cpu;
             if (use_explicit_dsv4_blocks && gid < group_block_size_bytes.size() && !exclude_from_reserve) {
                 reserve += static_cast<size_t>(rule_blocks) * group_block_size_bytes[gid];
             }
@@ -464,7 +434,7 @@ struct CacheConfig {
         OUTPUT_FIELD(dsv4_fixed_pool_blocks);
         OUTPUT_FIELD(dsv4_hca_state_pool_blocks);
         OUTPUT_FIELD(use_independent_block_pools);
-        OUTPUT_FIELD(use_typed_cache_regions);
+        OUTPUT_FIELD(use_tagged_cache_groups);
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);
         os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
@@ -501,20 +471,27 @@ struct CacheConfig {
             }
         }
         os << "]\n";
-        OUTPUT_FIELD_EXPR("group_region_names.size()", group_region_names.size());
-        os << indent1 << "group_region_names=[";
-        for (size_t i = 0; i < group_region_names.size(); ++i) {
-            os << static_cast<int>(group_region_names[i]);
-            if (i + 1 < group_region_names.size()) {
-                os << ",";
-            }
-        }
-        os << "]\n";
         OUTPUT_FIELD_EXPR("group_tags.size()", group_tags.size());
         os << indent1 << "group_tags=[";
         for (size_t i = 0; i < group_tags.size(); ++i) {
             os << group_tags[i];
             if (i + 1 < group_tags.size()) {
+                os << ",";
+            }
+        }
+        os << "]\n";
+        os << indent1 << "group_is_fixed_cache=[";
+        for (size_t i = 0; i < group_is_fixed_cache.size(); ++i) {
+            os << (group_is_fixed_cache[i] ? 1 : 0);
+            if (i + 1 < group_is_fixed_cache.size()) {
+                os << ",";
+            }
+        }
+        os << "]\n";
+        os << indent1 << "group_skip_prefix_reuse=[";
+        for (size_t i = 0; i < group_skip_prefix_reuse.size(); ++i) {
+            os << (group_skip_prefix_reuse[i] ? 1 : 0);
+            if (i + 1 < group_skip_prefix_reuse.size()) {
                 os << ",";
             }
         }

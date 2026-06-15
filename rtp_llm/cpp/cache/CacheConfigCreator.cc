@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -53,15 +54,15 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
     if (config.fixed_pool_uses_pinned_cpu) {
         return 0u;
     }
-    if (config.use_typed_cache_regions && !config.group_region_names.empty()
-        && config.group_region_names.size() == config.group_block_size_bytes.size()) {
+    if (config.use_tagged_cache_groups && !config.group_is_fixed_cache.empty()
+        && config.group_is_fixed_cache.size() == config.group_block_size_bytes.size()) {
         size_t bytes = 0;
-        for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
-            const auto region = config.group_region_names[gid];
-            if (!isDsv4FixedRegion(region)) {
+        for (size_t gid = 0; gid < config.group_is_fixed_cache.size(); ++gid) {
+            if (!config.group_is_fixed_cache[gid]) {
                 continue;
             }
-            const bool explicit_hca = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
+            const bool explicit_hca = gid < config.group_tags.size() && config.group_tags[gid] == DSV4_TAG_HCA_STATE
+                                      && config.dsv4_hca_state_pool_blocks > 0;
             const bool explicit_fixed = config.dsv4_fixed_pool_blocks > 0;
             if (!explicit_hca && !explicit_fixed) {
                 bytes += config.group_block_size_bytes[gid];
@@ -345,14 +346,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.layer_to_group_id.resize(total_layer_num, 0);
     config.layer_group_types.resize(total_layer_num, CacheGroupType::FULL);
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
-    const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-    if (!config.layer_region_to_group_id.empty()) {
-        const size_t prev = config.layer_region_to_group_id.size();
-        config.layer_region_to_group_id.resize(static_cast<size_t>(total_layer_num));
-        for (size_t l = prev; l < static_cast<size_t>(total_layer_num); ++l) {
-            config.layer_region_to_group_id[l].assign(region_name_count, -1);
-        }
-    }
     if (!config.layer_tag_to_group_id.empty()) {
         config.layer_tag_to_group_id.resize(static_cast<size_t>(total_layer_num));
     }
@@ -405,14 +398,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 if (!config.layer_to_group_ids.empty()
                     && static_cast<size_t>(global_layer_id) < config.layer_to_group_ids.size()) {
                     config.layer_to_group_ids[static_cast<size_t>(global_layer_id)].push_back(target_gid);
-                }
-                if (!config.layer_region_to_group_id.empty()
-                    && static_cast<size_t>(global_layer_id) < config.layer_region_to_group_id.size()
-                    && g < propose_config.group_region_names.size()) {
-                    const auto region = static_cast<size_t>(propose_config.group_region_names[g]);
-                    if (region < config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)].size()) {
-                        config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)][region] = target_gid;
-                    }
                 }
                 if (!config.layer_tag_to_group_id.empty()
                     && static_cast<size_t>(global_layer_id) < config.layer_tag_to_group_id.size()
