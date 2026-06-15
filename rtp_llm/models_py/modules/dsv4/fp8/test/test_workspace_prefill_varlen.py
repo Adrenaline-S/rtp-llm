@@ -66,7 +66,7 @@ class _StubAttention:
         self.compress_ratio = compress_ratio
 
         class _StubKvCache:
-            group_region_names = [SWA_KV, CSA_KV, HCA_KV]
+            group_tags = [SWA_KV, CSA_KV, HCA_KV]
             seq_size_per_block = 256
             kernel_seq_size_per_block = 256
 
@@ -76,6 +76,12 @@ class _StubAttention:
 
     def _pool_entries_per_block(self, attn_type: int) -> int:
         return int(self._eb_by_type.get(attn_type, 0))
+
+    def _swa_entries_per_block(self) -> int:
+        return self._pool_entries_per_block(SWA_KV)
+
+    def _swa_cp_byte_sliced(self) -> bool:
+        return False
 
     # Bind the unbound methods so the stub quacks correctly.
     _build_workspace_meta = Attention._build_workspace_meta

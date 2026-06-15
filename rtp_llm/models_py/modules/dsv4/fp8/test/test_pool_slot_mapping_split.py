@@ -19,27 +19,27 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
 
 
 class PoolSlotMappingSplitTest(unittest.TestCase):
-    def test_require_pool_tokens_per_block_inferrs_from_scalar_region(self) -> None:
+    def test_require_pool_tokens_per_block_inferrs_from_scalar_tag(self) -> None:
         class FakeKVCache:
-            group_region_names = [1, 7]
+            group_tags = [1, 7]
             seq_size_per_block = 16384
             kernel_seq_size_per_block = 128
 
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), group=0), 128)
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), group=1), 16384)
-        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), region=1), 128)
-        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), region=7), 16384)
+        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), tag=1), 128)
+        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), tag=7), 16384)
 
     def test_require_pool_tokens_per_block_prefers_group_override(self) -> None:
         class FakeKVCache:
-            group_region_names = [int(HCA_KV), int(SWA_KV)]
+            group_tags = [int(HCA_KV), int(SWA_KV)]
             group_seq_size_per_block = [256, 1024]
             seq_size_per_block = 256
             kernel_seq_size_per_block = 256
 
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), group=0), 256)
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), group=1), 1024)
-        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), region=int(SWA_KV)), 1024)
+        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), tag=int(SWA_KV)), 1024)
 
     def test_cp_kv_owner_uses_full_physical_block_not_compact_state_block(self) -> None:
         positions = torch.tensor([3, 259, 515, 771], dtype=torch.int64)
@@ -73,7 +73,7 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
 
     def test_build_paged_pool_specs_uses_dsv4_pool_tokens(self) -> None:
         class FakeKVCache:
-            group_region_names = [int(HCA_KV), int(SWA_KV)]
+            group_tags = [int(HCA_KV), int(SWA_KV)]
             seq_size_per_block = 128
             kernel_seq_size_per_block = 128
 
@@ -98,14 +98,14 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         self.assertEqual(specs[int(HCA_KV)][1], 128)
         self.assertEqual(specs[int(SWA_KV)][1], 128)
 
-    def test_require_pool_tokens_per_block_rejects_unknown_region(self) -> None:
+    def test_require_pool_tokens_per_block_rejects_unknown_tag(self) -> None:
         class FakeKVCache:
-            group_region_names = [99]
+            group_tags = [99]
             seq_size_per_block = 16384
             kernel_seq_size_per_block = 128
 
         with self.assertRaisesRegex(RuntimeError, "cannot be inferred"):
-            require_pool_tokens_per_block(FakeKVCache(), region=99)
+            require_pool_tokens_per_block(FakeKVCache(), tag=99)
 
     def test_compute_full_params_equal_entries(self) -> None:
         block_table = torch.tensor([[3, 4]], dtype=torch.int32)

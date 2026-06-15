@@ -828,43 +828,43 @@ class DeepSeekV4Model(GptModelBase):
                 )
 
                 _jit_device = _torch.device(device_str)
-                _fixed_region_cp_size = 1
-                _fixed_region_prefill_sliced = False
-                _fixed_region_cp_config = getattr(
+                _fixed_cache_cp_size = 1
+                _fixed_cache_prefill_sliced = False
+                _fixed_cache_cp_config = getattr(
                     self.parallelism_config, "prefill_cp_config", None
                 )
-                if _fixed_region_cp_config is not None and bool(
-                    getattr(_fixed_region_cp_config, "kv_cache_sharded", False)
+                if _fixed_cache_cp_config is not None and bool(
+                    getattr(_fixed_cache_cp_config, "kv_cache_sharded", False)
                 ):
                     if self._is_decode_role:
                         try:
                             _decode_prefill_cp = bool(
-                                _fixed_region_cp_config.is_prefill_enabled()
+                                _fixed_cache_cp_config.is_prefill_enabled()
                             )
                         except Exception:
                             _decode_prefill_cp = False
                         if _decode_prefill_cp:
-                            _fixed_region_cp_size = max(
+                            _fixed_cache_cp_size = max(
                                 int(
                                     getattr(
-                                        _fixed_region_cp_config, "prefill_cp_size", 0
+                                        _fixed_cache_cp_config, "prefill_cp_size", 0
                                     )
                                     or 1
                                 ),
                                 1,
                             )
                     else:
-                        _fixed_region_cp_size = max(
+                        _fixed_cache_cp_size = max(
                             int(getattr(self.parallelism_config, "tp_size", 1) or 1), 1
                         )
-                        _fixed_region_prefill_sliced = _fixed_region_cp_size > 1
+                        _fixed_cache_prefill_sliced = _fixed_cache_cp_size > 1
                 warmup_compressor_combine_branch_kernels(
                     v4=self.v4,
                     v4_args=self._v4_args,
                     device=_jit_device,
                     gen_num_per_cycle=self._gen_num_per_cycle,
-                    fixed_region_cp_size=_fixed_region_cp_size,
-                    fixed_region_prefill_sliced=_fixed_region_prefill_sliced,
+                    fixed_cache_cp_size=_fixed_cache_cp_size,
+                    fixed_cache_prefill_sliced=_fixed_cache_prefill_sliced,
                 )
                 _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
                 _dense_gemm_prefill_chunk_size = 0
@@ -1061,8 +1061,8 @@ class DeepSeekV4Model(GptModelBase):
         # Snapshot framework's group ordering — CUDA-graph replay path
         # inside the impl's ``prepare`` has no live kv_cache, so carry
         # the list in the config. Position IS the group id.
-        group_region_names_snapshot = (
-            [int(t) for t in (self.kv_cache.group_region_names or [])]
+        group_tags_snapshot = (
+            [str(t) for t in (self.kv_cache.group_tags or [])]
             if self.kv_cache is not None
             else []
         )
@@ -1083,7 +1083,7 @@ class DeepSeekV4Model(GptModelBase):
             ],
             index_topk=int(self._v4_args.index_topk),
             paged_pool_specs=paged_pool_specs,
-            group_region_names=group_region_names_snapshot,
+            group_tags=group_tags_snapshot,
         )
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
         impl = _DecodeFmhaImpl(

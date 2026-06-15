@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.attn_type import TAG_TO_ATTN_TYPE
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     DSv4DecodeAttnMetadataFP8,
     allocate_decode_metadata_fp8,
@@ -63,13 +64,13 @@ class DSv4DecodeFmhaImplConfigFP8:
     # ``(entries_per_block, tokens_per_block, max_blocks_per_req)``.
     paged_pool_specs: Dict[int, Tuple[int, int, int]] = field(default_factory=dict)
 
-    # Snapshot of ``kv_cache.group_region_names`` (framework-owned group
-    # ordering, one attn_type per entry). Position = group id. ``prepare``
+    # Snapshot of ``kv_cache.group_tags`` (framework-owned group
+    # ordering, one cache tag per entry). Position = group id. ``prepare``
     # iterates this to index ``attn_inputs.kv_cache_kernel_block_id_device_by_group``
     # without needing a live ``kv_cache`` (the CUDA-graph replay path
     # doesn't hand one in). Static for the allocator's lifetime, so
     # snapshot-at-construct is safe.
-    group_region_names: List[int] = field(default_factory=list)
+    group_tags: List[str] = field(default_factory=list)
 
 
 class DSv4DecodeFmhaImplFP8:
@@ -117,7 +118,7 @@ class DSv4DecodeFmhaImplFP8:
         self,
         attn_inputs: Any,
     ) -> Optional[Dict[int, torch.Tensor]]:
-        if not self._paged_entries_per_block or not self.config.group_region_names:
+        if not self._paged_entries_per_block or not self.config.group_tags:
             return None
         by_group = getattr(
             attn_inputs,
@@ -127,8 +128,11 @@ class DSv4DecodeFmhaImplFP8:
         if by_group is None or len(by_group) == 0:
             return None
         paged_block_tables: Dict[int, torch.Tensor] = {}
-        for group_id, attn_type in enumerate(self.config.group_region_names):
+        for group_id, tag in enumerate(self.config.group_tags):
+            attn_type = TAG_TO_ATTN_TYPE.get(str(tag))
             if group_id >= len(by_group):
+                continue
+            if attn_type is None:
                 continue
             if attn_type not in self.config.paged_pool_specs:
                 continue

@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4.attn_type import (
+    ATTN_TYPE_TO_TAG,
     CSA_KV,
     CSA_STATE,
     HCA_KV,
@@ -17,16 +18,16 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     SWA_KV,
 )
 
-_PHYSICAL_ROW_REGIONS = {
-    int(SWA_KV),
-    int(CSA_STATE),
-    int(HCA_STATE),
-    int(INDEXER_STATE),
+_PHYSICAL_ROW_TAGS = {
+    ATTN_TYPE_TO_TAG[int(SWA_KV)],
+    ATTN_TYPE_TO_TAG[int(CSA_STATE)],
+    ATTN_TYPE_TO_TAG[int(HCA_STATE)],
+    ATTN_TYPE_TO_TAG[int(INDEXER_STATE)],
 }
-_KERNEL_ROW_REGIONS = {
-    int(CSA_KV),
-    int(HCA_KV),
-    int(INDEXER_KV),
+_KERNEL_ROW_TAGS = {
+    ATTN_TYPE_TO_TAG[int(CSA_KV)],
+    ATTN_TYPE_TO_TAG[int(HCA_KV)],
+    ATTN_TYPE_TO_TAG[int(INDEXER_KV)],
 }
 
 
@@ -40,28 +41,37 @@ def _positive_int(value: Any) -> Optional[int]:
     return ivalue if ivalue > 0 else None
 
 
-def _region_for_group_or_region(
+def _normalize_tag(tag: Optional[Any]) -> Optional[str]:
+    if tag is None:
+        return None
+    if isinstance(tag, str):
+        return tag
+    return ATTN_TYPE_TO_TAG.get(int(tag))
+
+
+def _tag_for_group_or_tag(
     kv_cache: Any,
     group: Optional[int] = None,
-    region: Optional[int] = None,
-) -> Optional[int]:
-    if region is not None:
-        return int(region)
+    tag: Optional[Any] = None,
+) -> Optional[str]:
+    tag_name = _normalize_tag(tag)
+    if tag_name is not None:
+        return tag_name
     if group is None:
         return None
-    group_region_names = getattr(kv_cache, "group_region_names", None)
-    if not group_region_names or group < 0 or group >= len(group_region_names):
+    group_tags = getattr(kv_cache, "group_tags", None)
+    if not group_tags or group < 0 or group >= len(group_tags):
         return None
-    return int(group_region_names[group])
+    return _normalize_tag(group_tags[group]) or str(group_tags[group])
 
 
-def _group_for_region(kv_cache: Any, region: int) -> Optional[int]:
-    group_region_names = getattr(kv_cache, "group_region_names", None)
-    if not group_region_names:
+def _group_for_tag(kv_cache: Any, tag: str) -> Optional[int]:
+    group_tags = getattr(kv_cache, "group_tags", None)
+    if not group_tags:
         return None
-    region = int(region)
-    for gid, group_region in enumerate(group_region_names):
-        if int(group_region) == region:
+    for gid, group_tag in enumerate(group_tags):
+        group_tag_name = _normalize_tag(group_tag) or str(group_tag)
+        if group_tag_name == tag:
             return gid
     return None
 
@@ -78,35 +88,35 @@ def _group_tokens_per_block(kv_cache: Any, group: Optional[int]) -> Optional[int
 def require_pool_tokens_per_block(
     kv_cache: Any,
     group: Optional[int] = None,
-    region: Optional[int] = None,
+    tag: Optional[Any] = None,
 ) -> int:
     """Return block-table row raw-token coverage for a pool.
 
     C++ exposes only scalar physical/kernel block sizes. The group-specific
-    row size is inferred from the region identity: FULL paged pools use
+    row size is inferred from the semantic cache tag: FULL paged pools use
     ``kernel_seq_size_per_block``; SWA_KV and state pools use
     ``seq_size_per_block``.
     """
-    region_id = _region_for_group_or_region(kv_cache, group=group, region=region)
-    if region_id in _PHYSICAL_ROW_REGIONS:
+    tag_name = _tag_for_group_or_tag(kv_cache, group=group, tag=tag)
+    if tag_name in _PHYSICAL_ROW_TAGS:
         value = _group_tokens_per_block(
             kv_cache,
-            group if group is not None else _group_for_region(kv_cache, int(region_id)),
+            group if group is not None else _group_for_tag(kv_cache, tag_name),
         )
         if value is not None:
             return value
         value = _positive_int(getattr(kv_cache, "seq_size_per_block", None))
         if value is not None:
             return value
-    if region_id in _KERNEL_ROW_REGIONS:
+    if tag_name in _KERNEL_ROW_TAGS:
         value = _positive_int(getattr(kv_cache, "kernel_seq_size_per_block", None))
         if value is not None:
             return value
 
     raise RuntimeError(
         "DSV4 KVCache pool tokens-per-block cannot be inferred. "
-        "group=%r, region=%r, group_region_names=%r"
-        % (group, region, getattr(kv_cache, "group_region_names", None))
+        "group=%r, tag=%r, group_tags=%r"
+        % (group, tag, getattr(kv_cache, "group_tags", None))
     )
 
 

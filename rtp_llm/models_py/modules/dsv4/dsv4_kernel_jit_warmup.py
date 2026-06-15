@@ -343,8 +343,8 @@ def warmup_compressor_combine_branch_kernels(
     topk: Optional[int] = None,
     overlap: Optional[bool] = None,
     gen_num_per_cycle: int,
-    fixed_region_cp_size: int = 1,
-    fixed_region_prefill_sliced: bool = False,
+    fixed_cache_cp_size: int = 1,
+    fixed_cache_prefill_sliced: bool = False,
 ) -> None:
     """Compile batched/varlen Triton branches that B=1 gRPC warmup misses."""
 
@@ -375,8 +375,8 @@ def warmup_compressor_combine_branch_kernels(
         configs["combine"],
         configs["compressor"],
         int(gen_num_per_cycle),
-        int(fixed_region_cp_size or 1),
-        bool(fixed_region_prefill_sliced),
+        int(fixed_cache_cp_size or 1),
+        bool(fixed_cache_prefill_sliced),
         str(device),
     )
     if warmup_key in _BRANCH_KERNEL_JIT_WARMED_KEYS:
@@ -408,8 +408,8 @@ def warmup_compressor_combine_branch_kernels(
             overlap=cfg_overlap,
             device=device,
             gen_num_per_cycle=gen_num_per_cycle,
-            fixed_region_cp_size=fixed_region_cp_size,
-            fixed_region_prefill_sliced=fixed_region_prefill_sliced,
+            fixed_cache_cp_size=fixed_cache_cp_size,
+            fixed_cache_prefill_sliced=fixed_cache_prefill_sliced,
         )
     _sync_cuda(device)
     _dist_barrier()
@@ -475,8 +475,8 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     overlap: bool,
     device: torch.device,
     gen_num_per_cycle: int,
-    fixed_region_cp_size: int,
-    fixed_region_prefill_sliced: bool,
+    fixed_cache_cp_size: int,
+    fixed_cache_prefill_sliced: bool,
 ) -> None:
     from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
         DSV4_KERNEL_TOKENS_PER_BLOCK,
@@ -511,8 +511,8 @@ def _warmup_fused_kv_compress_norm_rope_insert(
         compress_ratio=compress_ratio,
         overlap=overlap,
         gen_num_per_cycle=gen_num_per_cycle,
-        cp_size=fixed_region_cp_size,
-        prefill_sliced=fixed_region_prefill_sliced,
+        cp_size=fixed_cache_cp_size,
+        prefill_sliced=fixed_cache_prefill_sliced,
     )
     state_blocks = max(max_position // state_block_size + 1, 1)
     block_table = torch.zeros((1, state_blocks), dtype=torch.int32, device=device)

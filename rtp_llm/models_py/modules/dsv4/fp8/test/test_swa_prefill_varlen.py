@@ -40,7 +40,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
 
 class _StubKvCache:
     def __init__(self, tokens_per_block: int) -> None:
-        self.group_region_names = [SWA_KV]
+        self.group_tags = [SWA_KV]
         self.seq_size_per_block = int(tokens_per_block)
         self.kernel_seq_size_per_block = int(tokens_per_block)
 
@@ -82,6 +82,12 @@ class _StubAttention:
             return 0
         return self._eb
 
+    def _swa_entries_per_block(self) -> int:
+        return self._eb
+
+    def _swa_cp_byte_sliced(self) -> bool:
+        return False
+
     # Bind the unbound leaf builder so the stub quacks correctly.
     _build_swa_prefill_meta_varlen = Attention._build_swa_prefill_meta_varlen
 
@@ -98,7 +104,7 @@ def _make_block_table(n_reqs: int, blocks_per_req: int, device) -> torch.Tensor:
 class _FakeLargeBlockKvCache:
     """Expose scalar C++ KVCache fields used by require_pool_tokens_per_block."""
 
-    group_region_names = [SWA_KV]
+    group_tags = [SWA_KV]
     seq_size_per_block = 16384
     kernel_seq_size_per_block = 128
 
@@ -316,10 +322,10 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
         """Local B==1 scalar reference for the varlen path's B==1 collapse."""
         win = stub.window_size
         is_swa_only = stub.compress_ratio == 0
-        topk_length_kv_full: Optional[torch.Tensor] = None
-        if is_swa_only or stub._kv_cache is None:
-            positions = torch.arange(S, device=self.device, dtype=torch.int32)
-            topk_length_kv_full = torch.clamp(positions + 1, max=win)
+        positions = torch.arange(S, device=self.device, dtype=torch.int32)
+        topk_length_kv_full: Optional[torch.Tensor] = torch.clamp(
+            positions + 1, max=win
+        )
 
         bt = (
             stub._block_tables_by_type.get(SWA_KV)
@@ -366,7 +372,7 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
                 slot_mapping=slot_mapping,
                 query_start_loc=query_start_loc,
                 combined_seq_lens=combined_seq_lens,
-                topk_length_kv_full=None,
+                topk_length_kv_full=topk_length_kv_full,
                 combined_gather_lens=None,
                 combined_gather_len_max=0,
                 M=0,
