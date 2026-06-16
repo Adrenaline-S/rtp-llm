@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -148,16 +149,17 @@ struct CacheConfig {
                << ";dsv4state.block_size_bytes_alignment=" << dsv4_state->block_size_bytes_alignment
                << ";dsv4state.block_size_alignment_min_entries=" << dsv4_state->block_size_alignment_min_entries;
         }
-        os << ";is_state_cache=" << spec->is_state_cache << ";is_fixed_cache=" << spec->is_fixed_cache
+        os << ";is_state_cache=" << spec->is_state_cache << ";is_fixed_cache=" << spec->isFixedCache()
            << ";skip_prefix_reuse=" << spec->skip_prefix_reuse;
         return os.str();
     }
 
+    // Returns the CacheGroupType for a spec, directly from its lifecycle field.
+    // Each spec subclass declares lifecycle in its constructor; this function
+    // is now a thin accessor preserved for call-site compatibility.
     static CacheGroupType inferGroupType(const KVCacheSpecPtr& spec) {
-        if (spec->is_fixed_cache) {
-            return CacheGroupType::SWA;
-        }
-        return spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig::inferGroupType: null spec");
+        return spec->lifecycle;
     }
 
     void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&             specs,
@@ -209,12 +211,10 @@ struct CacheConfig {
             const auto& spec = specs[gid];
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig::fromGroupedSpecs got null spec at group %zu", gid);
 
-            std::string tag = tags.empty() ? spec->tag : tags[gid];
-            if (tag.empty() && group_num == 1) {
-                tag = "default";
-            }
+            const std::string tag = tags.empty() ? spec->tag : tags[gid];
             RTP_LLM_CHECK_WITH_INFO(!tag.empty(),
-                                    "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu",
+                                    "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu; "
+                                    "all KVCacheSpec instances must carry an explicit non-empty tag",
                                     gid);
             const auto fingerprint = specFingerprint(spec);
             const auto fp_it       = tag_fingerprints.find(tag);
@@ -236,7 +236,7 @@ struct CacheConfig {
             group_types.push_back(types[gid]);
             group_tags.push_back(tag);
             group_is_state_cache.push_back(stored_spec->is_state_cache);
-            group_is_fixed_cache.push_back(stored_spec->is_fixed_cache);
+            group_is_fixed_cache.push_back(stored_spec->isFixedCache());
             group_skip_prefix_reuse.push_back(stored_spec->skip_prefix_reuse);
 
             std::vector<bool> seen_layer(static_cast<size_t>(layer_num), false);
@@ -279,6 +279,102 @@ struct CacheConfig {
         }
     }
 
+    // Phase 1 of fromLayerSpecs: validates per-layer structural invariants.
+    //
+    // Checks (for each layer in [0, layer_num)):
+    //   - The layer exists in the map.
+    //   - The spec list is non-empty.
+    //   - Every spec is non-null.
+    //   - Every spec carries an explicit, non-empty tag (no implicit fallback).
+    //   - Tags within a single layer are unique.
+    //
+    // Cross-layer fingerprint consistency is NOT checked here; that belongs
+    // to buildGroupsFromLayerSpecs where the cross-layer state is already built.
+    static void validateLayerSpecs(
+            const std::map<int64_t, std::vector<KVCacheSpecPtr>>& layer_specs,
+            uint32_t                                               layer_num) {
+        for (uint32_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+            const auto layer_it = layer_specs.find(static_cast<int64_t>(layer_id));
+            RTP_LLM_CHECK_WITH_INFO(layer_it != layer_specs.end(),
+                                    "CacheConfig::validateLayerSpecs missing specs for layer %u",
+                                    layer_id);
+            RTP_LLM_CHECK_WITH_INFO(!layer_it->second.empty(),
+                                    "CacheConfig::validateLayerSpecs layer %u has no specs",
+                                    layer_id);
+            std::set<std::string> seen_tags;
+            for (const auto& spec : layer_it->second) {
+                RTP_LLM_CHECK_WITH_INFO(spec != nullptr,
+                                        "CacheConfig::validateLayerSpecs layer %u has null spec",
+                                        layer_id);
+                RTP_LLM_CHECK_WITH_INFO(!spec->tag.empty(),
+                                        "CacheConfig::validateLayerSpecs layer %u has spec with empty tag; "
+                                        "all KVCacheSpec instances must carry an explicit non-empty tag",
+                                        layer_id);
+                RTP_LLM_CHECK_WITH_INFO(seen_tags.insert(spec->tag).second,
+                                        "CacheConfig::validateLayerSpecs layer %u has duplicate tag='%s'",
+                                        layer_id,
+                                        spec->tag.c_str());
+            }
+        }
+    }
+
+    // Phase 2 of fromLayerSpecs: groups specs by tag across all layers.
+    //
+    // Iterates layers in order, assigning each (layer, tag) pair to a group.
+    // First occurrence of a tag creates a new group; subsequent occurrences
+    // append the layer to that group's layer list.
+    //
+    // Also enforces cross-layer fingerprint consistency: specs sharing a tag
+    // must have identical physical shape (same block_size_bytes, dtype, etc.).
+    //
+    // Pre-condition: validateLayerSpecs has already passed (all layers exist,
+    // all specs are non-null, all tags are non-empty and unique within a layer).
+    static void buildGroupsFromLayerSpecs(
+            const std::map<int64_t, std::vector<KVCacheSpecPtr>>& layer_specs,
+            uint32_t                                               layer_num,
+            std::vector<KVCacheSpecPtr>&                           out_specs,
+            std::vector<std::vector<int>>&                         out_layers_by_group,
+            std::vector<CacheGroupType>&                           out_types,
+            std::vector<std::string>&                              out_tags) {
+        std::map<std::string, size_t>      tag_to_group;
+        std::map<std::string, std::string> tag_fingerprints;
+
+        for (uint32_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+            const auto& spec_list = layer_specs.at(static_cast<int64_t>(layer_id));
+            for (const auto& spec : spec_list) {
+                const std::string& tag         = spec->tag;
+                const std::string  fingerprint = specFingerprint(spec);
+
+                // Enforce cross-layer physical consistency for the same tag.
+                const auto fp_it = tag_fingerprints.find(tag);
+                if (fp_it == tag_fingerprints.end()) {
+                    tag_fingerprints.emplace(tag, fingerprint);
+                } else {
+                    RTP_LLM_CHECK_WITH_INFO(
+                            fp_it->second == fingerprint,
+                            "CacheConfig::buildGroupsFromLayerSpecs tag='%s' has inconsistent "
+                            "physical shape across layers (first=%s, current=%s)",
+                            tag.c_str(),
+                            fp_it->second.c_str(),
+                            fingerprint.c_str());
+                }
+
+                // Assign to existing group or create a new one.
+                auto group_it = tag_to_group.find(tag);
+                if (group_it == tag_to_group.end()) {
+                    const size_t gid = out_specs.size();
+                    tag_to_group.emplace(tag, gid);
+                    out_specs.push_back(spec);
+                    out_layers_by_group.emplace_back();
+                    out_types.push_back(inferGroupType(spec));
+                    out_tags.push_back(tag);
+                    group_it = tag_to_group.find(tag);
+                }
+                out_layers_by_group[group_it->second].push_back(static_cast<int>(layer_id));
+            }
+        }
+    }
+
     void fromLayerSpecs(const std::map<int64_t, std::vector<KVCacheSpecPtr>>& layer_specs) {
         RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "CacheConfig::fromLayerSpecs requires positive layer_num");
         RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(layer_num),
@@ -286,61 +382,13 @@ struct CacheConfig {
                                 layer_specs.size(),
                                 layer_num);
 
-        std::vector<KVCacheSpecPtr> specs;
+        validateLayerSpecs(layer_specs, layer_num);
+
+        std::vector<KVCacheSpecPtr>   specs;
         std::vector<std::vector<int>> layers_by_group;
-        std::vector<CacheGroupType> types;
-        std::vector<std::string> tags;
-        std::map<std::string, size_t> tag_to_group;
-        std::map<std::string, std::string> tag_fingerprints;
-
-        for (uint32_t layer_id = 0; layer_id < layer_num; ++layer_id) {
-            const auto layer_it = layer_specs.find(static_cast<int64_t>(layer_id));
-            RTP_LLM_CHECK_WITH_INFO(layer_it != layer_specs.end(),
-                                    "CacheConfig::fromLayerSpecs missing specs for layer %u",
-                                    layer_id);
-            RTP_LLM_CHECK_WITH_INFO(!layer_it->second.empty(),
-                                    "CacheConfig::fromLayerSpecs layer %u has no specs",
-                                    layer_id);
-            std::map<std::string, bool> layer_seen_tags;
-            for (const auto& spec : layer_it->second) {
-                RTP_LLM_CHECK_WITH_INFO(spec != nullptr,
-                                        "CacheConfig::fromLayerSpecs layer %u has null spec",
-                                        layer_id);
-                std::string tag = spec->tag;
-                if (tag.empty() && layer_it->second.size() == 1) {
-                    tag = "default";
-                }
-                RTP_LLM_CHECK_WITH_INFO(!tag.empty(),
-                                        "CacheConfig::fromLayerSpecs layer %u has empty cache spec tag",
-                                        layer_id);
-                RTP_LLM_CHECK_WITH_INFO(layer_seen_tags.emplace(tag, true).second,
-                                        "CacheConfig::fromLayerSpecs layer %u has duplicate tag=%s",
-                                        layer_id,
-                                        tag.c_str());
-
-                const auto fingerprint = specFingerprint(spec);
-                const auto fp_it = tag_fingerprints.find(tag);
-                if (fp_it == tag_fingerprints.end()) {
-                    tag_fingerprints.emplace(tag, fingerprint);
-                } else {
-                    RTP_LLM_CHECK_WITH_INFO(fp_it->second == fingerprint,
-                                            "CacheConfig::fromLayerSpecs tag=%s has multiple physical prototypes",
-                                            tag.c_str());
-                }
-
-                auto group_it = tag_to_group.find(tag);
-                if (group_it == tag_to_group.end()) {
-                    const size_t gid = specs.size();
-                    tag_to_group.emplace(tag, gid);
-                    specs.push_back(spec);
-                    layers_by_group.emplace_back();
-                    types.push_back(inferGroupType(spec));
-                    tags.push_back(tag);
-                    group_it = tag_to_group.find(tag);
-                }
-                layers_by_group[group_it->second].push_back(static_cast<int>(layer_id));
-            }
-        }
+        std::vector<CacheGroupType>   types;
+        std::vector<std::string>      tags;
+        buildGroupsFromLayerSpecs(layer_specs, layer_num, specs, layers_by_group, types, tags);
 
         fromGroupedSpecs(specs, layers_by_group, types, tags);
     }

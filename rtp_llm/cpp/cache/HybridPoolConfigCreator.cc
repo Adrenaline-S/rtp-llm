@@ -175,7 +175,7 @@ void appendGroup(CacheConfig&            config,
     config.group_types.push_back(group_type);
     config.group_tags.push_back(std::move(tag));
     config.group_is_state_cache.push_back(spec != nullptr && spec->is_state_cache);
-    config.group_is_fixed_cache.push_back(spec != nullptr && spec->is_fixed_cache);
+    config.group_is_fixed_cache.push_back(spec != nullptr && spec->isFixedCache());
     config.group_skip_prefix_reuse.push_back(spec != nullptr && spec->skip_prefix_reuse);
 }
 

@@ -24,11 +24,15 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     DataType ssm_state_dtype   = DataType::TYPE_BF16;
     DataType conv_state_dtype  = DataType::TYPE_BF16;
 
-    LinearKVCacheSpec() = default;
+    LinearKVCacheSpec() {
+        type      = KVCacheSpecType::LinearAttention;
+        lifecycle = CacheGroupType::LINEAR;
+    }
 
     LinearKVCacheSpec(const AttentionConfigs&      attn_config,
                       const ParallelismConfig&     parallelism_config,
-                      const LinearAttentionConfig& linear_config) {
+                      const LinearAttentionConfig& linear_config)
+        : LinearKVCacheSpec() {
         // Validation checks that were in HybridConfigCreator
         RTP_LLM_CHECK_WITH_INFO(linear_config.linear_key_head_dim > 0 && linear_config.linear_value_head_dim > 0,
                                 "invalid linear head dim");
@@ -51,7 +55,6 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear_config.linear_key_head_dim,
                                 linear_config.linear_value_head_dim);
 
-        type               = KVCacheSpecType::LinearAttention;
         local_head_num_kv  = static_cast<uint32_t>(std::max(
             1,
             (linear_config.linear_num_value_heads > 1) ?
@@ -135,6 +138,19 @@ struct LinearKVCacheSpec: public KVCacheSpec {
 
     KVCacheSpecPtr clone() const override {
         return std::make_shared<LinearKVCacheSpec>(*this);
+    }
+
+    // Override physicalSignature() to capture the dual-dtype layout.
+    // LinearKVCacheSpec uses ssm_state_dtype for the K (SSM) segment and
+    // conv_state_dtype for the V (conv) segment. Since block_size_bytes() already
+    // encodes their combined element count, we also expose k_block_size_bytes()
+    // (= SSM segment bytes) via scale_block_size_bytes to distinguish specs that
+    // share total block bytes but have a different K/V dtype split.
+    SpecPhysicalSignature physicalSignature() const override {
+        return {block_size_bytes(),
+                k_block_size_bytes(),  // K segment bytes as secondary discriminator
+                lifecycle,             // always LINEAR; use field for consistency with base class
+                ssm_state_dtype};      // primary dtype for the K (SSM) segment
     }
 
     std::string debugString(size_t indent = 0) const override {
