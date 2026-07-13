@@ -36,11 +36,9 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
-static void applyCacheConfigToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
-    model_input.kv_block_stride_bytes     = cache_config.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes     = cache_config.kv_scale_stride_bytes;
-    model_input.seq_size_per_block        = cache_config.seq_size_per_block;
-    model_input.kernel_seq_size_per_block = cache_config.kernel_seq_size_per_block;
+static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
+    model_input.kv_block_stride_bytes = cache_config.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
 }
 
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
@@ -197,9 +195,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     auto target_layer_to_group = buildLayerToGroupVector(target_cache_layer_layout.layer_to_group_ids);
     auto draft_layer_to_group  = buildLayerToGroupVector(draft_cache_layer_layout.layer_to_group_ids);
 
-    const auto& target_cache_config = cache_manager->cacheConfig();
-    const auto& draft_cache_config  = *cache_manager->cacheConfig().mtp_sub_configs.at(0);
-
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -215,8 +210,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         target_cache_config.seq_size_per_block,
-         target_cache_config.kernel_seq_size_per_block,
+         params.model_config_.attn_config.tokens_per_block,
+         params.model_config_.attn_config.kernel_tokens_per_block,
          kv_cache_group_num,
          target_layer_to_group,
          cache_manager});
@@ -263,8 +258,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mla_ops_type,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
-                                draft_cache_config.seq_size_per_block,
-                                draft_cache_config.kernel_seq_size_per_block,
+                                mtp_params->model_config_.attn_config.tokens_per_block,
+                                mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 kv_cache_group_num,
                                 draft_layer_to_group,
                                 cache_manager});
@@ -418,7 +413,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        applyCacheConfigToModelInput(model_input, mtp_cache_cfg);
+        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         draft_model_output                  = std::move(draft_model_->forward(model_input));
     }
@@ -700,7 +695,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
         maybePrintModelInput(model_input, "decode post draft model");
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        applyCacheConfigToModelInput(model_input, mtp_cache_cfg);
+        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
     }
 
@@ -856,7 +851,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     buffer_holder_.release();
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    applyCacheConfigToModelInput(model_input, mtp_cache_cfg);
+    applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -945,7 +940,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             execBroadcast({{model_input.combo_tokens}, 0});
         }
 
-        applyCacheConfigToModelInput(model_input, cache_manager_->cacheConfig());
+        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
     }
 }
 
