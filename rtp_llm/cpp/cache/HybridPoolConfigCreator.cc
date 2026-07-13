@@ -64,19 +64,17 @@ uint32_t mhaLocalKvHeadNum(const ModelConfig& model_config, const ParallelismCon
 }
 
 uint32_t linearLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
-    const auto     attn_tp = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
-    const uint32_t tp      = static_cast<uint32_t>(attn_tp);
-    const uint32_t value_heads       = static_cast<uint32_t>(model_config.linear_attention_config.linear_num_value_heads);
+    const auto     attn_tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
+    const uint32_t tp          = static_cast<uint32_t>(attn_tp);
+    const uint32_t value_heads = static_cast<uint32_t>(model_config.linear_attention_config.linear_num_value_heads);
     RTP_LLM_CHECK_WITH_INFO(value_heads > 0, "local kv head num requires positive linear_num_value_heads");
     RTP_LLM_CHECK_WITH_INFO(value_heads % tp == 0,
                             "linear_num_value_heads must be divisible by attention TP, global=%u tp=%u",
                             value_heads,
                             tp);
     const uint32_t local_value_heads = value_heads / tp;
-    RTP_LLM_CHECK_WITH_INFO(local_value_heads > 0,
-                            "invalid local linear value heads: global=%u tp=%u",
-                            value_heads,
-                            tp);
+    RTP_LLM_CHECK_WITH_INFO(
+        local_value_heads > 0, "invalid local linear value heads: global=%u tp=%u", value_heads, tp);
     return local_value_heads;
 }
 
@@ -148,12 +146,12 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
             auto       group_it          = group_by_tag.find(spec->tag);
             if (group_it == group_by_tag.end()) {
                 GroupBuildState state;
-                state.spec        = spec;
-                state.fingerprint = spec->fingerprint();
+                state.spec              = spec;
+                state.fingerprint       = spec->fingerprint();
                 state.type              = type;
                 state.policy            = policy;
                 state.local_kv_head_num = local_kv_head_num;
-                group_it          = group_by_tag.emplace(spec->tag, std::move(state)).first;
+                group_it                = group_by_tag.emplace(spec->tag, std::move(state)).first;
                 ordered_tags.push_back(spec->tag);
             } else {
                 RTP_LLM_CHECK_WITH_INFO(group_it->second.fingerprint == spec->fingerprint(),
@@ -182,7 +180,7 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
         group.policy            = state.policy;
         group.layer_ids         = state.layer_ids;
         group.local_kv_head_num = state.local_kv_head_num;
-        const int gid   = static_cast<int>(groups.size());
+        const int gid           = static_cast<int>(groups.size());
         groups.push_back(group);
         for (int layer_id : state.layer_ids) {
             auto& layer = layers[static_cast<size_t>(layer_id)];
@@ -197,8 +195,8 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.use_independent_block_pools = true;
     const auto            group_num    = static_cast<size_t>(config.groupNums());
     std::vector<uint32_t> group_block_nums(group_num, 0);
-    std::vector<size_t> group_kv_block_stride_bytes(group_num, 0);
-    std::vector<size_t> group_kv_scale_stride_bytes(group_num, 0);
+    std::vector<size_t>   group_kv_block_stride_bytes(group_num, 0);
+    std::vector<size_t>   group_kv_scale_stride_bytes(group_num, 0);
 
     size_t   max_kv_stride           = 0;
     size_t   max_scale_stride        = 0;
@@ -219,7 +217,8 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         group_kv_block_stride_bytes[gid] = kv_stride;
         group_kv_scale_stride_bytes[gid] = scale_stride;
         const auto type                  = config.typeForGroup(gid);
-        if (type == CacheGroupType::FULL) {
+        const bool is_paged_group        = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
+        if (is_paged_group && !config.usesExplicitIndependentBlocks(gid)) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         }
@@ -257,10 +256,10 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                             const KVCacheConfig&     kv_cache_config,
                                             bool                     is_mtp,
                                             int                      gen_num_per_cycle) {
-    const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    const auto    dtype                  = MemoryEvaluationHelper::getDataTypeForCache(model_config);
     constexpr int kDefaultKvCacheSeqSize = 64;
-    const bool has_seq_override = kv_cache_config.seq_size_per_block > 0
-                                  && kv_cache_config.seq_size_per_block != kDefaultKvCacheSeqSize;
+    const bool    has_seq_override =
+        kv_cache_config.seq_size_per_block > 0 && kv_cache_config.seq_size_per_block != kDefaultKvCacheSeqSize;
     const auto physical_tokens_per_block = has_seq_override ?
                                                static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
                                                static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
@@ -302,7 +301,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         populateGroupsFromLayerSpecs(
             config, model_config.kv_cache_spec_descs, refreshed_specs, model_config, parallelism_config);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-            const auto& spec = config.specForGroup(gid);
+            const auto& spec               = config.specForGroup(gid);
             config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
                                              || spec->type == KVCacheSpecType::OpaqueState;
             config.use_opaque_kv_cache_store = config.use_opaque_kv_cache_store

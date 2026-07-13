@@ -18,10 +18,9 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
            && lhs.explicit_block_num == rhs.explicit_block_num
-           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget
-           && lhs.memory_placement == rhs.memory_placement && lhs.active_tail_blocks == rhs.active_tail_blocks
-           && lhs.validate_tail_blocks == rhs.validate_tail_blocks && lhs.cp_mapping == rhs.cp_mapping
-           && lhs.cp_slice == rhs.cp_slice;
+           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
+           && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
+           && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;
 }
 
 std::shared_ptr<CacheConfig>
@@ -370,10 +369,16 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         return;
     }
 
-    size_t reserve = 0;
+    size_t     reserve = 0;
+    const auto step    = static_cast<uint32_t>(std::max(1, linear_step));
     for (size_t gid = 0; gid < groups.size(); ++gid) {
         const auto explicit_independent_blocks = explicitIndependentBlocks(gid);
-        const auto rule_blocks = explicit_independent_blocks > 0 ? explicit_independent_blocks : global_block_num;
+        uint32_t   rule_blocks                 = global_block_num;
+        if (explicit_independent_blocks > 0) {
+            rule_blocks = explicit_independent_blocks;
+        } else if (typeForGroup(gid) == CacheGroupType::SWA) {
+            rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
+        }
         groups[gid].block_num = rule_blocks;
 
         // Only groups that opt in reserve paged-pool budget for explicit blocks.
