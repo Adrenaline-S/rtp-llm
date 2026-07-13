@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstdint>
 #include <tuple>
 #include <unordered_map>
@@ -23,6 +24,7 @@ public:
         std::string                                  request_id;
         size_t                                       block_count{0};
         std::unordered_map<std::string, BlockRecord> blocks;
+        std::vector<std::string>                     block_keys;
     };
     std::vector<StoreRecord> records;
     bool                     store_success = true;
@@ -37,6 +39,7 @@ public:
         record.block_count = buf->getBlocksCount();
         for (const auto& [key, block] : buf->getBlocks()) {
             record.blocks.emplace(key, BlockRecord{block->addr.get(), block->len});
+            record.block_keys.push_back(key);
         }
         records.push_back(std::move(record));
         if (cb) {
@@ -98,20 +101,27 @@ private:
     std::shared_ptr<rtp_llm::MemoryUtil> null_util_;
 };
 
+static size_t countKeyPrefix(const std::vector<std::string>& keys, const std::string& prefix) {
+    return static_cast<size_t>(
+        std::count_if(keys.begin(), keys.end(), [&](const auto& key) { return key.rfind(prefix, 0) == 0; }));
+}
+
 // Build a CacheStoreInputs for a 2-group hybrid scenario:
 //   group 0 = LINEAR (type 0),  group 1 = FULL (type 1)
 //   layer 0 → group 0,          layer 1 → group 1
 // batch_size = 1, tokens_per_block = 2, input_length = 6  → total_blocks = 3
 static rtp_llm::CacheStoreInputs makeHybridInputs(int layer_id) {
     rtp_llm::CacheStoreInputs p;
-    p.pd_separation         = true;
-    p.warmup                = false;
-    p.context_batch_size    = 1;
-    p.decoder_batch_size    = 0;
-    p.tokens_per_block      = 2;
-    p.kv_block_stride_bytes = 64;
-    p.layer_id              = layer_id;
-    p.model_id              = 0;
+    p.pd_separation             = true;
+    p.warmup                    = false;
+    p.context_batch_size        = 1;
+    p.decoder_batch_size        = 0;
+    p.tokens_per_block          = 2;
+    p.kv_block_stride_bytes     = 64;
+    p.layer_id                  = layer_id;
+    p.model_id                  = 0;
+    p.use_hybrid_kv_cache_store = true;
+    p.use_opaque_kv_cache_store = false;
 
     // group types: [LINEAR=0, FULL=1]
     p.kv_cache_group_types_host = torch::tensor({0, 1}, torch::kInt32);
@@ -437,15 +447,16 @@ TEST_F(ExecOpsTest, testWriteCacheStoreLinearGroupKeepsPaddedPhysicalStride) {
     constexpr size_t padded_stride             = 256;
     auto             kv_cache_base =
         torch::zeros({static_cast<int64_t>(physical_block_num), static_cast<int64_t>(padded_stride)}, torch::kUInt8);
-    auto cache_store               = std::make_shared<MockCacheStore>();
-    auto inputs                    = makePyCacheStoreInputs(cache_store,
+    auto cache_store                 = std::make_shared<MockCacheStore>();
+    auto inputs                      = makePyCacheStoreInputs(cache_store,
                                          physical_tokens_per_block,
                                          padded_stride,
                                          /*scale_stride=*/0,
                                          physical_block_num,
                                          /*mla_kvcache=*/false);
-    inputs.kv_cache_layer_to_group = torch::tensor({0, 1}, torch::kInt32);
-    inputs.kv_cache_group_types    = torch::tensor({1, 0}, torch::kInt32);
+    inputs.kv_cache_layer_to_group   = torch::tensor({0, 1}, torch::kInt32);
+    inputs.kv_cache_group_types      = torch::tensor({1, 0}, torch::kInt32);
+    inputs.use_hybrid_kv_cache_store = true;
 
     torch_ext::LayerKVCache layer_cache;
     layer_cache.kv_cache_base      = kv_cache_base;
@@ -625,11 +636,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreGid_LinearGroup) {
     ASSERT_EQ(cache_store->records.size(), 1u) << "Expected exactly one store() call for the single request";
     EXPECT_EQ(cache_store->records[0].block_count, 1u)
         << "Layer 0 → group 0 (LINEAR): only the last block should be stored";
+    ASSERT_EQ(cache_store->records[0].block_keys.size(), 1u);
+    EXPECT_EQ(cache_store->records[0].block_keys[0].rfind("kv_", 0), 0u)
+        << "Hybrid cache-store must write opaque kv_ keys even when use_opaque_kv_cache_store=false";
 }
 
 // Layer 1 maps to group 1 (FULL).
 // CacheGroupType::FULL means all blocks are transferred;
-// with total_blocks = 3, exactly 3 blocks should reach the mock store.
+// with total_blocks = 3, exactly 3 opaque kv entries should reach the mock store.
 TEST_F(ExecOpsTest, testWriteCacheStoreGid_FullGroup) {
     auto cache_store = std::make_shared<MockCacheStore>();
     auto param       = makeHybridInputs(/*layer_id=*/1);
@@ -641,7 +655,9 @@ TEST_F(ExecOpsTest, testWriteCacheStoreGid_FullGroup) {
     ASSERT_NO_THROW(rtp_llm::runtimeWriteCacheStore(param, kv, /*mla_kvcache=*/false, cache_store));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
-    EXPECT_EQ(cache_store->records[0].block_count, 3u) << "Layer 1 → group 1 (FULL): all 3 blocks should be stored";
+    EXPECT_EQ(cache_store->records[0].block_count, 3u)
+        << "Layer 1 -> group 1 (FULL): all 3 blocks should be stored as opaque kv entries";
+    EXPECT_EQ(countKeyPrefix(cache_store->records[0].block_keys, "kv_"), 3u);
 }
 
 // 3-D block-table path: layer 1 → group 1 (FULL).
@@ -660,7 +676,8 @@ TEST_F(ExecOpsTest, testWriteCacheStoreGid_3DOffset_NonZeroGroup) {
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     EXPECT_EQ(cache_store->records[0].block_count, 3u)
-        << "3-D path, layer 1 → group 1 (FULL): all 3 blocks should be stored";
+        << "3-D path, layer 1 -> group 1 (FULL): all 3 blocks should be stored as opaque kv entries";
+    EXPECT_EQ(countKeyPrefix(cache_store->records[0].block_keys, "kv_"), 3u);
 }
 
 // 2-D block-table compatibility path: layer 1 → group 1 (FULL).
@@ -677,5 +694,6 @@ TEST_F(ExecOpsTest, testWriteCacheStoreGid_2DOffset_NonZeroGroup) {
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     EXPECT_EQ(cache_store->records[0].block_count, 3u)
-        << "2-D path, layer 1 → group 1 (FULL): all 3 blocks should be stored";
+        << "2-D path, layer 1 -> group 1 (FULL): all 3 blocks should be stored as opaque kv entries";
+    EXPECT_EQ(countKeyPrefix(cache_store->records[0].block_keys, "kv_"), 3u);
 }

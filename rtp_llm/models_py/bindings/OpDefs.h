@@ -56,29 +56,59 @@ struct KVCache {
 
     // Per-group topology from CacheLayerLayout.
     std::vector<rtp_llm::CacheGroupType>    group_types;
+    std::vector<size_t>                     group_seq_block_sizes;
+    std::vector<size_t>                     group_kernel_seq_block_sizes;
+    std::vector<size_t>                     group_kernel_blocks_per_kv_block;
     std::vector<std::string>                group_tags;
     std::vector<std::vector<int>>           layer_to_group_ids;
     std::vector<std::map<std::string, int>> layer_tag_to_group_id;
     std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_group;
     std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_group;
 
-    void setFullAttentionView(LayerKVCache& layer_cache, const torch::Tensor& base, const torch::Tensor& scale) const {
-        RTP_LLM_CHECK_WITH_INFO(
-            seq_size_per_block > 0, "physical seq_size_per_block must be positive, got %d", seq_size_per_block);
-        layer_cache.seq_size_per_block = kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
+    int groupSeqBlockSize(int gid) const {
+        if (gid >= 0 && static_cast<size_t>(gid) < group_seq_block_sizes.size() && group_seq_block_sizes[gid] > 0) {
+            return static_cast<int>(group_seq_block_sizes[gid]);
+        }
+        return seq_size_per_block;
+    }
+
+    int groupKernelSeqBlockSize(int gid) const {
+        if (gid >= 0 && static_cast<size_t>(gid) < group_kernel_seq_block_sizes.size()
+            && group_kernel_seq_block_sizes[gid] > 0) {
+            return static_cast<int>(group_kernel_seq_block_sizes[gid]);
+        }
+        return kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : groupSeqBlockSize(gid);
+    }
+
+    int groupKernelBlocksPerKvBlock(int gid) const {
+        if (gid >= 0 && static_cast<size_t>(gid) < group_kernel_blocks_per_kv_block.size()
+            && group_kernel_blocks_per_kv_block[gid] > 0) {
+            return static_cast<int>(group_kernel_blocks_per_kv_block[gid]);
+        }
+        const auto group_kernel = groupKernelSeqBlockSize(gid);
+        const auto group_seq    = groupSeqBlockSize(gid);
+        return group_kernel > 0 ? std::max(1, group_seq / group_kernel) : 1;
+    }
+
+    void setFullAttentionView(
+        LayerKVCache& layer_cache, const torch::Tensor& base, const torch::Tensor& scale, int gid) const {
+        const int physical_seq_size = groupSeqBlockSize(gid);
+        RTP_LLM_CHECK_WITH_INFO(physical_seq_size > 0,
+                                "physical seq_size_per_block must be positive, got %d",
+                                physical_seq_size);
+        layer_cache.seq_size_per_block = groupKernelSeqBlockSize(gid);
         RTP_LLM_CHECK_WITH_INFO(layer_cache.seq_size_per_block > 0,
                                 "kernel seq_size_per_block must be positive, got %d",
                                 layer_cache.seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % layer_cache.seq_size_per_block == 0,
+        RTP_LLM_CHECK_WITH_INFO(physical_seq_size % layer_cache.seq_size_per_block == 0,
                                 "physical seq_size_per_block=%d must be divisible by kernel seq_size_per_block=%d",
-                                seq_size_per_block,
+                                physical_seq_size,
                                 layer_cache.seq_size_per_block);
         RTP_LLM_CHECK_WITH_INFO(base.defined() && base.dim() > 0,
                                 "full-attention KV cache base must be a defined tensor with at least one dimension");
 
         const int64_t physical_block_num = base.size(0);
-        const int64_t kernel_blocks_per_kv_block =
-            static_cast<int64_t>(seq_size_per_block) / layer_cache.seq_size_per_block;
+        const int64_t kernel_blocks_per_kv_block = groupKernelBlocksPerKvBlock(gid);
         const int64_t kernel_block_num = physical_block_num * kernel_blocks_per_kv_block;
 
         if (use_mla) {
@@ -130,27 +160,30 @@ struct KVCache {
         LayerKVCache layer_cache;
         layer_cache.layer_id = idx;
 
-        // Determine whether this layer is a full-attention layer.
-        if (idx < 0 || static_cast<size_t>(idx) >= layer_attn_types.size())
+        const auto layer = static_cast<size_t>(idx);
+        if (idx < 0 || layer >= kv_cache_base_by_layer.size()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        }
+        if (!layer_to_group_ids.empty()) {
+            if (layer >= layer_to_group_ids.size()) {
+                throw std::runtime_error("Invalid layer index for KV cache groups: " + std::to_string(idx));
+            }
+            if (layer_to_group_ids[layer].empty()) {
+                throw std::runtime_error("Layer " + std::to_string(idx) + " owns no KV cache group");
+            }
+            if (layer_to_group_ids[layer].size() > 1) {
+                throw std::runtime_error("Layer " + std::to_string(idx)
+                                         + " owns multiple KV cache groups; use get_layer_cache_by_group, "
+                                           "get_layer_cache(layer, tag), or get_layer_caches");
+            }
+        }
+
         auto          base = kv_cache_base_by_layer[idx];
         torch::Tensor scale;
         if (!kv_scale_base_by_layer.empty()) {
             scale = kv_scale_base_by_layer[idx];
         }
 
-        const bool is_full = layer_attn_types[static_cast<size_t>(idx)] == rtp_llm::CacheGroupType::FULL;
-
-        if (!is_full) {
-            // Linear/SSM attention layer: return the raw cache tensor unchanged.
-            // Use the physical block size so the layer sees the full per-block storage.
-            layer_cache.seq_size_per_block = seq_size_per_block;
-            layer_cache.kv_cache_base      = base;
-            layer_cache.kv_scale_base      = scale;
-        } else {
-            setFullAttentionView(layer_cache, base, scale);
-        }
-        const auto layer = static_cast<size_t>(idx);
         if (!layer_to_group_ids.empty() && layer < layer_to_group_ids.size() && layer_to_group_ids[layer].size() == 1) {
             layer_cache.group_id = layer_to_group_ids[layer].front();
         } else {
@@ -158,6 +191,21 @@ struct KVCache {
         }
         if (layer_cache.group_id >= 0 && static_cast<size_t>(layer_cache.group_id) < group_tags.size()) {
             layer_cache.tag = group_tags[static_cast<size_t>(layer_cache.group_id)];
+        }
+
+        const bool is_full = layer_attn_types.empty() ?
+                                 true :
+                                 (layer < layer_attn_types.size()
+                                  && layer_attn_types[layer] == rtp_llm::CacheGroupType::FULL);
+
+        if (!is_full) {
+            // Linear/SSM attention layer: return the raw cache tensor unchanged.
+            // Use the physical block size so the layer sees the full per-block storage.
+            layer_cache.seq_size_per_block = groupSeqBlockSize(layer_cache.group_id);
+            layer_cache.kv_cache_base      = base;
+            layer_cache.kv_scale_base      = scale;
+        } else {
+            setFullAttentionView(layer_cache, base, scale, layer_cache.group_id);
         }
         return layer_cache;
     }
@@ -200,13 +248,13 @@ struct KVCache {
         }
 
         if (!is_full_group) {
-            layer_cache.seq_size_per_block = seq_size_per_block;
+            layer_cache.seq_size_per_block = groupSeqBlockSize(gid);
             layer_cache.kv_cache_base      = base;
             layer_cache.kv_scale_base      = scale;
             return layer_cache;
         }
 
-        setFullAttentionView(layer_cache, base, scale);
+        setFullAttentionView(layer_cache, base, scale, gid);
         return layer_cache;
     }
 
@@ -252,22 +300,29 @@ struct PyCacheStoreInputs {
     size_t                   decoder_batch_size = 0;
     torch::Tensor            request_id;
     torch::Tensor            request_pd_separation;
-    torch::Tensor            kv_cache_layer_to_group;
-    torch::Tensor            kv_cache_group_types;
-    std::vector<std::string> cache_keys;  // [context_batch_size]
+    torch::Tensor                         kv_cache_layer_to_group;
+    torch::Tensor                         kv_cache_group_types;
+    std::vector<rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
+    std::vector<std::string>              cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;
     // Physical KV-manager block strides, supplied by CacheConfig rather than inferred from tensor views.
-    size_t kv_block_stride_bytes;
-    size_t kv_scale_stride_bytes;
-    bool   pd_separation   = false;
-    size_t model_id        = 0;
-    bool   decode_entrance = false;
-    bool   warmup          = false;
-    bool   mla_kvcache     = false;
+    size_t                   kv_block_stride_bytes;
+    size_t                   kv_scale_stride_bytes;
+    bool                     pd_separation   = false;
+    size_t                   model_id        = 0;
+    bool                     decode_entrance           = false;
+    bool                     warmup                    = false;
+    bool                     use_hybrid_kv_cache_store = false;
+    bool                     use_opaque_kv_cache_store = false;
+    bool                     mla_kvcache               = false;
 
     // Cache store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
+
+    // CP-page-RR sharding context. (1, 0) = no sharding.
+    int cp_size = 1;
+    int cp_rank = 0;
 };
 
 struct PyPrefillCudaGaphCopyParams {

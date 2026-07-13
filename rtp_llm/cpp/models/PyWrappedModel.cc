@@ -274,12 +274,16 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
+        const auto kv_cache_group_policies = cache_manager_ ? cache_manager_->cacheConfig().groupPoliciesSnapshot() :
+                                                              std::vector<rtp_llm::CacheGroupPolicy>{};
+        const bool use_hybrid_kv_cache_store = cache_manager_ && cache_manager_->cacheConfig().groupNums() > 1;
         PyCacheStoreInputs cache_store_inputs{context_batch_size,
                                               decoder_batch_size,
                                               inputs.request_id,
                                               inputs.request_pd_separation,
                                               kv_cache_layer_to_group,
                                               kv_cache_group_types,
+                                              kv_cache_group_policies,
                                               transVectorToString(cache_keys_vec),
                                               inputs.seq_size_per_block,
                                               inputs.kv_block_stride_bytes,
@@ -288,10 +292,14 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                               model_id_,
                                               inputs.decode_entrance,
                                               inputs.warmup,
+                                              use_hybrid_kv_cache_store,
+                                              inputs.use_opaque_kv_cache_store,
                                               description_.attention_conf.use_mla
                                                   && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
                                               cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
-                                              cache_store_async_writer_.get()};
+                                              cache_store_async_writer_.get(),
+                                              device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
+                                              device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
         params = cache_store_inputs;
     }
     return params;

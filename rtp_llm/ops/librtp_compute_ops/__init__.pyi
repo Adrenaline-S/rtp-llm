@@ -93,10 +93,13 @@ class CacheGroupType:
       LINEAR
 
       FULL
+
+      SWA
     """
 
     FULL: typing.ClassVar[CacheGroupType]
     LINEAR: typing.ClassVar[CacheGroupType]
+    SWA: typing.ClassVar[CacheGroupType]
     __members__: typing.ClassVar[dict[str, CacheGroupType]]
     def __eq__(self, other: typing.Any) -> bool: ...
     def __getstate__(self) -> int: ...

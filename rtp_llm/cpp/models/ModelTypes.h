@@ -34,7 +34,7 @@ struct GptModelDescription {
 struct GptModelInitParams {
     const rtp_llm::Weights                weights;
     const GptModelDescription             description;
-    const std::optional<CacheLayerLayout> kv_cache_layer_layout;
+    const std::optional<GroupedCacheLayerLayout> kv_cache_layer_layout;
     size_t                                model_id = 0;
     ParallelismConfig                     parallelism_config;
     HWKernelConfig                        hw_kernel_config;
