@@ -52,11 +52,13 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_kv_cache_block_id_host,
                                 captured_kv_cache_layer_to_group,
                                 captured_cache_store.kv_cache_group_types,
+                                captured_cache_store.kv_cache_group_policies,
                                 captured_cache_store.context_batch_size,
                                 captured_cache_store.decoder_batch_size,
                                 captured_cache_store.request_id,
                                 captured_cache_store.request_pd_separation,
                                 captured_cache_store.cache_keys,
+
                                 captured_cache_store.tokens_per_block,
                                 captured_cache_store.kv_block_stride_bytes,
                                 captured_cache_store.kv_scale_stride_bytes,
@@ -64,7 +66,13 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.model_id,
                                 captured_cache_store.decode_entrance,
                                 captured_cache_store.warmup,
+                                captured_cache_store.use_hybrid_kv_cache_store,
+                                captured_cache_store.use_opaque_kv_cache_store,
                                 captured_kv_cache.layer_id,
+                                captured_kv_cache.group_id,
+                                captured_kv_cache.tag,
+                                captured_cache_store.cp_rank,
+                                captured_cache_store.cp_size,
                                 std::move(event)};
 
         KvCacheInfo kv_cache_info;

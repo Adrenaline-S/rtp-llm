@@ -83,9 +83,36 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(2, full_layer.seq_size_per_block)
         self.assertEqual((12, 2, 1, 2, 4), tuple(full_layer.kv_cache_base.shape))
         self.assertEqual(tuple(full_layer.kv_cache_base.shape), tuple(full_group.kv_cache_base.shape))
+        layer_block_bytes = full_layer.kv_cache_base.stride(0) * full_layer.kv_cache_base.element_size()
+        store_block_bytes = layer_block_bytes * (kv_cache.seq_size_per_block // full_layer.seq_size_per_block)
+        self.assertEqual(full_base.stride(0) * full_base.element_size(), store_block_bytes)
         self.assertEqual(8, linear_layer.seq_size_per_block)
         self.assertEqual((3, 64), tuple(linear_layer.kv_cache_base.shape))
         self.assertEqual(tuple(linear_layer.kv_cache_base.shape), tuple(linear_group.kv_cache_base.shape))
+
+    def test_multi_group_layer_requires_explicit_cache_group(self) -> None:
+        kv_cache = KVCache()
+        kv_cache.seq_size_per_block = 8
+        kv_cache.kernel_seq_size_per_block = 8
+        kv_cache.num_kv_heads = 1
+        kv_cache.head_dim = 4
+        kv_cache.layer_attn_types = [CacheGroupType.FULL]
+        kv_cache.layer_to_group_ids = [[0, 1]]
+        kv_cache.group_types = [CacheGroupType.FULL, CacheGroupType.LINEAR]
+        kv_cache.group_tags = ["full", "linear"]
+        kv_cache.layer_tag_to_group_id = [{"full": 0, "linear": 1}]
+
+        full_base = torch.arange(2 * 2 * 1 * 8 * 4, dtype=torch.float16).reshape(2, 64)
+        linear_base = torch.arange(2 * 64, dtype=torch.float16).reshape(2, 64)
+        kv_cache.kv_cache_base_by_layer = [torch.empty(0, dtype=torch.float16)]
+        kv_cache.kv_cache_base_by_layer_group = [[full_base, linear_base]]
+
+        with self.assertRaisesRegex(RuntimeError, "multiple KV cache groups"):
+            kv_cache.get_layer_cache(0)
+
+        self.assertEqual((2, 2, 1, 8, 4), tuple(kv_cache.get_layer_cache_by_group(0, 0).kv_cache_base.shape))
+        self.assertEqual((2, 64), tuple(kv_cache.get_layer_cache(0, "linear").kv_cache_base.shape))
+        self.assertEqual(2, len(kv_cache.get_layer_caches(0)))
 
 
 if __name__ == "__main__":

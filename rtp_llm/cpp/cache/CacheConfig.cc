@@ -7,9 +7,13 @@
 namespace rtp_llm {
 
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
-    return lhs.reuse_policy == rhs.reuse_policy && lhs.evict_policy == rhs.evict_policy
-           && lhs.validate_tail_blocks == rhs.validate_tail_blocks && lhs.prefix_reusable == rhs.prefix_reusable
-           && lhs.is_reservable == rhs.is_reservable && lhs.group_type == rhs.group_type;
+    return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
+           && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
+           && lhs.explicit_block_num == rhs.explicit_block_num
+           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget
+           && lhs.memory_placement == rhs.memory_placement && lhs.active_tail_blocks == rhs.active_tail_blocks
+           && lhs.validate_tail_blocks == rhs.validate_tail_blocks && lhs.cp_mapping == rhs.cp_mapping
+           && lhs.cp_slice == rhs.cp_slice;
 }
 
 std::shared_ptr<CacheConfig>
@@ -279,13 +283,34 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
 }
 
 void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+    // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
     (void)runtime_config;
-    if (global_block_num == 0 || groups.empty()) {
+    if (global_block_num > 0) {
+        block_num = global_block_num;
+        for (auto& sub_cfg : mtp_sub_configs) {
+            if (sub_cfg != nullptr) {
+                sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
+            }
+        }
+    }
+
+    if (!use_independent_block_pools || !group_block_layout_initialized || groups.empty()) {
+        explicitly_sized_pool_reserve_bytes = 0;
         return;
     }
-    for (auto& group : groups) {
-        group.block_num = global_block_num;
+
+    size_t reserve = 0;
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        const auto explicit_independent_blocks = explicitIndependentBlocks(gid);
+        const auto rule_blocks = explicit_independent_blocks > 0 ? explicit_independent_blocks : global_block_num;
+        groups[gid].block_num = rule_blocks;
+
+        // Only groups that opt in reserve paged-pool budget for explicit blocks.
+        if (explicit_independent_blocks > 0 && groups[gid].policy.charge_to_paged_budget) {
+            reserve += static_cast<size_t>(rule_blocks) * blockSizeBytesForGroup(gid);
+        }
     }
+    explicitly_sized_pool_reserve_bytes = reserve;
 }
 
 std::string CacheConfig::debugString(size_t indent) const {

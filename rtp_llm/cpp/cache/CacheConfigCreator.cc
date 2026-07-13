@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <numeric>
 
+#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
@@ -11,6 +12,84 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+namespace {
+
+size_t steppedBytes(size_t bytes, int step) {
+    return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
+}
+
+size_t nonExplicitFixedPoolHbmBytes(const CacheConfig& config) {
+    if (!config.use_independent_block_pools) {
+        return 0;
+    }
+
+    size_t bytes = 0;
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        if (config.typeForGroup(gid) != CacheGroupType::SWA) {
+            continue;
+        }
+        if (!config.usesExplicitIndependentBlocks(gid)) {
+            bytes += config.blockSizeBytesForGroup(gid);
+        }
+    }
+    return bytes;
+}
+
+size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
+    return config.block_size_bytes + steppedBytes(nonExplicitFixedPoolHbmBytes(config), step);
+}
+
+void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name) {
+    if (kv_cache_config.kernel_seq_size_per_block > 0) {
+        const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block % kernel_seq_size_per_block == 0,
+                                "%s seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                                config_name,
+                                config.seq_size_per_block,
+                                kernel_seq_size_per_block);
+        config.kernel_seq_size_per_block = kernel_seq_size_per_block;
+    } else if (config.kernel_seq_size_per_block == 0
+               || config.kernel_seq_size_per_block == config.seq_size_per_block) {
+        config.kernel_seq_size_per_block = config.seq_size_per_block;
+    }
+}
+
+uint32_t computeBlockNum(CacheConfig&                                     config,
+                         const ModelConfig&                               model_config,
+                         const RuntimeConfig&                             runtime_config,
+                         const KVCacheConfig&                             kv_cache_config,
+                         const ParallelismConfig&                         parallelism_config,
+                         const std::optional<WarmUpResult>&               warm_up_result,
+                         const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    if (kv_cache_config.test_block_num > 0) {
+        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
+        config.finalizeBlockNums(kv_cache_config.test_block_num, runtime_config);
+        return static_cast<uint32_t>(kv_cache_config.test_block_num);
+    }
+
+    const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
+        runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+    config.finalizeBlockNums(0, runtime_config);
+
+    size_t paged_budget = kv_cache_mem_size;
+    if (config.explicitly_sized_pool_reserve_bytes > 0) {
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.explicitly_sized_pool_reserve_bytes,
+                                "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
+                                "(reduce explicitly sized pool blocks if needed)",
+                                kv_cache_mem_size / 1024 / 1024,
+                                config.explicitly_sized_pool_reserve_bytes / 1024 / 1024);
+        paged_budget = kv_cache_mem_size - config.explicitly_sized_pool_reserve_bytes;
+        RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB, paged budget %zu MiB",
+                         kv_cache_mem_size / 1024 / 1024,
+                         config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
+                         paged_budget / 1024 / 1024);
+    }
+    const int joint_step = std::max(1, config.linear_step);
+    return static_cast<uint32_t>(paged_budget / effectivePagedBlockBytes(config, joint_step));
+}
+
+}  // namespace
 
 LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
                                                                const SpecBuildContext&      ctx,
@@ -36,7 +115,13 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
-    if (model_config.hybrid_attention_config.enable_hybrid_attention) {
+    if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
+        KVCacheConfig no_override_config;
+        no_override_config.seq_size_per_block        = 0;
+        no_override_config.kernel_seq_size_per_block = 0;
+        return HybridPoolConfigCreator::createConfig(
+            model_config, parallelism_config, no_override_config, is_mtp, gen_num_per_cycle);
+    } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
         return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     } else {
         return SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
@@ -49,31 +134,15 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    CacheConfig config = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
-    uint32_t    block_num = 0;
+    CacheConfig config = model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+        HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, false, 0) :
+        CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
 
     config.linear_step = kv_cache_config.linear_step;
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        RTP_LLM_CHECK_WITH_INFO(
-            config.seq_size_per_block % static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block) == 0,
-            "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%d)",
-            config.seq_size_per_block,
-            kv_cache_config.kernel_seq_size_per_block);
-        config.kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-    } else {
-        config.kernel_seq_size_per_block = config.seq_size_per_block;
-    }
+    setupKernelSeqSize(config, kv_cache_config, "cache");
 
-    if (kv_cache_config.test_block_num > 0) {
-        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
-        config.finalizeBlockNums(kv_cache_config.test_block_num, runtime_config);
-        block_num = static_cast<uint32_t>(kv_cache_config.test_block_num);
-    } else {
-        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-            runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        config.finalizeBlockNums(0, runtime_config);
-        block_num = static_cast<uint32_t>(kv_cache_mem_size / config.block_size_bytes);
-    }
+    uint32_t block_num = computeBlockNum(
+        config, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_num,
@@ -102,27 +171,19 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    CacheConfig score_config = CacheConfigCreator::createBasicConfig(
-        score_model_config, parallelism_config, false, sp_config.gen_num_per_cycle);
-    CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
-        propose_model_config, parallelism_config, is_mtp, sp_config.gen_num_per_cycle);
+    CacheConfig score_config = score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+        HybridPoolConfigCreator::createConfig(
+            score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle) :
+        CacheConfigCreator::createBasicConfig(
+            score_model_config, parallelism_config, false, sp_config.gen_num_per_cycle);
+    CacheConfig propose_config = propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+        HybridPoolConfigCreator::createConfig(
+            propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle) :
+        CacheConfigCreator::createBasicConfig(
+            propose_model_config, parallelism_config, is_mtp, sp_config.gen_num_per_cycle);
 
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                score_config.seq_size_per_block,
-                                kernel_seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "propose seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                propose_config.seq_size_per_block,
-                                kernel_seq_size_per_block);
-        score_config.kernel_seq_size_per_block   = kernel_seq_size_per_block;
-        propose_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
-    } else {
-        score_config.kernel_seq_size_per_block   = score_config.seq_size_per_block;
-        propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
-    }
+    setupKernelSeqSize(score_config, kv_cache_config, "score");
+    setupKernelSeqSize(propose_config, kv_cache_config, "propose");
 
     int num_mtp_modules = 1;
     if (is_mtp) {
@@ -145,15 +206,43 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         total_block_size_bytes += propose_config.block_size_bytes;
     }
 
+    const size_t explicit_pool_reserve =
+        score_config.explicitly_sized_pool_reserve_bytes
+        + propose_config.explicitly_sized_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
+
     size_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
         block_num = kv_cache_config.test_block_num;
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
-        block_num = kv_cache_mem_size
-                    / (static_cast<size_t>(score_config.block_size_bytes)
-                       + static_cast<size_t>(propose_config.block_size_bytes) * static_cast<size_t>(num_mtp_modules));
+
+        size_t paged_budget = kv_cache_mem_size;
+        if (explicit_pool_reserve > 0) {
+            RTP_LLM_CHECK_WITH_INFO(
+                kv_cache_mem_size > explicit_pool_reserve,
+                "sp kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
+                "(reduce explicitly sized pool blocks if needed)",
+                kv_cache_mem_size / 1024 / 1024,
+                explicit_pool_reserve / 1024 / 1024);
+            paged_budget = kv_cache_mem_size - explicit_pool_reserve;
+            RTP_LLM_LOG_INFO(
+                "sp kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB (score=%zu MiB + propose=%zu MiB x %d), paged budget %zu MiB",
+                kv_cache_mem_size / 1024 / 1024,
+                explicit_pool_reserve / 1024 / 1024,
+                score_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
+                propose_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
+                num_mtp_modules,
+                paged_budget / 1024 / 1024);
+        }
+
+        const int joint_step = std::max(1, kv_cache_config.linear_step);
+        auto      effective_size = [&](const CacheConfig& cfg) -> size_t {
+            return effectivePagedBlockBytes(cfg, joint_step);
+        };
+        block_num = paged_budget
+                    / (effective_size(score_config)
+                       + effective_size(propose_config) * static_cast<size_t>(num_mtp_modules));
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
@@ -161,8 +250,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     CacheConfig config      = score_config;
     config.linear_step      = std::max(1, kv_cache_config.linear_step);
     config.layer_all_num    = total_layer_num;
-    config.block_size_bytes = total_block_size_bytes;
-    config.block_num        = block_num;
+    config.block_size_bytes                   = total_block_size_bytes;
+    config.block_num                          = block_num;
+    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
@@ -192,6 +282,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     }
 
     config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
+    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "

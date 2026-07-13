@@ -165,16 +165,33 @@ private:
         return total;
     }
     size_t memoryCacheBlockBytes(const CacheConfig& cfg) const {
-        size_t total = 0;
-        for (const auto& stride : cfg.layer_to_block_stride_bytes) {
-            if (stride > 0) {
-                total += static_cast<size_t>(stride);
+        size_t total                 = 0;
+        const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
+        for (size_t layer = 0; layer < static_cast<size_t>(cfg.layer_all_num); ++layer) {
+            if (layer >= layer_group_ids.size()) {
+                continue;
+            }
+            for (int gid : layer_group_ids[layer]) {
+                if (gid < 0 || gid >= cfg.groupNums()) {
+                    continue;
+                }
+                const auto policy = cfg.policyForGroup(static_cast<size_t>(gid));
+                if (!policy.enable_prefix_reuse) {
+                    continue;
+                }
+                total += cfg.kvBlockStrideBytesForGroup(static_cast<size_t>(gid))
+                       + cfg.kvScaleStrideBytesForGroup(static_cast<size_t>(gid));
             }
         }
         return total;
     }
     size_t memoryCacheBlockBytes() const {
         return memoryCacheBlockBytes(cache_config_);
+    }
+    void setGroupBlockBytes(CacheConfig& cfg, size_t stride_bytes) const {
+        cfg.setGroupBlockLayout(std::vector<uint32_t>(cfg.groupNums(), cfg.block_num),
+                                std::vector<size_t>(cfg.groupNums(), stride_bytes),
+                                std::vector<size_t>(cfg.groupNums(), 0));
     }
 
     void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) const {
@@ -310,6 +327,9 @@ private:
                 setBlockInfosContent(gpu_bufs, static_cast<char>('k' + static_cast<int>(layer)));
             }
         }
+        if (fill_gpu) {
+            check_cuda_value(cudaDeviceSynchronize());
+        }
 
         // 申请memory block
         auto pool = ensureBlockPool(total);
@@ -409,12 +429,16 @@ private:
                             size_t reuse_len = 0) const {
         auto res = std::make_shared<KVCacheResource>();
         res->cacheKeys() = cache_keys;
+        (void)group1_blocks;
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         RTP_LLM_CHECK_WITH_INFO(layer_num == 4, "test helper expects 4 layers, got %zu", layer_num);
-        std::vector<std::vector<int>> layer_to_group_ids{{0}, {0}, {1}, {1}};
-        res->initGroups(/*group_num=*/2, static_cast<int>(layer_num), layer_to_group_ids);
-        res->mutableBlockIds(0).assign(group0_blocks);
-        res->mutableBlockIds(1).assign(group1_blocks);
+        std::vector<std::vector<int>> layer_to_group_ids(layer_num, std::vector<int>{0});
+        res->initGroups(/*group_num=*/1, static_cast<int>(layer_num), layer_to_group_ids);
+        auto block_indices = group0_blocks;
+        if (block_indices.size() < cache_keys.size()) {
+            block_indices.resize(cache_keys.size(), NULL_BLOCK_IDX);
+        }
+        res->mutableBlockIds(0).assign(block_indices);
         res->setDeviceReuseBlockNum(reuse_len);
         res->setLastBlockAligned(true);
         return res;
@@ -546,10 +570,11 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
-    // NOTE: business code no longer validates `block_size_bytes` for memory cache block size.
-    // `init()` validates `layer_to_block_stride_bytes` instead.
     auto cfg = cache_config_;
+    setGroupBlockBytes(cfg, 0);
     cfg.layer_to_block_stride_bytes.clear();
+    cfg.kv_block_stride_bytes = 0;
+    cfg.kv_scale_stride_bytes = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -562,7 +587,8 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenPoolTooSmallForBlockSize) {
     auto cfg = cache_config_;
     // Make sure pool_size_mb * 1MB / total_stride_bytes == 0 -> createBlockPool() should fail with CHECK.
-    cfg.layer_to_block_stride_bytes.assign(static_cast<size_t>(cfg.layer_num), 1024 * 1024);  // 1MB per layer
+    setGroupBlockBytes(cfg, 1024 * 1024);
+    cfg.layer_to_block_stride_bytes.assign(cfg.layer_all_num, 1024 * 1024);
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -592,10 +618,11 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
-    // NOTE: business code no longer validates `block_size_bytes` for memory cache block size.
-    // `initBlockPool()` validates `layer_to_block_stride_bytes` instead.
     auto cfg = cache_config_;
+    setGroupBlockBytes(cfg, 0);
     cfg.layer_to_block_stride_bytes.clear();
+    cfg.kv_block_stride_bytes = 0;
+    cfg.kv_scale_stride_bytes = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -609,7 +636,8 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails)
     auto cfg = cache_config_;
     // Force createBlockPool() to compute block_num=0:
     // block_num = pool_size_mb * 1MB / total_stride_bytes.
-    cfg.layer_to_block_stride_bytes.assign(static_cast<size_t>(cfg.layer_num), 1024 * 1024);  // 1MB per layer
+    setGroupBlockBytes(cfg, 1024 * 1024);
+    cfg.layer_to_block_stride_bytes.assign(cfg.layer_all_num, 1024 * 1024);
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -1737,6 +1765,9 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
         layer_ids[i] = i;
     }
     cache_config_.fromGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    cache_config_.setGroupBlockLayout({static_cast<uint32_t>(kBlockNum)},
+                                      {cache_config_.kv_block_stride_bytes},
+                                      {cache_config_.kv_scale_stride_bytes});
     ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
 
     const size_t merged_one_key = memoryCacheBlockBytes(cache_config_);
