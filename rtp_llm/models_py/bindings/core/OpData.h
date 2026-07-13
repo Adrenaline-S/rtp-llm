@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
@@ -75,6 +76,7 @@ struct GptModelInputs {
     size_t        kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
     bool          pd_separation             = false;
     bool          decode_entrance           = false;
+    bool          use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;
     bool need_moe_gating = false;
@@ -175,6 +177,7 @@ struct CacheStoreInputs {
 
     torch::Tensor kv_cache_layer_to_group_host;
     torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
+    std::vector<rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
 
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
@@ -187,10 +190,22 @@ struct CacheStoreInputs {
     size_t                   kv_scale_stride_bytes = 0;
     bool                     pd_separation         = false;
     size_t                   model_id              = 0;
-    bool                     decode_entrance       = false;
+    bool                     decode_entrance            = false;
     bool                     warmup;
+    bool                     use_hybrid_kv_cache_store  = false;
+    bool                     use_opaque_kv_cache_store  = true;
 
-    int layer_id = 0;
+    int         layer_id = 0;
+    int         group_id = -1;
+    std::string tag;
+
+    // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups have
+    // their kv_cache_offset compacted to ``ceil(total/cp_size)`` per rank;
+    // the writer must re-pair (cache_keys[r + i*cp_size], offset[i]) instead
+    // of the legacy (cache_keys[i], offset[i]). Defaults of (0, 1) preserve
+    // the non-sharded path. See ``CPSlotMapper::buildStorePlan``.
+    int cp_rank = 0;
+    int cp_size = 1;
 
     // Pre-created event from the main thread to avoid cudaEventRecord
     // contention on background threads. nullptr means writeCacheStore will

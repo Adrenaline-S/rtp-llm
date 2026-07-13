@@ -1,12 +1,28 @@
 #include "OpDefs.h"
 
 namespace torch_ext {
+namespace {
 
-void registerPyOpDefs(pybind11::module& m) {
+void registerCacheGroupType(pybind11::module& m) {
+    try {
+        auto config_m          = pybind11::module_::import("libth_transformer_config");
+        m.attr("CacheGroupType") = config_m.attr("CacheGroupType");
+        return;
+    } catch (const pybind11::error_already_set& e) {
+        PyErr_Clear();
+    }
+
     pybind11::enum_<rtp_llm::CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
         .value("FULL", rtp_llm::CacheGroupType::FULL)
+        .value("SWA", rtp_llm::CacheGroupType::SWA)
         .export_values();
+}
+
+}  // namespace
+
+void registerPyOpDefs(pybind11::module& m) {
+    registerCacheGroupType(m);
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
@@ -35,6 +51,13 @@ void registerPyOpDefs(pybind11::module& m) {
                        "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
                        "Empty = all layers treated as FULL (backward compatibility).")
         .def_readwrite("group_types", &KVCache::group_types, "Per-group cache types (FULL, LINEAR).")
+        .def_readwrite("group_seq_block_sizes", &KVCache::group_seq_block_sizes, "Per-group physical block sizes.")
+        .def_readwrite("group_kernel_seq_block_sizes",
+                       &KVCache::group_kernel_seq_block_sizes,
+                       "Per-group kernel block sizes.")
+        .def_readwrite("group_kernel_blocks_per_kv_block",
+                       &KVCache::group_kernel_blocks_per_kv_block,
+                       "Per-group kernel blocks per physical KV block.")
         .def_readwrite("group_tags", &KVCache::group_tags, "Per-group tag names.")
         .def_readwrite("layer_to_group_ids",
                        &KVCache::layer_to_group_ids,

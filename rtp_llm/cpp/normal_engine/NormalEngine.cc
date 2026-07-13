@@ -289,9 +289,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
-    cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
-    cache_config.block_num          = 5;
+    auto cache_config      = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
+    cache_config.block_num = 5;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(

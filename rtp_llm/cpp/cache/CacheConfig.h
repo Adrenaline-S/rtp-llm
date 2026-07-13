@@ -38,8 +38,12 @@ struct CacheConfig {
     std::vector<LayerBase>               layers;
     std::unordered_map<std::string, int> tag_to_gid;
 
-    std::vector<int> layer_to_block_stride_bytes;
-    bool             group_block_layout_initialized = false;
+    std::vector<int>    layer_to_block_stride_bytes;
+    bool                group_block_layout_initialized           = false;
+    bool                use_independent_block_pools              = false;
+    bool                use_typed_cache_regions                  = false;
+    bool                use_opaque_kv_cache_store                = false;
+    bool                disable_decode_first_malloc_device_reuse = false;
 
     rtp_llm::DataType dtype;
     uint32_t          layer_num;      // the number of main model layers
@@ -50,13 +54,49 @@ struct CacheConfig {
     // Block configuration
     uint32_t block_num;
     size_t   seq_size_per_block        = 1;
-    size_t   kernel_seq_size_per_block = 1;
+    size_t   kernel_seq_size_per_block = 0;
 
-    // Returns how many kernel blocks fit inside one physical (kv-manager) block.
+    size_t seqSizePerBlockForGroup(size_t gid) const {
+        if (gid < groups.size() && groups[gid].spec != nullptr && groups[gid].spec->seq_size_per_block > 0) {
+            return groups[gid].spec->seq_size_per_block;
+        }
+        return seq_size_per_block > 0 ? seq_size_per_block : 1;
+    }
+
+    size_t kernelSeqSizePerBlockForGroup(size_t gid) const {
+        const auto group_seq = seqSizePerBlockForGroup(gid);
+        if (gid < groups.size() && groups[gid].policy.group_type != CacheGroupType::FULL) {
+            return group_seq;
+        }
+        if (kernel_seq_size_per_block == 0) {
+            return group_seq;
+        }
+        return std::min(kernel_seq_size_per_block, group_seq);
+    }
+
+    size_t kernelBlocksPerKvBlockForGroup(size_t gid) const {
+        const auto group_seq    = seqSizePerBlockForGroup(gid);
+        const auto group_kernel = kernelSeqSizePerBlockForGroup(gid);
+        if (group_kernel == 0) {
+            return 1;
+        }
+        RTP_LLM_CHECK_WITH_INFO(group_seq % group_kernel == 0,
+                                "group seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu), gid=%zu",
+                                group_seq,
+                                group_kernel,
+                                gid);
+        return std::max<size_t>(1, group_seq / group_kernel);
+    }
+
+    // Legacy scalar view: how many kernel blocks fit inside one global physical block.
     size_t kernelBlocksPerKvBlock() const {
         if (kernel_seq_size_per_block == 0) {
             return 1;
         }
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % kernel_seq_size_per_block == 0,
+                                "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                                seq_size_per_block,
+                                kernel_seq_size_per_block);
         return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
     }
 
@@ -73,6 +113,7 @@ struct CacheConfig {
     // Attention-specific configuration
     int linear_step      = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
     int group_layer_num  = 1;  // Number of layers per group for hybrid attention
+    size_t explicitly_sized_pool_reserve_bytes = 0;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -138,6 +179,33 @@ struct CacheConfig {
             policies.push_back(group.policy);
         }
         return policies;
+    }
+
+    std::vector<size_t> groupSeqBlockSizesSnapshot() const {
+        std::vector<size_t> values;
+        values.reserve(groups.size());
+        for (size_t gid = 0; gid < groups.size(); ++gid) {
+            values.push_back(seqSizePerBlockForGroup(gid));
+        }
+        return values;
+    }
+
+    std::vector<size_t> groupKernelSeqBlockSizesSnapshot() const {
+        std::vector<size_t> values;
+        values.reserve(groups.size());
+        for (size_t gid = 0; gid < groups.size(); ++gid) {
+            values.push_back(kernelSeqSizePerBlockForGroup(gid));
+        }
+        return values;
+    }
+
+    std::vector<size_t> groupKernelBlocksPerKvBlockSnapshot() const {
+        std::vector<size_t> values;
+        values.reserve(groups.size());
+        for (size_t gid = 0; gid < groups.size(); ++gid) {
+            values.push_back(kernelBlocksPerKvBlockForGroup(gid));
+        }
+        return values;
     }
 
     std::vector<uint32_t> groupBlockNumsSnapshot() const {
@@ -313,6 +381,14 @@ struct CacheConfig {
     std::shared_ptr<CacheConfig> mergeMTPModule(const CacheConfig& propose_config,
                                                 int                module_index,
                                                 uint32_t           main_layer_num);
+
+    uint32_t explicitIndependentBlocks(size_t gid) const {
+        return policyForGroup(gid).explicit_block_num;
+    }
+
+    bool usesExplicitIndependentBlocks(size_t gid) const {
+        return explicitIndependentBlocks(gid) > 0;
+    }
 
     CacheGroupPolicy policyForGroup(size_t gid) const {
         RTP_LLM_CHECK_WITH_INFO(

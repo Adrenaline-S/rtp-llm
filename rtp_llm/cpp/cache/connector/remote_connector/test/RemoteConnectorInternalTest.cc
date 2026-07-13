@@ -82,8 +82,8 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    CacheLayerLayout allLayerCacheBase() const override {
-        return fake_layout_;
+    GroupedCacheLayerLayout allLayerCacheBase() const override {
+        return GroupedCacheLayerLayout::fromFlat(fake_layout_);
     }
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,

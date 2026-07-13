@@ -79,7 +79,7 @@ private:
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
-    std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
+    std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>          cache_manager_;  // For cache_store access
     torch::Tensor                            residual_scale_fp32_;
     torch::Tensor                            residual_scale_;
@@ -152,8 +152,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     if (params.kv_cache_layer_layout.has_value()) {
         torch_ext::KVCache kv_cache;
-        kv_cache.seq_size_per_block        = params.description.attention_conf.tokens_per_block;
-        kv_cache.kernel_seq_size_per_block = params.description.attention_conf.kernel_tokens_per_block;
+        kv_cache.seq_size_per_block        = static_cast<int>(params.tokens_per_block);
+        kv_cache.kernel_seq_size_per_block = static_cast<int>(params.kernel_tokens_per_block);
         const auto& layout                 = params.kv_cache_layer_layout.value();
         kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
         kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
@@ -171,8 +171,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         kv_cache.layer_attn_types   = layout.layer_attn_types;
         kv_cache.layer_to_group_ids = layout.layer_to_group_ids;
-        kv_cache.group_types        = layout.group_types;
-        kv_cache.group_tags         = layout.group_tags;
+        kv_cache.group_types                     = layout.group_types;
+        kv_cache.group_seq_block_sizes           = layout.group_seq_block_sizes;
+        kv_cache.group_kernel_seq_block_sizes    = layout.group_kernel_seq_block_sizes;
+        kv_cache.group_kernel_blocks_per_kv_block = layout.group_kernel_blocks_per_kv_block;
+        kv_cache.group_tags                      = layout.group_tags;
         kv_cache.layer_tag_to_group_id        = layout.layer_tag_to_group_id;
         kv_cache.kv_cache_base_by_layer_group = layout.layers_to_kv_buffer_ptrs_by_group;
         kv_cache.kv_scale_base_by_layer_group = layout.layers_to_scale_buffer_ptrs_by_group;

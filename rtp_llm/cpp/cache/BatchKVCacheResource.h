@@ -25,9 +25,15 @@ public:
                     int                                  layer_num,
                     const std::vector<std::vector<int>>& layer_group_ids            = {},
                     size_t                               kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>&   group_types                = {}) {
+                    const std::vector<CacheGroupType>&   group_types                = {},
+                    const std::vector<size_t>&           group_kernel_blocks_per_kv_block = {}) {
         for (auto& batch : batch_resource) {
-            batch.initGroups(group_nums, layer_num, layer_group_ids, kernel_blocks_per_kv_block, group_types);
+            batch.initGroups(group_nums,
+                             layer_num,
+                             layer_group_ids,
+                             kernel_blocks_per_kv_block,
+                             group_types,
+                             group_kernel_blocks_per_kv_block);
         }
     }
 
@@ -155,13 +161,15 @@ public:
                          int                                  layer_num,
                          const std::vector<std::vector<int>>& layer_group_ids            = {},
                          size_t                               kernel_blocks_per_kv_block = 1,
-                         const std::vector<CacheGroupType>&   group_types                = {}) {
+                         const std::vector<CacheGroupType>&   group_types                = {},
+                         const std::vector<size_t>&           group_kernel_blocks_per_kv_block = {}) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         batch_resource[batch_id].initGroups(group_nums,
                                             layer_num,
                                             layer_group_ids,
                                             kernel_blocks_per_kv_block,
-                                            group_types);
+                                            group_types,
+                                            group_kernel_blocks_per_kv_block);
     }
 
     void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {

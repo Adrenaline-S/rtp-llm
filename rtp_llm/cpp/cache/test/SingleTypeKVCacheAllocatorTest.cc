@@ -8,10 +8,12 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
@@ -41,10 +43,7 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     m.attn_config.kv_lora_rank     = 0;
     m.attn_config.rope_head_dim    = 0;
     m.attn_config.head_num         = 2;
-    m.kv_cache_spec_descs.resize(num_layers);
-    for (auto& descs : m.kv_cache_spec_descs) {
-        descs.push_back(KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention});
-    }
+    setDefaultKvCacheSpec(m);
     return m;
 }
 
@@ -224,6 +223,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
 TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator_->init());
 
     allocator_->setReserveBlockNum(2);
@@ -410,6 +410,50 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
 
     InsertInfo insert_info{batch_resource, complete_token_ids, true};
     allocator_->insertIntoCache(insert_info);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
+    auto config   = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
+    auto policies = config.groupPoliciesSnapshot();
+    ASSERT_EQ(policies.size(), 1u);
+    policies[0].enable_prefix_reuse = false;
+    config.setGroupPolicies(policies);
+
+    auto shared_cache = std::make_shared<SharedBlockCache>();
+    allocator_        = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    allocator_->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator_->init());
+
+    auto block_pool = allocator_->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+    auto cached_blocks = block_pool->malloc(4);
+    ASSERT_EQ(cached_blocks.size(), 4u);
+    for (size_t i = 0; i < cached_blocks.size(); ++i) {
+        shared_cache->put(static_cast<CacheKeyType>(100 + i), std::vector<BlockIdxType>{cached_blocks[i]}, true);
+    }
+    block_pool->requestFree(cached_blocks);
+    ASSERT_FALSE(shared_cache->empty());
+
+    auto hit_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    hit_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200});
+    auto hit_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+
+    MallocInfo hit_malloc_info{hit_resource, hit_tokens};
+    hit_malloc_info.enable_device_cache = true;
+    auto hit_result                     = allocator_->malloc(hit_malloc_info);
+    ASSERT_TRUE(hit_result.success);
+    EXPECT_EQ(hit_result.reuse_len, 0);
+    EXPECT_EQ(hit_resource->cacheResource(0).reuseBlockNum(), 0u);
+
+    auto insert_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    insert_resource->setBatchCacheKeys(0, CacheKeysType{300, 301});
+    auto insert_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+
+    MallocInfo insert_malloc_info{insert_resource, insert_tokens};
+    ASSERT_TRUE(allocator_->malloc(insert_malloc_info).success);
+    allocator_->insertIntoCache(InsertInfo{insert_resource, insert_tokens, /*is_resident=*/false});
+    EXPECT_FALSE(shared_cache->contains(300));
+    EXPECT_FALSE(shared_cache->contains(301));
 }
 
 // Test convert index to addr
@@ -764,6 +808,38 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    auto block_pool = allocator_->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const size_t total_free_before = allocator_->freeBlocksNum();
+    auto         blocks            = block_pool->malloc(2);
+    ASSERT_EQ(blocks.size(), 2);
+
+    KVCacheResource resource;
+    resource.initGroups(1, config.layer_all_num, config.layerGroupIdsSnapshot());
+    resource.cacheKeys() = CacheKeysType{101, 103, 999};
+    resource.rebuildLinearBlockDependencies();
+    resource.setLastBlockAligned(false);
+    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
+
+    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 103, 999}, /*is_connector=*/true);
+    ASSERT_NE(ref_resource, nullptr);
+    EXPECT_FALSE(ref_resource->lastBlockAligned());
+    EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
+    EXPECT_EQ(ref_resource->blocks(0), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
+
+    block_pool->requestFree(blocks);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
+
+    ref_resource.reset();
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
@@ -805,6 +881,21 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10 - 1) * 8);  // block_num * seq_size_per_block
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, CapacityAndNeedBlocksUseCPVirtualBlockSize) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    allocator_->setCPSlotMapper(
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
+
+    EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
+    EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
+
+    auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/0), 5);
+}
+
 // Test boundary conditions
 
 TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithZeroSeqLength) {
@@ -836,6 +927,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeEmptyBatchResource) {
 TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommonLenFails) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/6, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator_->init());
 
     auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);

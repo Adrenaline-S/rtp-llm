@@ -1,13 +1,20 @@
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <unordered_set>
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+
+#if USING_CUDA
+#include <cuda_runtime.h>
+#elif USING_ROCM
+#include <hip/hip_runtime.h>
+#endif
 
 namespace rtp_llm {
 
@@ -119,6 +126,39 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
                                  + local_layer_id);
 }
 
+BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, int group_id, int block_id) const {
+    (void)group_id;
+    return convertIndexToAddr(layer_id, block_id);
+}
+
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
+    (void)group_id;
+    return convertIndexToBuffer(layer_id, block_id);
+}
+
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
+    int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
+    (void)group_id;
+    return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
+}
+
+BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
+    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
+    return convertIndexToAddr(layer_id, group_id, block_id);
+}
+
+std::vector<BlockInfo>
+KVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
+    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
+    return convertIndexToBuffer(layer_id, group_id, block_id);
+}
+
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBufferByTag(
+    int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
+    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
+    return convertIndexToBuffer(layer_id, group_id, block_id, partition_count, partition_id);
+}
+
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
     BlockIdPair copy_mapping{src_block_index, dest_block_index};
     blockBatchCopy(&copy_mapping, &copy_mapping + 1);
@@ -142,19 +182,9 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         return;
     }
 
-    BatchCopyParams copy_params;
-
-    const size_t copy_num = (end_ptr - begin_ptr) * config_.layer_num;
-
-    size_t copy_nums[CopyType::TYPE_SIZE] = {};
-    auto   copy_type                      = BatchCopyParams::get_copy_type(
+    const auto copy_type = BatchCopyParams::get_copy_type(
         allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU,
         allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU);
-    copy_nums[copy_type] += copy_num;  // for kv
-
-    for (size_t i = 0; i < CopyType::TYPE_SIZE; ++i) {
-        copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
-    }
 
     // kv_cache_update_mapping is currently produced by single-group fork/update logic.
     // A future multi-group producer should carry group ids and copy each group explicitly.
@@ -178,18 +208,54 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
                 continue;
             }
 
-            copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
+            auto copy_bytes = [&](void* dst, const void* src, size_t bytes) {
+                if (bytes == 0) {
+                    return;
+                }
+                if (copy_type == CopyType::H2H) {
+                    std::memcpy(dst, src, bytes);
+                    return;
+                }
+#if USING_CUDA
+                cudaMemcpyKind kind = cudaMemcpyDefault;
+                if (copy_type == CopyType::D2D) {
+                    kind = cudaMemcpyDeviceToDevice;
+                } else if (copy_type == CopyType::H2D) {
+                    kind = cudaMemcpyHostToDevice;
+                } else if (copy_type == CopyType::D2H) {
+                    kind = cudaMemcpyDeviceToHost;
+                }
+                RTP_LLM_CHECK_WITH_INFO(cudaMemcpy(dst, src, bytes, kind) == cudaSuccess,
+                                        "failed to copy kv cache block bytes=%zu copy_type=%d",
+                                        bytes,
+                                        static_cast<int>(copy_type));
+#elif USING_ROCM
+                hipMemcpyKind kind = hipMemcpyDefault;
+                if (copy_type == CopyType::D2D) {
+                    kind = hipMemcpyDeviceToDevice;
+                } else if (copy_type == CopyType::H2D) {
+                    kind = hipMemcpyHostToDevice;
+                } else if (copy_type == CopyType::D2H) {
+                    kind = hipMemcpyDeviceToHost;
+                }
+                RTP_LLM_CHECK_WITH_INFO(hipMemcpy(dst, src, bytes, kind) == hipSuccess,
+                                        "failed to copy kv cache block bytes=%zu copy_type=%d",
+                                        bytes,
+                                        static_cast<int>(copy_type));
+#else
+                RTP_LLM_FAIL("device kv cache copy is not supported in this build");
+#endif
+            };
+
+            copy_bytes(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes);
 
             if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
-                copy_params.add(dst_addr_info.kv_scale_addr,
-                                src_addr_info.kv_scale_addr,
-                                config_.kvScaleStrideBytesForGroup(static_cast<size_t>(group_id)),
-                                copy_type);
+                copy_bytes(dst_addr_info.kv_scale_addr,
+                           src_addr_info.kv_scale_addr,
+                           config_.kvScaleStrideBytesForGroup(static_cast<size_t>(group_id)));
             }
         }
     }
-
-    execBatchCopy(copy_params);
 }
 
 size_t KVCacheAllocator::freeBlocksNum() const {
@@ -205,43 +271,70 @@ size_t KVCacheAllocator::availableBlocksNum() const {
 }
 
 BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
-    if (!block_pool_ || min_blocks_to_free == 0) {
+    if (!shared_block_cache_ || min_blocks_to_free == 0) {
         return nullptr;
     }
 
-    auto block_cache = block_pool_->blockCache();
-    if (!block_cache) {
-        return nullptr;
-    }
-
-    auto evict_result = block_cache->selectAndEvict(min_blocks_to_free);
+    auto evict_result = shared_block_cache_->selectAndEvict(min_blocks_to_free);
     if (evict_result.evicted_keys.empty()) {
         return nullptr;
+    }
+    if (metrics_reporter_) {
+        for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
+            RtpLLMCacheEvictionMetricsCollector collector;
+            collector.lifetime_ms = lifetime_ms;
+            kmonitor::MetricsTags tags("scope", "gpu");
+            tags.AddTag("evict_policy",
+                        evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
+            tags.AddTag("backing", "device");
+            metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                       &collector);
+        }
     }
 
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
-    batch_resource->initGroups(config_.groupNums(), static_cast<int>(config_.layer_all_num), config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock(), config_.groupTypesSnapshot());
+    batch_resource->initGroups(config_.groupNums(),
+                               static_cast<int>(config_.layer_all_num),
+                               config_.layerGroupIdsSnapshot(),
+                               config_.kernelBlocksPerKvBlock(),
+                               config_.groupTypesSnapshot(),
+                               config_.groupKernelBlocksPerKvBlockSnapshot());
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {
         batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
-    size_t evicted_idx = 0;
-    for (const auto cache_key : evict_result.evicted_keys) {
-        batch_resource->pushBackCacheKey(0, cache_key);
-        auto& items = evict_result.evicted_items.at(cache_key);
-        for (const auto& item : items) {
-            auto& block_ids = batch_resource->mutableBlockIds(0, item.group_id);
-            RTP_LLM_CHECK_WITH_INFO(evicted_idx < block_ids.blocksNum(),
-                                    "evicted index out of range: idx=%zu, blocks_num=%zu",
-                                    evicted_idx,
-                                    block_ids.blocksNum());
-            block_ids.setAt(evicted_idx, item.block_index);
+    CacheKeysType         evicted_keys;
+    BlockDependenciesType evicted_dependencies;
+    evicted_keys.reserve(evict_result.evicted_keys.size());
+    evicted_dependencies.reserve(evict_result.evicted_keys.size());
+    for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
+        const auto  cache_key = evict_result.evicted_keys[evicted_idx];
+        const auto& slots     = evict_result.evicted_slots.at(cache_key);
+        evicted_keys.push_back(cache_key);
+        auto dep_it = evict_result.evicted_dependencies.find(cache_key);
+        if (dep_it != evict_result.evicted_dependencies.end()) {
+            evicted_dependencies.push_back(dep_it->second);
+        } else {
+            BlockDependency dependency;
+            dependency.ordinal = static_cast<uint32_t>(evicted_idx);
+            if (evicted_idx > 0) {
+                dependency.has_parent = true;
+                dependency.parent_key = evict_result.evicted_keys[evicted_idx - 1];
+            }
+            evicted_dependencies.push_back(dependency);
         }
-        ++evicted_idx;
+        for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < config_.groupNums(); ++gid) {
+            if (!isNullBlockIdx(slots[gid])) {
+                batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, slots[gid]);
+            }
+        }
     }
+    batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
+    batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
+    batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
     return batch_resource;
 }
 
@@ -284,7 +377,11 @@ size_t KVCacheAllocator::notInUseBlocksNum() const {
 }
 
 size_t KVCacheAllocator::availableTokensNum() const {
-    return block_pool_ ? (block_pool_->availableBlocksNum() * seqSizePerBlock()) : 0;
+    return block_pool_ ? (block_pool_->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
+}
+
+size_t KVCacheAllocator::totalTokensNum() const {
+    return block_pool_ ? (block_pool_->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
 }
 
 size_t KVCacheAllocator::totalBlocksNum() const {
@@ -292,7 +389,45 @@ size_t KVCacheAllocator::totalBlocksNum() const {
 }
 
 size_t KVCacheAllocator::maxAvailableTokensNum() const {
-    return block_pool_ ? (block_pool_->totalBlocksNum() * seqSizePerBlock()) : 0;
+    return totalTokensNum();
+}
+
+bool KVCacheAllocator::cpShardThisGroupForCapacity(size_t gid) const {
+    return cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, gid);
+}
+
+size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(size_t gid) const {
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        return cp_slot_mapper_->logicalSeqSizePerBlock(config_, gid);
+    }
+    return config_.seqSizePerBlockForGroup(gid);
+}
+
+int KVCacheAllocator::cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const {
+    return (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) ?
+               cp_slot_mapper_->effectiveSeqLenForAlloc(config_, gid, seq_len) :
+               seq_len;
+}
+
+int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        return cp_slot_mapper_->virtualBlockSize();
+    }
+    return seqSizePerBlock();
+}
+
+KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
+    const size_t total_blocks     = totalBlocksNum();
+    const size_t available_blocks = availableBlocksNum();
+    return {total_blocks * default_seq_size_per_block, available_blocks * default_seq_size_per_block};
+}
+
+std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
+    return {};
+}
+
+std::vector<int> KVCacheAllocator::independentEvictionGroupIds() const {
+    return {};
 }
 
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
