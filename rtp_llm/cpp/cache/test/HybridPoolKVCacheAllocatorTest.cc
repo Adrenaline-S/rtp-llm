@@ -142,8 +142,8 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     mc.hybrid_attention_config.enable_hybrid_attention           = true;
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     ParallelismConfig pc;
-    auto config      = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
-    config.block_num = block_num;
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    config.block_num         = block_num;
     return config;
 }
 
@@ -154,7 +154,7 @@ static void setExplicitBlocksForGroup(CacheConfig& config, size_t group_id, uint
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         policies.push_back(config.policyForGroup(gid));
     }
-    policies[group_id].explicit_block_num        = block_num;
+    policies[group_id].explicit_block_num     = block_num;
     policies[group_id].charge_to_paged_budget = block_num > 0;
     config.setGroupPolicies(policies);
 }
@@ -440,7 +440,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TotalAndFreeBlocksAggregateAcrossGroups) 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScopes) {
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     // Token capacity aggregators use FULL groups first: 7 blocks * 4 tokens.
-    auto allocator                  = makeAllocator(config);
+    auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 28u);
@@ -449,8 +449,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
-    auto config                     = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
-    auto allocator                  = makeAllocator(config);
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 4u);
@@ -463,7 +463,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForF
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsFallBackToGlobalSeqSize) {
-    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/6);
+    auto config               = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/6);
     config.seq_size_per_block = 4;
     auto allocator            = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
@@ -1048,28 +1048,33 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
     EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesOnlyPagedGroupsForBlockSize) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesGroupOwnedBytesForPagedBlockSize) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
-    auto config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
 
-    size_t expected_non_full_bytes = 0;
-    size_t expected_full_bytes     = 0;
+    size_t expected_non_paged_bytes = 0;
+    size_t expected_paged_bytes     = 0;
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const auto type = config.typeForGroup(gid);
-        if (type == CacheGroupType::FULL) {
-            expected_full_bytes += config.blockSizeBytesForGroup(gid);
+        const auto expected_group_bytes =
+            config.layerIdsForGroup(gid).size()
+            * (config.kvBlockStrideBytesForGroup(gid) + config.kvScaleStrideBytesForGroup(gid));
+        EXPECT_EQ(config.blockSizeBytesForGroup(gid), expected_group_bytes) << "gid=" << gid;
+        if (!config.usesExplicitIndependentBlocks(gid)
+            && (type == CacheGroupType::FULL || type == CacheGroupType::LINEAR)) {
+            expected_paged_bytes += expected_group_bytes;
         } else {
-            expected_non_full_bytes += config.blockSizeBytesForGroup(gid);
+            expected_non_paged_bytes += expected_group_bytes;
         }
     }
 
-    EXPECT_GT(expected_non_full_bytes, 0u);
-    EXPECT_GT(expected_full_bytes, 0u);
+    EXPECT_GT(expected_non_paged_bytes, 0u);
+    EXPECT_GT(expected_paged_bytes, 0u);
 
-    EXPECT_EQ(config.block_size_bytes, expected_full_bytes);
+    EXPECT_EQ(config.block_size_bytes, expected_paged_bytes);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBlocks) {
@@ -1118,7 +1123,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
     EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksUseGlobalBlocks) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
     auto mc                                                      = makeProModelConfig();
     mc.hybrid_attention_config.enable_hybrid_attention           = true;
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
@@ -1131,9 +1136,33 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksUse
     config.finalizeBlockNums(/*global_block_num=*/128, rt);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        EXPECT_EQ(config.blockNumForGroup(gid), 128u) << "gid=" << gid;
+        const uint32_t expected = config.typeForGroup(gid) == CacheGroupType::SWA ? 32u : 128u;
+        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
     }
     EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, FinalizeNonExplicitSwaBlocksUsesCeilDivision) {
+    auto config        = makeTinySwaMultiPoolHybridConfig();
+    config.linear_step = 4;
+    RuntimeConfig rt;
+
+    config.finalizeBlockNums(/*global_block_num=*/1, rt);
+    EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 1u);
+    EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 1u);
+
+    config.finalizeBlockNums(/*global_block_num=*/8, rt);
+    EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 8u);
+    EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 2u);
+
+    config.finalizeBlockNums(/*global_block_num=*/9, rt);
+    EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 9u);
+    EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 3u);
+
+    config.linear_step = 1;
+    config.finalizeBlockNums(/*global_block_num=*/9, rt);
+    EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 9u);
+    EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 9u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByTagRoutesToCorrectPool) {
