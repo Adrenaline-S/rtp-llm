@@ -336,11 +336,13 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
 
     const auto layer_group_ids  = config_.layerGroupIdsSnapshot();
     const auto layer_tag_to_gid = config_.layerTagToGroupIdSnapshot();
-    layout.group_types                     = config_.groupTypesSnapshot();
-    layout.group_seq_block_sizes           = config_.groupSeqBlockSizesSnapshot();
-    layout.group_kernel_seq_block_sizes    = config_.groupKernelSeqBlockSizesSnapshot();
-    layout.group_kernel_blocks_per_kv_block = config_.groupKernelBlocksPerKvBlockSnapshot();
-    layout.group_tags                      = config_.groupTagsSnapshot();
+    layout.group_types = config_.groupTypesSnapshot();
+    if (config_.use_independent_block_pools) {
+        layout.group_seq_block_sizes            = config_.groupSeqBlockSizesSnapshot();
+        layout.group_kernel_seq_block_sizes     = config_.groupKernelSeqBlockSizesSnapshot();
+        layout.group_kernel_blocks_per_kv_block = config_.groupKernelBlocksPerKvBlockSnapshot();
+    }
+    layout.group_tags = config_.groupTagsSnapshot();
     layout.layer_tag_to_group_id.resize(config_.layer_num);
     layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
     layout.layers_to_kv_buffer_ptrs_by_group.resize(config_.layer_num);
@@ -415,15 +417,19 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
     }
-    layout.group_tags                       = mtp_sub_config->groupTagsSnapshot();
-    layout.group_types                      = mtp_sub_config->groupTypesSnapshot();
-    layout.group_seq_block_sizes            = mtp_sub_config->groupSeqBlockSizesSnapshot();
-    layout.group_kernel_seq_block_sizes     = mtp_sub_config->groupKernelSeqBlockSizesSnapshot();
-    layout.group_kernel_blocks_per_kv_block = mtp_sub_config->groupKernelBlocksPerKvBlockSnapshot();
+    layout.group_tags  = mtp_sub_config->groupTagsSnapshot();
+    layout.group_types = mtp_sub_config->groupTypesSnapshot();
+    if (config_.use_independent_block_pools) {
+        layout.group_seq_block_sizes            = mtp_sub_config->groupSeqBlockSizesSnapshot();
+        layout.group_kernel_seq_block_sizes     = mtp_sub_config->groupKernelSeqBlockSizesSnapshot();
+        layout.group_kernel_blocks_per_kv_block = mtp_sub_config->groupKernelBlocksPerKvBlockSnapshot();
+    }
 
     const size_t group_count = layout.group_tags.size();
-    layout.layers_to_kv_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
-    layout.layers_to_scale_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
+    if (config_.use_independent_block_pools) {
+        layout.layers_to_kv_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
+        layout.layers_to_scale_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
+    }
     layout.layer_to_group_ids.resize(mtp_layer_num);
     layout.layer_tag_to_group_id.resize(mtp_layer_num);
     layout.layer_attn_types.resize(mtp_layer_num, CacheGroupType::FULL);
@@ -453,6 +459,10 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
                 const auto first_gid = static_cast<size_t>(layout.layer_to_group_ids[local_layer_id].front());
                 layout.layer_attn_types[local_layer_id]  = mtp_sub_config->typeForGroup(first_gid);
             }
+        }
+
+        if (!config_.use_independent_block_pools) {
+            continue;
         }
 
         for (size_t local_gid = 0; local_gid < group_count; ++local_gid) {
