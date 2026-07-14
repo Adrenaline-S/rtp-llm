@@ -2,12 +2,15 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    select_attention_inputs_for_layer,
+)
 from rtp_llm.ops.compute_ops import (
     CacheGroupType,
     KVCache,
     PyAttentionInputs,
     PyModelInputs,
+    PyModelOutputs,
 )
 
 
@@ -27,6 +30,11 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertTrue(inputs.attention_inputs.is_prefill)
         self.assertEqual(3, inputs.attention_inputs.input_lengths.item())
 
+    def test_model_outputs_discards_python_only_params(self) -> None:
+        outputs = PyModelOutputs(torch.empty(0), {"full": None})
+
+        self.assertIsNone(outputs.params_ptr)
+
     def test_attention_inputs_field_updates_directly(self) -> None:
         inputs = PyModelInputs()
         inputs.attention_inputs = self._attn_inputs(is_prefill=False, input_length=2)
@@ -38,23 +46,27 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertTrue(inputs.attention_inputs.is_prefill)
         self.assertEqual(5, inputs.attention_inputs.input_lengths.item())
 
-    def test_select_block_map_for_layer_uses_layer_to_group_tensor(self) -> None:
-        attn_inputs = PyAttentionInputs()
-        attn_inputs.kv_cache_layer_to_group = torch.tensor([1], dtype=torch.int32)
-        attn_inputs.kv_cache_kernel_block_id_by_group = [
-            torch.tensor([[10]], dtype=torch.int32),
-            torch.tensor([[20]], dtype=torch.int32),
-        ]
-        attn_inputs.kv_cache_kernel_block_id_device_by_group = [
-            torch.tensor([[11]], dtype=torch.int32),
-            torch.tensor([[21]], dtype=torch.int32),
-        ]
+    def test_attention_inputs_mapping_is_selected_by_layer_tag(self) -> None:
+        full = self._attn_inputs(is_prefill=False, input_length=1)
+        linear = self._attn_inputs(is_prefill=False, input_length=1)
+        full.kv_cache_kernel_block_id = torch.tensor([[10]], dtype=torch.int32)
+        linear.kv_cache_kernel_block_id = torch.tensor([[20]], dtype=torch.int32)
 
-        selected_gid = select_block_map_for_layer(attn_inputs, 0)
+        inputs = PyModelInputs()
+        inputs.attention_inputs = {"full": full, "linear": linear}
 
-        self.assertEqual(1, selected_gid)
-        self.assertEqual(20, attn_inputs.kv_cache_kernel_block_id.item())
-        self.assertEqual(21, attn_inputs.kv_cache_kernel_block_id_device.item())
+        kv_cache = KVCache()
+        kv_cache.group_tags = ["full", "linear"]
+        kv_cache.layer_to_group_ids = [[1]]
+        kv_cache.layer_tag_to_group_id = [{"linear": 1}]
+        kv_cache.kv_cache_base_by_layer = [torch.empty(0)]
+        kv_cache.kv_cache_base_by_layer_group = [[torch.empty(0), torch.ones((1, 1))]]
+
+        selected = select_attention_inputs_for_layer(inputs, kv_cache, 0)
+
+        self.assertEqual(20, selected.kv_cache_kernel_block_id.item())
+        self.assertFalse(hasattr(selected, "kv_cache_kernel_block_id_by_group"))
+        self.assertFalse(hasattr(selected, "kv_cache_layer_to_group"))
 
     def test_kv_cache_kernel_block_view_applies_only_to_full_layers(self) -> None:
         kv_cache = KVCache()
@@ -66,6 +78,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
         kv_cache.layer_to_group_ids = [[0], [1]]
         kv_cache.group_types = [CacheGroupType.FULL, CacheGroupType.LINEAR]
         kv_cache.group_tags = ["full", "linear"]
+        kv_cache.layer_tag_to_group_id = [{"full": 0}, {"linear": 1}]
 
         full_base = torch.arange(3 * 2 * 1 * 8 * 4, dtype=torch.float16).reshape(3, 64)
         linear_base = torch.arange(3 * 64, dtype=torch.float16).reshape(3, 64)
@@ -77,18 +90,29 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         full_layer = kv_cache.get_layer_cache(0)
         linear_layer = kv_cache.get_layer_cache(1)
-        full_group = kv_cache.get_layer_cache_by_group(0, 0)
-        linear_group = kv_cache.get_layer_cache_by_group(1, 1)
+        full_group = kv_cache.get_layer_cache(0, "full")
+        linear_group = kv_cache.get_layer_cache(1, "linear")
 
         self.assertEqual(2, full_layer.seq_size_per_block)
         self.assertEqual((12, 2, 1, 2, 4), tuple(full_layer.kv_cache_base.shape))
-        self.assertEqual(tuple(full_layer.kv_cache_base.shape), tuple(full_group.kv_cache_base.shape))
-        layer_block_bytes = full_layer.kv_cache_base.stride(0) * full_layer.kv_cache_base.element_size()
-        store_block_bytes = layer_block_bytes * (kv_cache.seq_size_per_block // full_layer.seq_size_per_block)
-        self.assertEqual(full_base.stride(0) * full_base.element_size(), store_block_bytes)
+        self.assertEqual(
+            tuple(full_layer.kv_cache_base.shape), tuple(full_group.kv_cache_base.shape)
+        )
+        layer_block_bytes = (
+            full_layer.kv_cache_base.stride(0) * full_layer.kv_cache_base.element_size()
+        )
+        store_block_bytes = layer_block_bytes * (
+            kv_cache.seq_size_per_block // full_layer.seq_size_per_block
+        )
+        self.assertEqual(
+            full_base.stride(0) * full_base.element_size(), store_block_bytes
+        )
         self.assertEqual(8, linear_layer.seq_size_per_block)
         self.assertEqual((3, 64), tuple(linear_layer.kv_cache_base.shape))
-        self.assertEqual(tuple(linear_layer.kv_cache_base.shape), tuple(linear_group.kv_cache_base.shape))
+        self.assertEqual(
+            tuple(linear_layer.kv_cache_base.shape),
+            tuple(linear_group.kv_cache_base.shape),
+        )
 
     def _assert_mla_kernel_view(
         self,
@@ -225,8 +249,13 @@ class PyModelInputsCompatTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "multiple KV cache groups"):
             kv_cache.get_layer_cache(0)
 
-        self.assertEqual((2, 2, 1, 8, 4), tuple(kv_cache.get_layer_cache_by_group(0, 0).kv_cache_base.shape))
-        self.assertEqual((2, 64), tuple(kv_cache.get_layer_cache(0, "linear").kv_cache_base.shape))
+        self.assertEqual(
+            (2, 2, 1, 8, 4),
+            tuple(kv_cache.get_layer_cache(0, "full").kv_cache_base.shape),
+        )
+        self.assertEqual(
+            (2, 64), tuple(kv_cache.get_layer_cache(0, "linear").kv_cache_base.shape)
+        )
         self.assertEqual(2, len(kv_cache.get_layer_caches(0)))
 
 

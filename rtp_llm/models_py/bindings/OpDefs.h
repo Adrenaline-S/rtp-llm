@@ -33,7 +33,6 @@ struct LayerKVCache {
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
-    int           group_id           = -1;
     std::string   tag;
 };
 
@@ -173,8 +172,8 @@ struct KVCache {
             }
             if (layer_to_group_ids[layer].size() > 1) {
                 throw std::runtime_error("Layer " + std::to_string(idx)
-                                         + " owns multiple KV cache groups; use get_layer_cache_by_group, "
-                                           "get_layer_cache(layer, tag), or get_layer_caches");
+                                         + " owns multiple KV cache groups; use get_layer_cache(layer, tag) "
+                                           "or get_layer_caches");
             }
         }
 
@@ -184,80 +183,81 @@ struct KVCache {
             scale = kv_scale_base_by_layer[idx];
         }
 
+        int group_slot = -1;
         if (!layer_to_group_ids.empty() && layer < layer_to_group_ids.size() && layer_to_group_ids[layer].size() == 1) {
-            layer_cache.group_id = layer_to_group_ids[layer].front();
-        } else {
-            layer_cache.group_id = 0;
+            group_slot = layer_to_group_ids[layer].front();
+        } else if (group_tags.size() == 1) {
+            group_slot = 0;
         }
-        if (layer_cache.group_id >= 0 && static_cast<size_t>(layer_cache.group_id) < group_tags.size()) {
-            layer_cache.tag = group_tags[static_cast<size_t>(layer_cache.group_id)];
+        if (group_slot >= 0 && static_cast<size_t>(group_slot) < group_tags.size()) {
+            layer_cache.tag = group_tags[static_cast<size_t>(group_slot)];
         }
 
-        const bool is_full = layer_attn_types.empty() ?
-                                 true :
-                                 (layer < layer_attn_types.size()
-                                  && layer_attn_types[layer] == rtp_llm::CacheGroupType::FULL);
+        const bool is_full = layer_attn_types.empty() ? true :
+                                                        (layer < layer_attn_types.size()
+                                                         && layer_attn_types[layer] == rtp_llm::CacheGroupType::FULL);
 
         if (!is_full) {
             // Linear/SSM attention layer: return the raw cache tensor unchanged.
             // Use the physical block size so the layer sees the full per-block storage.
-            layer_cache.seq_size_per_block = groupSeqBlockSize(layer_cache.group_id);
+            layer_cache.seq_size_per_block = groupSeqBlockSize(group_slot);
             layer_cache.kv_cache_base      = base;
             layer_cache.kv_scale_base      = scale;
         } else {
-            setFullAttentionView(layer_cache, base, scale, layer_cache.group_id);
+            setFullAttentionView(layer_cache, base, scale, group_slot);
         }
         return layer_cache;
     }
 
-    LayerKVCache getLayerCacheByGroup(int idx, int gid) {
+private:
+    LayerKVCache getLayerCacheBySlot(int idx, int group_slot) {
         const auto layer = static_cast<size_t>(idx);
         if (idx < 0 || layer >= kv_cache_base_by_layer_group.size()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
         }
-        if (gid < 0 || static_cast<size_t>(gid) >= kv_cache_base_by_layer_group[layer].size()) {
-            throw std::runtime_error("Invalid KV cache group id: " + std::to_string(gid));
+        if (group_slot < 0 || static_cast<size_t>(group_slot) >= kv_cache_base_by_layer_group[layer].size()) {
+            throw std::runtime_error("Invalid KV cache topology slot: " + std::to_string(group_slot));
         }
         if (!layer_to_group_ids.empty()) {
             if (layer >= layer_to_group_ids.size()
-                || std::find(layer_to_group_ids[layer].begin(), layer_to_group_ids[layer].end(), gid)
+                || std::find(layer_to_group_ids[layer].begin(), layer_to_group_ids[layer].end(), group_slot)
                        == layer_to_group_ids[layer].end()) {
-                throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache group "
-                                         + std::to_string(gid));
+                throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache topology slot "
+                                         + std::to_string(group_slot));
             }
         }
 
-        auto base = kv_cache_base_by_layer_group[layer][static_cast<size_t>(gid)];
+        auto base = kv_cache_base_by_layer_group[layer][static_cast<size_t>(group_slot)];
         if (!base.defined()) {
-            throw std::runtime_error("Missing KV cache tensor for layer " + std::to_string(idx) + ", group "
-                                     + std::to_string(gid));
+            throw std::runtime_error("Missing KV cache tensor for layer " + std::to_string(idx) + ", topology slot "
+                                     + std::to_string(group_slot));
         }
 
         LayerKVCache layer_cache;
         layer_cache.layer_id = idx;
-        layer_cache.group_id = gid;
-        if (static_cast<size_t>(gid) < group_tags.size()) {
-            layer_cache.tag = group_tags[static_cast<size_t>(gid)];
+        if (static_cast<size_t>(group_slot) < group_tags.size()) {
+            layer_cache.tag = group_tags[static_cast<size_t>(group_slot)];
         }
-        const bool is_full_group = gid >= 0 && static_cast<size_t>(gid) < group_types.size()
-                                   && group_types[static_cast<size_t>(gid)] == rtp_llm::CacheGroupType::FULL;
+        const bool is_full_group = static_cast<size_t>(group_slot) < group_types.size()
+                                   && group_types[static_cast<size_t>(group_slot)] == rtp_llm::CacheGroupType::FULL;
         torch::Tensor scale;
         if (!kv_scale_base_by_layer_group.empty() && layer < kv_scale_base_by_layer_group.size()
-            && static_cast<size_t>(gid) < kv_scale_base_by_layer_group[layer].size()) {
-            scale = kv_scale_base_by_layer_group[layer][static_cast<size_t>(gid)];
+            && static_cast<size_t>(group_slot) < kv_scale_base_by_layer_group[layer].size()) {
+            scale = kv_scale_base_by_layer_group[layer][static_cast<size_t>(group_slot)];
         }
 
         if (!is_full_group) {
-            layer_cache.seq_size_per_block = groupSeqBlockSize(gid);
+            layer_cache.seq_size_per_block = groupSeqBlockSize(group_slot);
             layer_cache.kv_cache_base      = base;
             layer_cache.kv_scale_base      = scale;
             return layer_cache;
         }
 
-        setFullAttentionView(layer_cache, base, scale, gid);
+        setFullAttentionView(layer_cache, base, scale, group_slot);
         return layer_cache;
     }
 
+public:
     LayerKVCache getLayerCache(int idx, const std::string& tag) {
         const auto layer = static_cast<size_t>(idx);
         if (idx < 0 || layer >= layer_tag_to_group_id.size()) {
@@ -267,11 +267,12 @@ struct KVCache {
         if (it == layer_tag_to_group_id[layer].end() || it->second < 0) {
             throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache tag " + tag);
         }
-        const int gid = it->second;
-        if (gid < 0 || static_cast<size_t>(gid) >= group_tags.size()) {
-            throw std::runtime_error("KV cache tag " + tag + " maps to invalid group " + std::to_string(gid));
+        const int group_slot = it->second;
+        if (group_slot < 0 || static_cast<size_t>(group_slot) >= group_tags.size()) {
+            throw std::runtime_error("KV cache tag " + tag + " maps to invalid topology slot "
+                                     + std::to_string(group_slot));
         }
-        return getLayerCacheByGroup(idx, gid);
+        return getLayerCacheBySlot(idx, group_slot);
     }
 
     std::vector<LayerKVCache> getLayerCaches(int idx) {
@@ -284,8 +285,8 @@ struct KVCache {
         }
 
         std::vector<LayerKVCache> layer_caches;
-        for (int gid : layer_to_group_ids[layer]) {
-            layer_caches.push_back(getLayerCacheByGroup(idx, gid));
+        for (int group_slot : layer_to_group_ids[layer]) {
+            layer_caches.push_back(getLayerCacheBySlot(idx, group_slot));
         }
         return layer_caches;
     }
@@ -296,25 +297,27 @@ struct PyModelInitResources {
 };
 
 struct PyCacheStoreInputs {
-    size_t                   context_batch_size = 0;
-    size_t                   decoder_batch_size = 0;
-    torch::Tensor            request_id;
-    torch::Tensor            request_pd_separation;
-    torch::Tensor                         kv_cache_layer_to_group;
-    torch::Tensor                         kv_cache_group_types;
-    std::vector<rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
-    std::vector<std::string>              cache_keys;  // [context_batch_size]
-    size_t                   tokens_per_block;
+    size_t                                           context_batch_size = 0;
+    size_t                                           decoder_batch_size = 0;
+    torch::Tensor                                    request_id;
+    torch::Tensor                                    request_pd_separation;
+    std::map<std::string, rtp_llm::CacheGroupType>   kv_cache_group_types;
+    std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
+    std::map<std::string, size_t>                    tokens_per_block_by_tag;
+    std::map<std::string, size_t>                    kv_block_stride_bytes_by_tag;
+    std::map<std::string, size_t>                    kv_scale_stride_bytes_by_tag;
+    std::vector<std::string>                         cache_keys;  // [context_batch_size]
+    size_t                                           tokens_per_block = 0;
     // Physical KV-manager block strides, supplied by CacheConfig rather than inferred from tensor views.
-    size_t                   kv_block_stride_bytes;
-    size_t                   kv_scale_stride_bytes;
-    bool                     pd_separation   = false;
-    size_t                   model_id        = 0;
-    bool                     decode_entrance           = false;
-    bool                     warmup                    = false;
-    bool                     use_hybrid_kv_cache_store = false;
-    bool                     use_opaque_kv_cache_store = false;
-    bool                     mla_kvcache               = false;
+    size_t kv_block_stride_bytes     = 0;
+    size_t kv_scale_stride_bytes     = 0;
+    bool   pd_separation             = false;
+    size_t model_id                  = 0;
+    bool   decode_entrance           = false;
+    bool   warmup                    = false;
+    bool   use_hybrid_kv_cache_store = false;
+    bool   use_opaque_kv_cache_store = false;
+    bool   mla_kvcache               = false;
 
     // Cache store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
@@ -350,19 +353,15 @@ struct PyAttentionInputs {
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
-    // Kernel-granularity block IDs for attention compute.
-    // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
+    // Group-local kernel-granularity block IDs for attention compute.
+    // Shape: [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id;
     torch::Tensor kv_cache_kernel_block_id_device;
-    // Physical block IDs dedicated for cache store.
-    // Shape: [group, batch, max_blocks] or [batch, max_blocks].
-    torch::Tensor kv_cache_block_id;
-    torch::Tensor kv_cache_block_id_device;
-    // Hybrid cache support: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
-    std::vector<torch::Tensor> kv_cache_kernel_block_id_by_group;  // host
-    std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
-    torch::Tensor              kv_cache_layer_to_group;
-    caffe2::TypeMeta           dtype;
+    // Group-local physical block IDs dedicated for cache store.
+    // Shape: [batch, max_blocks].
+    torch::Tensor    kv_cache_block_id;
+    torch::Tensor    kv_cache_block_id_device;
+    caffe2::TypeMeta dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
     // cu_seqlens_device lives on CUDA device; cu_seqlens is its pinned-memory CPU mirror
     // used for CUDA graph replay (write host -> async copy to device, avoiding GPU-side fills).
@@ -414,33 +413,36 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> mm_extra_input;
 };
 
+using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
+
 struct PyModelInputs {
-    torch::Tensor       input_ids;
-    torch::Tensor       input_hiddens;
-    torch::Tensor       combo_position_ids;
-    PyEmbeddingInputs   embedding_inputs;
-    PyMultimodalInputs  multimodal_inputs;
-    PyAttentionInputs   attention_inputs;
-    BertEmbeddingInputs bert_embedding_inputs;
+    torch::Tensor      input_ids;
+    torch::Tensor      input_hiddens;
+    torch::Tensor      combo_position_ids;
+    PyEmbeddingInputs  embedding_inputs;
+    PyMultimodalInputs multimodal_inputs;
+    // C++ common/single-group fast path. Python sees this field through a
+    // property which returns either this object or attention_inputs_by_tag.
+    PyAttentionInputs    attention_inputs;
+    AttentionInputsByTag attention_inputs_by_tag;
+    BertEmbeddingInputs  bert_embedding_inputs;
+
+    bool hasAttentionInputsByTag() const {
+        return !attention_inputs_by_tag.empty();
+    }
 };
 
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
-    py::object             py_attn_params{py::none()};
 
     PyModelOutputs() = default;
 
     // Constructor with default hidden_states
-    PyModelOutputs(torch::Tensor hidden_states):
-        hidden_states(std::move(hidden_states)), params_ptr(nullptr), py_attn_params(py::none()) {}
+    PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)), params_ptr(nullptr) {}
 
-    PyModelOutputs(torch::Tensor                        hidden_states,
-                   std::shared_ptr<rtp_llm::ParamsBase> params_ptr,
-                   py::object                           py_params = py::none()):
-        hidden_states(std::move(hidden_states)),
-        params_ptr(std::move(params_ptr)),
-        py_attn_params(std::move(py_params)) {}
+    PyModelOutputs(torch::Tensor hidden_states, std::shared_ptr<rtp_llm::ParamsBase> params_ptr):
+        hidden_states(std::move(hidden_states)), params_ptr(std::move(params_ptr)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

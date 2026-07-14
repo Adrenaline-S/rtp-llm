@@ -37,7 +37,8 @@ bool SingleTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() == 1,
                             "SingleTypeKVCacheAllocator requires exactly one cache group, got %d",
                             config_.groupNums());
-    auto& spec = config_.specForGroup(0);
+    const auto& cache_group = config_.topology().groupBySlot(0);
+    const auto& spec        = cache_group.spec;
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec[0] is null");
     const bool is_full_attention = config_.typeForGroup(0) == CacheGroupType::FULL
                                    && (spec->type == rtp_llm::KVCacheSpecType::MultiHeadAttention
@@ -58,14 +59,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
         shared_block_cache_->init(1, std::vector<BlockPoolPtr>{block_pool_});
     }
 
-    std::vector<int> layer_ids(config_.layerIdsForGroup(0));
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids,
-                                                               spec,
-                                                               block_pool_,
-                                                               0,
-                                                               shared_cache_raw,
-                                                               nullptr,
-                                                               config_.policyForGroup(0));
+    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, 0, shared_cache_raw, nullptr);
 
     if (!full_kv_cache_group_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
@@ -321,13 +315,12 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
-    selected_resource->initGroups(
-        1,
-        config_.layer_all_num,
-        config_.layerGroupIdsSnapshot(),
-        config_.kernelBlocksPerKvBlock(),
-        {},
-        config_.groupKernelBlocksPerKvBlockSnapshot());
+    selected_resource->initGroups(1,
+                                  config_.layer_all_num,
+                                  config_.layerGroupIdsSnapshot(),
+                                  config_.kernelBlocksPerKvBlock(),
+                                  {},
+                                  config_.groupKernelBlocksPerKvBlockSnapshot());
 
     CacheKeysType    selected_cache_keys;
     BlockIndicesType selected_blocks;
@@ -443,13 +436,12 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
 
     // init for all batch
-    kv_cache_resource->initGroups(
-        1,
-        config_.layer_all_num,
-        config_.layerGroupIdsSnapshot(),
-        config_.kernelBlocksPerKvBlock(),
-        {},
-        config_.groupKernelBlocksPerKvBlockSnapshot());
+    kv_cache_resource->initGroups(1,
+                                  config_.layer_all_num,
+                                  config_.layerGroupIdsSnapshot(),
+                                  config_.kernelBlocksPerKvBlock(),
+                                  {},
+                                  config_.groupKernelBlocksPerKvBlockSnapshot());
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
@@ -488,7 +480,7 @@ int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
 int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                       int                            seq_len,
                                                       int                            reserve_step) const {
-    const int current_blocks = batch_kv_cache_resource ? batch_kv_cache_resource->blocksNum(0, 0) : 0;
+    const int current_blocks    = batch_kv_cache_resource ? batch_kv_cache_resource->blocksNum(0, 0) : 0;
     const int effective_seq_len = cpEffectiveSeqLenForAlloc(/*gid=*/0, seq_len);
     return full_kv_cache_group_->needBlocksNum(effective_seq_len, current_blocks, reserve_step);
 }

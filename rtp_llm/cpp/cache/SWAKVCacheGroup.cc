@@ -40,15 +40,15 @@ bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
     if (!dsv4TrapInvalidKVAccessEnabled()) {
         return false;
     }
-    return policy_.validate_tail_blocks;
+    return policy().validate_tail_blocks;
 }
 
 bool SWAKVCacheGroup::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
-    return enable_reuse_cache && policy_.enable_prefix_reuse;
+    return enable_reuse_cache && policy().enable_prefix_reuse;
 }
 
 int SWAKVCacheGroup::activeTailBlockCount() const {
-    return static_cast<int>(std::max(1u, policy_.active_tail_blocks));
+    return static_cast<int>(std::max(1u, policy().active_tail_blocks));
 }
 
 void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
@@ -85,7 +85,8 @@ void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndices
 }
 
 int SWAKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
-    return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
+    const int block_size = seqSizePerBlock();
+    return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
 }
 
 NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
@@ -117,7 +118,7 @@ MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     if (!shared_cache_) {
         return result;
     }
-    auto block_idx = shared_cache_->matchGroup(cache_key, group_id_);
+    auto block_idx = shared_cache_->matchGroup(cache_key, groupSlot());
     if (!isNullBlockIdx(block_idx)) {
         result.block_indices = {block_idx};
     }

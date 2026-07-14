@@ -12,6 +12,7 @@
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -35,16 +36,23 @@ struct LayerBase {
 };
 
 struct CacheConfig {
+private:
+    // Golden immutable topology. The vectors below remain temporarily as a
+    // construction/compatibility view and are synchronized by supported
+    // mutators while HybridPool is being migrated.
+    std::shared_ptr<const CacheTopology> cache_topology;
+
+public:
     std::vector<GroupBase>               groups;
     std::vector<LayerBase>               layers;
     std::unordered_map<std::string, int> tag_to_gid;
 
-    std::vector<int>    layer_to_block_stride_bytes;
-    bool                group_block_layout_initialized           = false;
-    bool                use_independent_block_pools              = false;
-    bool                use_typed_cache_regions                  = false;
-    bool                use_opaque_kv_cache_store                = false;
-    bool                disable_decode_first_malloc_device_reuse = false;
+    std::vector<int> layer_to_block_stride_bytes;
+    bool             group_block_layout_initialized           = false;
+    bool             use_independent_block_pools              = false;
+    bool             use_typed_cache_regions                  = false;
+    bool             use_opaque_kv_cache_store                = false;
+    bool             disable_decode_first_malloc_device_reuse = false;
 
     rtp_llm::DataType dtype;
     uint32_t          layer_num;      // the number of main model layers
@@ -81,11 +89,12 @@ struct CacheConfig {
         if (group_kernel == 0) {
             return 1;
         }
-        RTP_LLM_CHECK_WITH_INFO(group_seq % group_kernel == 0,
-                                "group seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu), gid=%zu",
-                                group_seq,
-                                group_kernel,
-                                gid);
+        RTP_LLM_CHECK_WITH_INFO(
+            group_seq % group_kernel == 0,
+            "group seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu), gid=%zu",
+            group_seq,
+            group_kernel,
+            gid);
         return std::max<size_t>(1, group_seq / group_kernel);
     }
 
@@ -135,7 +144,29 @@ struct CacheConfig {
     }
 
     int groupNums() const {
-        return static_cast<int>(groups.size());
+        return cache_topology != nullptr ? static_cast<int>(cache_topology->groups().size()) :
+                                           static_cast<int>(groups.size());
+    }
+
+    const CacheTopology& topology() const {
+        RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
+        return *cache_topology;
+    }
+
+    const CacheGroup& group(const std::string& tag) const {
+        return topology().group(tag);
+    }
+
+    CacheTopology::GroupRefs groupsForLayer(int layer_id) const {
+        return topology().groupsForLayer(layer_id);
+    }
+
+    const CacheGroup& groupForLayer(int layer_id, const std::string& tag) const {
+        return topology().groupForLayer(layer_id, tag);
+    }
+
+    const CacheGroup& soleGroupForLayer(int layer_id) const {
+        return topology().soleGroupForLayer(layer_id);
     }
 
     const KVCacheSpecPtr& specForGroup(size_t gid) const {
@@ -168,6 +199,10 @@ struct CacheConfig {
     }
 
     std::vector<CacheGroupType> groupTypesSnapshot() const {
+        if (cache_topology != nullptr) {
+            const auto& snapshot = cache_topology->groupTypesSnapshot();
+            return {snapshot.begin(), snapshot.end()};
+        }
         std::vector<CacheGroupType> types;
         types.reserve(groups.size());
         for (const auto& group : groups) {
@@ -177,6 +212,10 @@ struct CacheConfig {
     }
 
     std::vector<std::string> groupTagsSnapshot() const {
+        if (cache_topology != nullptr) {
+            const auto& snapshot = cache_topology->groupTagsSnapshot();
+            return {snapshot.begin(), snapshot.end()};
+        }
         std::vector<std::string> tags;
         tags.reserve(groups.size());
         for (const auto& group : groups) {
@@ -268,6 +307,10 @@ struct CacheConfig {
     }
 
     std::vector<std::vector<int>> layerGroupIdsSnapshot() const {
+        if (cache_topology != nullptr) {
+            const auto& snapshot = cache_topology->layerGroupIdsSnapshot();
+            return {snapshot.begin(), snapshot.end()};
+        }
         std::vector<std::vector<int>> result;
         if (!layers.empty()) {
             result.reserve(layers.size());
@@ -280,6 +323,10 @@ struct CacheConfig {
     }
 
     std::vector<std::map<std::string, int>> layerTagToGroupIdSnapshot() const {
+        if (cache_topology != nullptr) {
+            const auto& snapshot = cache_topology->layerTagToGroupIdSnapshot();
+            return {snapshot.begin(), snapshot.end()};
+        }
         std::vector<std::map<std::string, int>> result;
         result.reserve(layers.size());
         for (const auto& layer : layers) {
@@ -341,6 +388,7 @@ struct CacheConfig {
         for (size_t gid = 0; gid < policies.size(); ++gid) {
             groups[gid].policy = policies[gid];
         }
+        syncCacheTopology();
     }
 
     void setGroupBlockLayout(const std::vector<uint32_t>& block_nums,
@@ -365,6 +413,7 @@ struct CacheConfig {
             groups[gid].kv_scale_stride_bytes = kv_scale_stride_bytes[gid];
         }
         group_block_layout_initialized = true;
+        syncCacheTopology();
     }
 
     void resizeLayerRoutes(size_t layer_count) {
@@ -447,6 +496,8 @@ struct CacheConfig {
     }
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
+
+    void syncCacheTopology();
 
     void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
     void        fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,

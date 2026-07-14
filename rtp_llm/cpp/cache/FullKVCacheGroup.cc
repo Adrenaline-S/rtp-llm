@@ -4,18 +4,18 @@
 namespace rtp_llm {
 
 int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
-    return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
+    const int block_size = seqSizePerBlock();
+    return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
 }
 
 NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     NeedBlocksInfo info;
-    const int      common_slots = needBlocksNum(common_seq_len, /*current_blocks=*/0);
-    const int      total_slots  = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
-    const int      reused_common_slots =
-        reuse_enabled ? std::min(std::max(reuse_blocks_len, 0), common_slots) : 0;
-    info.common_blocks = std::max(common_slots - reused_common_slots, 0);
-    info.extra_blocks  = std::max(total_slots - common_slots, 0);
+    const int      common_slots        = needBlocksNum(common_seq_len, /*current_blocks=*/0);
+    const int      total_slots         = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
+    const int      reused_common_slots = reuse_enabled ? std::min(std::max(reuse_blocks_len, 0), common_slots) : 0;
+    info.common_blocks                 = std::max(common_slots - reused_common_slots, 0);
+    info.extra_blocks                  = std::max(total_slots - common_slots, 0);
     return info;
 }
 
@@ -50,7 +50,7 @@ MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const
     }
 
     for (const auto& cache_key : cache_keys) {
-        auto block_idx = shared_cache_->matchGroup(cache_key, group_id_);
+        auto block_idx = shared_cache_->matchGroup(cache_key, groupSlot());
         if (isNullBlockIdx(block_idx)) {
             break;
         }

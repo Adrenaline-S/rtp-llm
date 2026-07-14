@@ -8,7 +8,9 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include <cstddef>
+#include <map>
 #include <optional>
+#include <string>
 #include <memory>
 #include <torch/extension.h>
 #include <torch/python.h>
@@ -71,13 +73,13 @@ struct GptModelInputs {
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
-    size_t        kv_block_stride_bytes;
-    size_t        kv_scale_stride_bytes;
-    size_t        seq_size_per_block;
-    size_t        kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
-    bool          pd_separation             = false;
-    bool          decode_entrance           = false;
-    bool          use_opaque_kv_cache_store = false;
+    size_t kv_block_stride_bytes;
+    size_t kv_scale_stride_bytes;
+    size_t seq_size_per_block;
+    size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
+    bool   pd_separation             = false;
+    bool   decode_entrance           = false;
+    bool   use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;
     bool need_moe_gating = false;
@@ -176,9 +178,11 @@ struct CacheStoreInputs {
     torch::Tensor prefix_lengths_host;
     torch::Tensor host_kv_cache_offset;
 
-    torch::Tensor kv_cache_layer_to_group_host;
-    torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
-    std::vector<rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
+    std::map<std::string, rtp_llm::CacheGroupType>   kv_cache_group_types;
+    std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
+    std::map<std::string, size_t>                    tokens_per_block_by_tag;
+    std::map<std::string, size_t>                    kv_block_stride_bytes_by_tag;
+    std::map<std::string, size_t>                    kv_scale_stride_bytes_by_tag;
 
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
@@ -186,18 +190,17 @@ struct CacheStoreInputs {
     torch::Tensor            request_id;             // [context_batch_size]
     torch::Tensor            request_pd_separation;  // [context_batch_size]
     std::vector<std::string> cache_keys;             // [context_batch_size]
-    size_t                   tokens_per_block;
-    size_t                   kv_block_stride_bytes = 0;
-    size_t                   kv_scale_stride_bytes = 0;
-    bool                     pd_separation         = false;
-    size_t                   model_id              = 0;
-    bool                     decode_entrance            = false;
-    bool                     warmup;
-    bool                     use_hybrid_kv_cache_store  = false;
-    bool                     use_opaque_kv_cache_store  = true;
+    size_t                   tokens_per_block          = 0;
+    size_t                   kv_block_stride_bytes     = 0;
+    size_t                   kv_scale_stride_bytes     = 0;
+    bool                     pd_separation             = false;
+    size_t                   model_id                  = 0;
+    bool                     decode_entrance           = false;
+    bool                     warmup                    = false;
+    bool                     use_hybrid_kv_cache_store = false;
+    bool                     use_opaque_kv_cache_store = true;
 
     int         layer_id = 0;
-    int         group_id = -1;
     std::string tag;
 
     // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups have

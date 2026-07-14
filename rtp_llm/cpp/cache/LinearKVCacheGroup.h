@@ -10,14 +10,24 @@ namespace rtp_llm {
 
 class LinearKVCacheGroup: public KVCacheGroup {
 public:
-    LinearKVCacheGroup(const LayerIdsType&          layer_ids,
-                       std::shared_ptr<KVCacheSpec> kvcache_spec,
-                       BlockPoolPtr                 block_pool,
-                       int                          group_id,
-                       int                          linear_step      = 0,
-                       SharedBlockCache*            shared_cache     = nullptr,
+    LinearKVCacheGroup(CacheGroup                          cache_group,
+                       BlockPoolPtr                        block_pool,
+                       int                                 group_slot,
+                       int                                 linear_step      = 0,
+                       SharedBlockCache*                   shared_cache     = nullptr,
+                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_slot, shared_cache, metrics_reporter),
+        linear_step_(linear_step) {}
+
+    // Transition-only overload.
+    LinearKVCacheGroup(const LayerIdsType&                 layer_ids,
+                       std::shared_ptr<KVCacheSpec>        kvcache_spec,
+                       BlockPoolPtr                        block_pool,
+                       int                                 group_id,
+                       int                                 linear_step      = 0,
+                       SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
-                       CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)):
+                       CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)):
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 

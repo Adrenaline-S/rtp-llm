@@ -198,7 +198,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     const KVCacheGroupPtr reuse_group =
         full_group_ids_.empty() ? KVCacheGroupPtr{} : kv_cache_groups_[static_cast<size_t>(full_group_ids_.front())];
     const int reuse_unit_tokens =
-        (reuse_group ? cpLogicalSeqSizeForGroup(cp_mapper, config_, reuse_group->group_id(), seqSizePerBlock()) :
+        (reuse_group ? cpLogicalSeqSizeForGroup(cp_mapper, config_, reuse_group->groupSlot(), seqSizePerBlock()) :
                        seqSizePerBlock());
 
     const auto&                   cache_keys         = kv_resource->cacheKeys(0);
@@ -603,8 +603,7 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_
         const int fork_count = batch_fork_count[old_batch_idx];
         if (fork_count == 0) {
             for (int gid = 0; gid < group_nums; ++gid) {
-                kv_cache_groups_[static_cast<size_t>(gid)]->free(
-                    batch_kv_cache_resource->blocks(old_batch_idx, gid));
+                kv_cache_groups_[static_cast<size_t>(gid)]->free(batch_kv_cache_resource->blocks(old_batch_idx, gid));
             }
         } else if (fork_count > 1 && copy_last_block) {
             for (int gid = 0; gid < group_nums; ++gid) {
@@ -616,9 +615,8 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_
     for (int gid = 0; gid < group_nums; ++gid) {
         const int need_blocks = new_blocks_num[static_cast<size_t>(gid)];
         if (need_blocks > 0 && !kv_cache_groups_[static_cast<size_t>(gid)]->ensureFreeBlocks(need_blocks)) {
-            RTP_LLM_LOG_WARNING("ensure free blocks failed for hybrid kv cache update, group=%d need=%d",
-                                gid,
-                                need_blocks);
+            RTP_LLM_LOG_WARNING(
+                "ensure free blocks failed for hybrid kv cache update, group=%d need=%d", gid, need_blocks);
             return false;
         }
     }
@@ -644,8 +642,8 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_
             batch_kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
             for (int gid = 0; gid < group_nums; ++gid) {
                 auto& block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, gid);
-                kv_cache_groups_[static_cast<size_t>(gid)]->reference(
-                    block_ids, old_resources[old_batch_idx].blocks(gid));
+                kv_cache_groups_[static_cast<size_t>(gid)]->reference(block_ids,
+                                                                      old_resources[old_batch_idx].blocks(gid));
 
                 if (copy_last_block && !block_ids.blocks().empty()) {
                     const int  old_block       = block_ids.popBack();
@@ -654,11 +652,11 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_
                         kv_cache_groups_[static_cast<size_t>(gid)]->free({old_block});
                     }
 
-                    const int seq_len_target =
-                        (static_cast<int>(block_ids.blocks().size()) + 1)
-                        * kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
+                    const int seq_len_target = (static_cast<int>(block_ids.blocks().size()) + 1)
+                                               * kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
                     const bool ok = kv_cache_groups_[static_cast<size_t>(gid)]->malloc(block_ids, seq_len_target);
-                    RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during hybrid kv cache update");
+                    RTP_LLM_CHECK_WITH_INFO(ok,
+                                            "malloc one block via kvCacheGroup failed during hybrid kv cache update");
                     const int new_block = block_ids.blocks().back();
                     if (old_block_valid && !isNullBlockIdx(new_block) && new_block > 0) {
                         copy_mappings_by_group[static_cast<size_t>(gid)].push_back(BlockIdPair{old_block, new_block});
@@ -743,7 +741,7 @@ MemoryType HybridKVCacheAllocator::memoryTypeForGroup(int gid) const {
     return allocation_type_ == AllocationType::DEVICE ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 
-void HybridKVCacheAllocator::copyBlockMappingForGroup(int gid,
+void HybridKVCacheAllocator::copyBlockMappingForGroup(int                             gid,
                                                       const std::vector<BlockIdPair>& block_update_mapping) const {
     if (block_update_mapping.empty()) {
         return;

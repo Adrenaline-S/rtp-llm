@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from typing import Any, Optional
 
 from torch import Tensor, nn
@@ -7,6 +8,10 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import AttnImplFactory
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    select_attention_inputs_for_tag,
+)
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -94,15 +99,40 @@ class GptModelBase(nn.Module):
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
-        fmha_impl = AttnImplFactory.get_fmha_impl(
+        attention_inputs = get_attention_inputs_value(inputs)
+        if isinstance(attention_inputs, Mapping):
+            fmha_group_tags = self._get_fmha_group_tags()
+            selected_group_inputs = (
+                attention_inputs.items()
+                if fmha_group_tags is None
+                else (
+                    (tag, select_attention_inputs_for_tag(attention_inputs, tag))
+                    for tag in fmha_group_tags
+                )
+            )
+            return {
+                tag: AttnImplFactory.get_fmha_impl(
+                    self.config,
+                    self.parallelism_config,
+                    self.weight,
+                    group_inputs,
+                    self.fmha_config,
+                    is_cuda_graph,
+                )
+                for tag, group_inputs in selected_group_inputs
+            }
+        return AttnImplFactory.get_fmha_impl(
             self.config,
             self.parallelism_config,
             self.weight,
-            inputs.attention_inputs,
+            attention_inputs,
             self.fmha_config,
             is_cuda_graph,
         )
-        return fmha_impl
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        """Model hook: None means every attention-input tag requires FMHA."""
+        return None
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

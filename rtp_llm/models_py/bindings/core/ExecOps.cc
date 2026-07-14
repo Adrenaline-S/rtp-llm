@@ -245,34 +245,44 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
 
+    RTP_LLM_CHECK_WITH_INFO(!param.tag.empty(), "cache-store write requires a cache tag for layer=%d", param.layer_id);
+    RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.dim() == 2,
+                            "cache-store block table for tag=%s must be group-local [batch, blocks], got dim=%ld",
+                            param.tag.c_str(),
+                            param.host_kv_cache_offset.dim());
+    max_blocks_per_batch = param.host_kv_cache_offset.size(1);
+    offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
 
-    const size_t group_num = param.kv_cache_group_types_host.defined() ? param.kv_cache_group_types_host.size(0) : 1;
-    const bool   use_group_cache_transfer_policy = group_num > 1;
+    const auto type_it = param.kv_cache_group_types.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(type_it != param.kv_cache_group_types.end(),
+                            "cache-store metadata has no group type for tag=%s",
+                            param.tag.c_str());
+    const CacheGroupType group_type = type_it->second;
+    const auto           policy_it  = param.kv_cache_group_policies.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(policy_it != param.kv_cache_group_policies.end(),
+                            "cache-store metadata has no group policy for tag=%s",
+                            param.tag.c_str());
+    const CacheGroupPolicy group_policy                    = policy_it->second;
+    const bool             use_group_cache_transfer_policy = param.kv_cache_group_policies.size() > 1;
 
-    int gid = param.group_id >= 0 ? param.group_id : 0;
-    if (param.group_id < 0 && param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
-        && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
-        gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
-    }
-    if (param.host_kv_cache_offset.dim() == 3) {
-        RTP_LLM_CHECK_WITH_INFO(
-            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
-        const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
-        max_blocks_per_batch         = group_offset_view.size(1);
-        offset_addr                  = group_offset_view.data_ptr<int32_t>();
-    } else {
-        RTP_LLM_CHECK_WITH_INFO(
-            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
-        max_blocks_per_batch = param.host_kv_cache_offset.size(1);
-        offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
-    }
-
-    const auto seq_size_per_block = param.tokens_per_block;
-    auto       kv_cache_data      = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
-    auto       kv_cache_owner     = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
-    const bool kv_gpu_mem         = kv_cache.kv_cache_buffer.is_cuda();
+    const auto seq_it = param.tokens_per_block_by_tag.find(param.tag);
+    const auto seq_size_per_block =
+        seq_it != param.tokens_per_block_by_tag.end() ? seq_it->second : param.tokens_per_block;
+    const auto kv_stride_it = param.kv_block_stride_bytes_by_tag.find(param.tag);
+    const auto kv_block_stride_bytes =
+        kv_stride_it != param.kv_block_stride_bytes_by_tag.end() ? kv_stride_it->second : param.kv_block_stride_bytes;
+    const auto scale_stride_it       = param.kv_scale_stride_bytes_by_tag.find(param.tag);
+    const auto kv_scale_stride_bytes = scale_stride_it != param.kv_scale_stride_bytes_by_tag.end() ?
+                                           scale_stride_it->second :
+                                           param.kv_scale_stride_bytes;
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", param.tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(
+        kv_block_stride_bytes > 0, "cache-store tag=%s has zero kv block stride", param.tag.c_str());
+    auto       kv_cache_data  = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
+    auto       kv_cache_owner = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
+    const bool kv_gpu_mem     = kv_cache.kv_cache_buffer.is_cuda();
     const bool has_kv_scale =
-        kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0 && param.kv_scale_stride_bytes > 0;
+        kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0 && kv_scale_stride_bytes > 0;
     uint64_t*                      kv_scale_data = nullptr;
     std::shared_ptr<torch::Tensor> kv_scale_owner;
     if (has_kv_scale) {
@@ -302,13 +312,6 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                 "failed to get prefix_length_host and input_length_host for cache store");
         RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
                                 "prefix_length %% seq_size_per_block != 0");
-        CacheGroupType group_type = CacheGroupType::FULL;
-        if (param.kv_cache_group_types_host.defined()) {
-            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
-        }
-        CacheGroupPolicy group_policy = gid >= 0 && static_cast<size_t>(gid) < param.kv_cache_group_policies.size() ?
-                                            param.kv_cache_group_policies[static_cast<size_t>(gid)] :
-                                            defaultCacheGroupPolicy(group_type);
         const bool is_cp_compact_fixed_group =
             param.cp_size > 1 && group_type == CacheGroupType::SWA && seq_size_per_block % param.cp_size == 0;
         const size_t canonical_seq_size_per_block =
@@ -347,10 +350,10 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + offset_index);
             if (isNullBlockIdx(block_id)) {
                 RTP_LLM_LOG_DEBUG(
-                    "skip null kv cache block, request id [%ld], layer id [%d], group [%d], offset_index [%d]",
+                    "skip null kv cache block, request id [%ld], layer id [%d], tag [%s], offset_index [%d]",
                     request_id,
                     param.layer_id,
-                    gid,
+                    param.tag.c_str(),
                     offset_index);
                 return;
             }
@@ -359,31 +362,29 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                                  param.layer_id,
                                                  param.tag);
 
-            void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
+            void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
-
 
             constexpr size_t kDsv4SwaFp8EntryBytes  = 584;
             constexpr size_t kDsv4SwaTokenDataBytes = 576;
             const bool       is_swa_cp_slice =
-                param.tag == "swa_kv" && param.cp_size > 1 && param.kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
+                param.tag == "swa_kv" && param.cp_size > 1 && kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
             const bool use_opaque_key_prefix =
                 param.use_opaque_kv_cache_store || param.use_hybrid_kv_cache_store || mla_kvcache;
             const char* key_mode = is_swa_cp_slice ? "kv_cp_slice" : (use_opaque_key_prefix ? "kv" : "k_v");
             if (key_index < 2) {
                 RTP_LLM_LOG_INFO(
-                    "CACHE_STORE_KEY_WRITE request_id=%ld model_id=%zu layer=%d group=%d tag=%s key_index=%d offset_index=%d block_id=%d mode=%s kv_stride=%zu kv_scale_stride=%zu cache_key=%s",
+                    "CACHE_STORE_KEY_WRITE request_id=%ld model_id=%zu layer=%d tag=%s key_index=%d offset_index=%d block_id=%d mode=%s kv_stride=%zu kv_scale_stride=%zu cache_key=%s",
                     request_id,
                     param.model_id,
                     param.layer_id,
-                    gid,
                     param.tag.c_str(),
                     key_index,
                     offset_index,
                     block_id,
                     key_mode,
-                    param.kv_block_stride_bytes,
-                    param.kv_scale_stride_bytes,
+                    kv_block_stride_bytes,
+                    kv_scale_stride_bytes,
                     cache_key.c_str());
             }
 
@@ -394,7 +395,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             if (is_swa_cp_slice) {
                 constexpr size_t      kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
                 constexpr size_t      kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
-                const size_t          local_entries       = param.kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
+                const size_t          local_entries       = kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
                 const size_t          data_bytes          = local_entries * kSwaTokenDataBytes;
                 const size_t          scale_bytes         = local_entries * kSwaTokenScaleBytes;
                 void*                 scale_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
@@ -402,10 +403,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, data_bytes, kv_gpu_mem, true);
                 request_blocks->addBlock("kv_scale_" + cache_key, scale_block_addr, scale_bytes, kv_gpu_mem, true);
             } else if (use_opaque_key_prefix) {
-                request_blocks->addBlock(
-                    "kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, kv_gpu_mem, true);
+                request_blocks->addBlock("kv_" + cache_key, kv_block_addr, kv_block_stride_bytes, kv_gpu_mem, true);
             } else {
-                const uint32_t        kv_half = static_cast<uint32_t>(param.kv_block_stride_bytes / 2);
+                const uint32_t        kv_half = static_cast<uint32_t>(kv_block_stride_bytes / 2);
                 void*                 k_addr  = kv_addr;
                 void*                 v_addr  = (void*)((int8_t*)kv_addr + kv_half);
                 std::shared_ptr<void> k_block_addr(kv_cache_owner, k_addr);
@@ -415,17 +415,14 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
 
             if (kv_scale_data) {
-                void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
+                void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * kv_scale_stride_bytes);
 
                 std::shared_ptr<void> kv_scale_block_addr(kv_scale_owner, kv_scale_addr);
                 if (use_opaque_key_prefix) {
-                    request_blocks->addBlock("kv_scale_" + cache_key,
-                                             kv_scale_block_addr,
-                                             param.kv_scale_stride_bytes,
-                                             kv_scale_gpu_mem,
-                                             true);
+                    request_blocks->addBlock(
+                        "kv_scale_" + cache_key, kv_scale_block_addr, kv_scale_stride_bytes, kv_scale_gpu_mem, true);
                 } else {
-                    const uint32_t        sc_half = static_cast<uint32_t>(param.kv_scale_stride_bytes / 2);
+                    const uint32_t        sc_half = static_cast<uint32_t>(kv_scale_stride_bytes / 2);
                     void*                 k_sc    = kv_scale_addr;
                     void*                 v_sc    = (void*)((int8_t*)kv_scale_addr + sc_half);
                     std::shared_ptr<void> k_scale_block_addr(kv_scale_owner, k_sc);
@@ -453,15 +450,18 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             addBlock(pair.key_index, pair.offset_index);
         }
 
-        auto storeCallback = [layer_id = param.layer_id, model_id = param.model_id, gid, request_id, request_blocks](
-                                 bool success, CacheStoreErrorCode ec) {
+        auto storeCallback = [layer_id = param.layer_id,
+                              model_id = param.model_id,
+                              tag      = param.tag,
+                              request_id,
+                              request_blocks](bool success, CacheStoreErrorCode ec) {
             if (!success) {
-                RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d gid=%d "
+                RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d tag=%s "
                                     "error_code=%d error=%s buffer={%s}",
                                     static_cast<long>(request_id),
                                     model_id,
                                     layer_id,
-                                    gid,
+                                    tag.c_str(),
                                     static_cast<int>(ec),
                                     ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str(),
                                     request_blocks->debugInfo().c_str());

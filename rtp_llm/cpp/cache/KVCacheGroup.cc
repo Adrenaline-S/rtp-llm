@@ -9,23 +9,24 @@ bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_ids_.size(),
+    const auto& layer_ids = cache_group_.layer_ids;
+    RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_ids.size(),
                             "layer_tensors size (%zu) is less than layer_ids size (%zu)",
                             layer_tensors.size(),
-                            layer_ids_.size());
-    RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() >= layer_ids_.size(),
+                            layer_ids.size());
+    RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() >= layer_ids.size(),
                             "scale_tensors size (%zu) is less than layer_ids size (%zu)",
                             scale_tensors.size(),
-                            layer_ids_.size());
+                            layer_ids.size());
 
-    for (int i = 0; i < static_cast<int>(layer_ids_.size()); ++i) {
-        const int global_layer_id = layer_ids_[i];
+    for (int i = 0; i < static_cast<int>(layer_ids.size()); ++i) {
+        const int global_layer_id                   = layer_ids[static_cast<size_t>(i)];
         global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(i)];
 
         if (!scale_tensors.empty()) {
             global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(i)];
         }
-        global_layer_to_local_layer[layer_ids_[i]] = i;
+        global_layer_to_local_layer[layer_ids[static_cast<size_t>(i)]] = i;
     }
 
     return true;
@@ -48,9 +49,9 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
             return false;
         }
 
-        const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
+        const size_t                  need_evict = static_cast<size_t>(required_blocks) - free_blocks;
         SharedBlockCache::EvictResult evict_result;
-        size_t freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
+        size_t freed = shared_cache_->evictAndFreeForGroup(group_slot_, need_evict, &evict_result);
 
         if (metrics_reporter_) {
             for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
@@ -81,12 +82,12 @@ MatchResult KVCacheGroup::match(const CacheKeysType& cache_keys) {
 }
 
 MatchResult KVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
-    RTP_LLM_FAIL("KVCacheGroup gid=%d does not support prefix matching", group_id_);
+    RTP_LLM_FAIL("KVCacheGroup tag=%s does not support prefix matching", tag().c_str());
     return {};
 }
 
 MatchResult KVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
-    RTP_LLM_FAIL("KVCacheGroup gid=%d does not support single-key matching", group_id_);
+    RTP_LLM_FAIL("KVCacheGroup tag=%s does not support single-key matching", tag().c_str());
     return {};
 }
 
@@ -102,8 +103,8 @@ void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
-        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
-        group_slots[static_cast<size_t>(group_id_)] = block_indices[i];
+        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_slot_ + 1), NULL_BLOCK_IDX);
+        group_slots[static_cast<size_t>(group_slot_)] = block_indices[i];
         shared_cache_->put(cache_keys[i], group_slots, is_resident);
     }
 }
@@ -113,31 +114,39 @@ size_t KVCacheGroup::freeBlocksNum() const {
 }
 
 int KVCacheGroup::seqSizePerBlock() const {
-    return seq_size_per_block_;
+    return static_cast<int>(cache_group_.seq_size_per_block);
 }
 
-int KVCacheGroup::group_id() const {
-    return group_id_;
+const std::string& KVCacheGroup::tag() const {
+    return cache_group_.tag;
+}
+
+const CacheGroup& KVCacheGroup::config() const {
+    return cache_group_;
+}
+
+int KVCacheGroup::groupSlot() const {
+    return group_slot_;
 }
 
 const CacheGroupPolicy& KVCacheGroup::policy() const {
-    return policy_;
+    return cache_group_.policy;
 }
 
 bool KVCacheGroup::prefixReuseEnabled() const {
-    return policy_.enable_prefix_reuse;
+    return policy().enable_prefix_reuse;
 }
 
 CacheEvictPolicy KVCacheGroup::evictPolicy() const {
-    return policy_.evict_policy;
+    return policy().evict_policy;
 }
 
 uint32_t KVCacheGroup::explicitBlockNum() const {
-    return policy_.explicit_block_num;
+    return policy().explicit_block_num;
 }
 
 size_t KVCacheGroup::activeTailBlocks() const {
-    return policy_.active_tail_blocks > 0 ? static_cast<size_t>(policy_.active_tail_blocks) : 0;
+    return policy().active_tail_blocks > 0 ? static_cast<size_t>(policy().active_tail_blocks) : 0;
 }
 
 std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerCacheBase() const {
@@ -175,15 +184,15 @@ void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
 }
 
 bool KVCacheGroup::prefixReusable() const {
-    return policy_.enable_prefix_reuse;
+    return policy().enable_prefix_reuse;
 }
 
 bool KVCacheGroup::hasSparseSlots() const {
-    return policy_.group_type != CacheGroupType::FULL;
+    return policy().group_type != CacheGroupType::FULL;
 }
 
 bool KVCacheGroup::hasKernelBlockSubdiv() const {
-    return policy_.group_type == CacheGroupType::FULL;
+    return policy().group_type == CacheGroupType::FULL;
 }
 
 bool KVCacheGroup::transferTailBlocks() const {
@@ -191,11 +200,11 @@ bool KVCacheGroup::transferTailBlocks() const {
 }
 
 bool KVCacheGroup::isReservable() const {
-    return policy_.reservable;
+    return policy().reservable;
 }
 
 CacheMemoryPlacement KVCacheGroup::memoryPlacement() const {
-    return policy_.memory_placement;
+    return policy().memory_placement;
 }
 
 }  // namespace rtp_llm

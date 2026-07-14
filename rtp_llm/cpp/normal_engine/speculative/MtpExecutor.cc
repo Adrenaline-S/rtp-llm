@@ -212,8 +212,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.hidden_size,
          params.model_config_.attn_config.tokens_per_block,
          params.model_config_.attn_config.kernel_tokens_per_block,
-         kv_cache_group_num,
-         target_layer_to_group,
          cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
@@ -223,8 +221,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(
-            model_init_params, params.py_model, false, true));
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model, false, true));
     }
 
     // when warmup, cache manager maybe nullptr
@@ -260,13 +257,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.hidden_size,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
-                                kv_cache_group_num,
-                                draft_layer_to_group,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            draft_model_.reset(new PyWrappedModel(
-                model_params, params.py_sp_model, false, false));
+            draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
             RTP_LLM_LOG_INFO(
@@ -275,8 +269,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             if (enable_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
-                sp_prefill_draft_model_.reset(new PyWrappedModel(
-                    model_params, params.py_sp_model, true, false));
+                sp_prefill_draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, true, false));
             }
         }
         break;  // NOTE: only support one mtp model now
@@ -413,7 +406,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
-        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
+        const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
         applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         draft_model_output                  = std::move(draft_model_->forward(model_input));
@@ -695,7 +688,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
         maybePrintModelInput(model_input, "decode post draft model");
-        const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
+        const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
         applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
     }

@@ -301,17 +301,17 @@ class PyModelInputs:
         combo_position_ids: torch.Tensor = ...,
         embedding_inputs: PyEmbeddingInputs = ...,
         multimodal_inputs: PyMultimodalInputs = ...,
-        attention_inputs: PyAttentionInputs = ...,
+        attention_inputs: PyAttentionInputs | dict[str, PyAttentionInputs] = ...,
         bert_embedding_inputs: BertEmbeddingInputs = ...,
     ) -> None: ...
     @property
-    def attention_inputs(self) -> PyAttentionInputs:
+    def attention_inputs(self) -> PyAttentionInputs | dict[str, PyAttentionInputs]:
         """
         Attention inputs structure
         """
 
     @attention_inputs.setter
-    def attention_inputs(self, arg0: PyAttentionInputs) -> None: ...
+    def attention_inputs(self, arg0: PyAttentionInputs | dict[str, PyAttentionInputs]) -> None: ...
     @property
     def bert_embedding_inputs(self) -> BertEmbeddingInputs:
         """

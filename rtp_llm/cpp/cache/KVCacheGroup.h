@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <unordered_map>
+#include <utility>
 
 #include <torch/torch.h>
 
@@ -24,6 +25,18 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
+    KVCacheGroup(CacheGroup                          cache_group,
+                 BlockPoolPtr                        block_pool,
+                 int                                 group_slot,
+                 SharedBlockCache*                   shared_cache     = nullptr,
+                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+        cache_group_(std::move(cache_group)),
+        block_pool_(std::move(block_pool)),
+        shared_cache_(shared_cache),
+        metrics_reporter_(metrics_reporter),
+        group_slot_(group_slot) {}
+
+    // Transition-only constructor for HybridPool and existing focused tests.
     KVCacheGroup(const LayerIdsType&                 layer_ids,
                  KVCacheSpecPtr                      kvcache_spec,
                  BlockPoolPtr                        block_pool,
@@ -31,24 +44,22 @@ public:
                  CacheGroupPolicy                    policy           = CacheGroupPolicy{},
                  SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        layer_ids_(layer_ids),
-        kvcache_spec_(std::move(kvcache_spec)),
-        block_pool_(block_pool),
-        policy_(policy),
-        shared_cache_(shared_cache),
-        metrics_reporter_(metrics_reporter),
-        group_id_(group_id),
-        seq_size_per_block_(kvcache_spec_->seq_size_per_block) {}
+        KVCacheGroup(makeLegacyCacheGroup(layer_ids, std::move(kvcache_spec), policy),
+                     std::move(block_pool),
+                     group_id,
+                     shared_cache,
+                     metrics_reporter) {}
 
     virtual ~KVCacheGroup() = default;
 
-    bool init();
+    bool         init();
     virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual MatchResult match(const CacheKeysType& cache_keys);
     virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
     virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
-    virtual void insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
-    virtual void        free(const BlockIndicesType& block_indices) = 0;
+    virtual void
+    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
+    virtual void free(const BlockIndicesType& block_indices)                                                     = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     virtual NeedBlocksInfo getNeedBlocks(
@@ -66,30 +77,43 @@ public:
     size_t                  freeBlocksNum() const;
     bool                    ensureFreeBlocks(int need_blocks);
     int                     seqSizePerBlock() const;
-    int                     group_id() const;
+    const std::string&      tag() const;
+    const CacheGroup&       config() const;
+    int                     groupSlot() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
     uint32_t                explicitBlockNum() const;
     size_t                  activeTailBlocks() const;
 
-    virtual bool prefixReusable() const;
-    virtual bool hasSparseSlots() const;
-    virtual bool hasKernelBlockSubdiv() const;
-    virtual bool transferTailBlocks() const;
-    virtual bool isReservable() const;
+    virtual bool                 prefixReusable() const;
+    virtual bool                 hasSparseSlots() const;
+    virtual bool                 hasKernelBlockSubdiv() const;
+    virtual bool                 transferTailBlocks() const;
+    virtual bool                 isReservable() const;
     virtual CacheMemoryPlacement memoryPlacement() const;
 
 protected:
-    LayerIdsType                 layer_ids_;
-    KVCacheSpecPtr               kvcache_spec_;
+    static CacheGroup
+    makeLegacyCacheGroup(const LayerIdsType& layer_ids, KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
+        CacheGroup group;
+        group.tag                       = spec == nullptr ? std::string{} : spec->tag;
+        group.spec                      = std::move(spec);
+        group.policy                    = policy;
+        group.layer_ids                 = layer_ids;
+        group.seq_size_per_block        = group.spec == nullptr ? 1 : group.spec->seq_size_per_block;
+        group.kernel_seq_size_per_block = group.seq_size_per_block;
+        group.kv_block_stride_bytes     = group.spec == nullptr ? 0 : group.spec->block_size_bytes();
+        group.kv_scale_stride_bytes     = group.spec == nullptr ? 0 : group.spec->scale_block_size_bytes();
+        return group;
+    }
+
+    CacheGroup                   cache_group_;
     BlockPoolPtr                 block_pool_;
-    CacheGroupPolicy             policy_;
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
-    int                          group_id_         = 0;
+    int                          group_slot_       = 0;
 
-    int                                    seq_size_per_block_;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;
     std::unordered_map<int, int>           global_layer_to_local_layer;

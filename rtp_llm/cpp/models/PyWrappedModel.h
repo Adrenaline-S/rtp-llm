@@ -34,8 +34,7 @@ public:
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
                    bool                      is_prefill_cuda_graph_mode = false,
-                   bool                      use_spec_decoding          = false,
-                   const std::vector<int>&   kv_cache_layer_to_group    = {});
+                   bool                      use_spec_decoding          = false);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -47,16 +46,17 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
-    torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
-    torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
-    void setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs);
-    GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,
-                                          const GptModelInputs& inputs,
-                                          bool                  skip_final_layernorm,
-                                          size_t                num_valid_tokens = -1);
-    torch::Tensor   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
+                                                                   const GptModelInputs&         inputs);
+    GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
+                                                          const GptModelInputs& inputs,
+                                                          bool                  skip_final_layernorm,
+                                                          size_t                num_valid_tokens = -1);
+    torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -75,15 +75,15 @@ private:
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
     // Member variables (formerly inherited from GptModel)
-    const rtp_llm::ExecProperties            device_props_;
-    const rtp_llm::MlaOpsType                mla_ops_type_;
-    const size_t                             layer_num_;
-    const GptModelDescription                description_;
+    const rtp_llm::ExecProperties                   device_props_;
+    const rtp_llm::MlaOpsType                       mla_ops_type_;
+    const size_t                                    layer_num_;
+    const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
-    std::shared_ptr<KVCacheManager>          cache_manager_;  // For cache_store access
-    torch::Tensor                            residual_scale_fp32_;
-    torch::Tensor                            residual_scale_;
-    ModelBufferHolder                        buffer_holder_;
+    std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
+    torch::Tensor                                   residual_scale_fp32_;
+    torch::Tensor                                   residual_scale_;
+    ModelBufferHolder                               buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
@@ -109,8 +109,7 @@ private:
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
-                                      bool                      use_spec_decoding,
-                                      const std::vector<int>&   kv_cache_layer_to_group):
+                                      bool                      use_spec_decoding):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
@@ -169,17 +168,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             kv_cache.kv_scale_base_by_layer.push_back(t);
         }
 
-        kv_cache.layer_attn_types   = layout.layer_attn_types;
-        kv_cache.layer_to_group_ids = layout.layer_to_group_ids;
-        kv_cache.group_types                     = layout.group_types;
-        kv_cache.group_seq_block_sizes           = layout.group_seq_block_sizes;
-        kv_cache.group_kernel_seq_block_sizes    = layout.group_kernel_seq_block_sizes;
+        kv_cache.layer_attn_types                 = layout.layer_attn_types;
+        kv_cache.layer_to_group_ids               = layout.layer_to_group_ids;
+        kv_cache.group_types                      = layout.group_types;
+        kv_cache.group_seq_block_sizes            = layout.group_seq_block_sizes;
+        kv_cache.group_kernel_seq_block_sizes     = layout.group_kernel_seq_block_sizes;
         kv_cache.group_kernel_blocks_per_kv_block = layout.group_kernel_blocks_per_kv_block;
-        kv_cache.group_tags                      = layout.group_tags;
-        kv_cache.layer_tag_to_group_id        = layout.layer_tag_to_group_id;
-        kv_cache.kv_cache_base_by_layer_group = layout.layers_to_kv_buffer_ptrs_by_group;
-        kv_cache.kv_scale_base_by_layer_group = layout.layers_to_scale_buffer_ptrs_by_group;
-        init_resources.kv_cache     = kv_cache;
+        kv_cache.group_tags                       = layout.group_tags;
+        kv_cache.layer_tag_to_group_id            = layout.layer_tag_to_group_id;
+        kv_cache.kv_cache_base_by_layer_group     = layout.layers_to_kv_buffer_ptrs_by_group;
+        kv_cache.kv_scale_base_by_layer_group     = layout.layers_to_scale_buffer_ptrs_by_group;
+        init_resources.kv_cache                   = kv_cache;
     }
 
     py::object py_init_result;
@@ -208,7 +207,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
-        graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+        if (params.kv_cache_layer_layout.has_value()) {
+            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->group_tags;
+        }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
         // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style
@@ -217,12 +218,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
                                                   description_.attention_conf.rope_config.index_factor :
                                                   0;
-
-        if (kv_cache_layer_to_group.size() > 0) {
-            graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
-        } else {
-            graph_params.kv_cache_layer_to_group = params.kv_cache_layer_to_group;
-        }
 
         // clang-format off
         // Decision table for num_tokens_per_bs:

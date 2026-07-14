@@ -43,22 +43,21 @@ bool HybridTypeKVCacheAllocator::doInit() {
     }
 
     for (int gid = 0; gid < group_nums; ++gid) {
-        KVCacheSpecPtr spec = config_.specForGroup(static_cast<size_t>(gid));
-        const auto&    ids  = config_.layerIdsForGroup(static_cast<size_t>(gid));
+        const auto& cache_group = config_.topology().groupBySlot(static_cast<size_t>(gid));
+        const auto& spec        = cache_group.spec;
 
         KVCacheGroupPtr group;
-        const auto      group_type = config_.typeForGroup(static_cast<size_t>(gid));
-        const auto      policy     = config_.policyForGroup(static_cast<size_t>(gid));
+        const auto      group_type = cache_group.policy.group_type;
         if (group_type == CacheGroupType::SWA) {
             group = std::make_shared<SWAKVCacheGroup>(
-                ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr, policy);
+                cache_group, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr);
             swa_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::LINEAR || (spec && spec->type == KVCacheSpecType::LinearAttention)) {
             group = std::make_shared<LinearKVCacheGroup>(
-                ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr, policy);
+                cache_group, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr);
             linear_group_ids_.push_back(gid);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid, shared_cache_raw, nullptr, policy);
+            group = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, gid, shared_cache_raw, nullptr);
             full_group_ids_.push_back(gid);
         }
 
@@ -68,7 +67,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
 
     global_layer_to_local_id_.assign(static_cast<size_t>(config_.layer_all_num), -1);
     for (int gid = 0; gid < group_nums; ++gid) {
-        const auto& cur_group_layers = config_.layerIdsForGroup(static_cast<size_t>(gid));
+        const auto& cur_group_layers = config_.topology().groupBySlot(static_cast<size_t>(gid)).layer_ids;
         for (size_t local_layer_idx = 0; local_layer_idx < cur_group_layers.size(); ++local_layer_idx) {
             const int global_layer_idx = cur_group_layers[local_layer_idx];
             if (global_layer_idx >= 0 && static_cast<size_t>(global_layer_idx) < global_layer_to_local_id_.size()) {
@@ -159,7 +158,6 @@ GroupedCacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     }
     return GroupedCacheLayerLayout::fromFlat(layout);
 }
-
 
 int HybridTypeKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {

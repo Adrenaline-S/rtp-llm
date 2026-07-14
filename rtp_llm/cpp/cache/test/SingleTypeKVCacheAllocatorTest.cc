@@ -543,7 +543,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
     config.kv_cache_spec_descs[1][0].tag                   = "layer1";
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
-                                                              HybridAttentionType::SLIDING_WINDOW};
+                                                             HybridAttentionType::SLIDING_WINDOW};
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
 
@@ -684,7 +684,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTens
         kv_cache.kernel_seq_size_per_block    = 4;
 
         const auto by_tag   = kv_cache.getLayerCache(/*idx=*/0, "default");
-        const auto by_group = kv_cache.getLayerCacheByGroup(/*idx=*/0, /*gid=*/0);
+        const auto by_group = kv_cache.getLayerCache(/*idx=*/0, "default");
         EXPECT_TRUE(by_tag.kv_cache_base.defined());
         EXPECT_TRUE(by_group.kv_cache_base.defined());
         EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), local_layout.layers_to_kv_buffer_ptrs[0].data_ptr());

@@ -13,6 +13,8 @@ namespace rtp_llm {
 // Debug utilities for printing tensor information
 void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
 void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs);
+// Copy common attention metadata to every tag while retaining each tag's block tables.
+void refreshTaggedAttentionInputs(torch_ext::PyModelInputs& inputs);
 
 }  // namespace rtp_llm
 
@@ -26,30 +28,25 @@ public:
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
         decoder_layer_hidden_states_(hidden_states) {
-        py_model_inputs_.attention_inputs.input_lengths    = inputs.attention_inputs.input_lengths;
-        py_model_inputs_.attention_inputs.input_lengths_device   = inputs.attention_inputs.input_lengths_device;
-        py_model_inputs_.attention_inputs.sequence_lengths       = inputs.attention_inputs.sequence_lengths;
+        py_model_inputs_.attention_inputs.input_lengths        = inputs.attention_inputs.input_lengths;
+        py_model_inputs_.attention_inputs.input_lengths_device = inputs.attention_inputs.input_lengths_device;
+        py_model_inputs_.attention_inputs.sequence_lengths     = inputs.attention_inputs.sequence_lengths;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device =
             inputs.attention_inputs.kv_cache_kernel_block_id_device;
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id =
-            inputs.attention_inputs.kv_cache_kernel_block_id;
+        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id = inputs.attention_inputs.kv_cache_kernel_block_id;
         py_model_inputs_.attention_inputs.kv_cache_block_id_device = inputs.attention_inputs.kv_cache_block_id_device;
-        py_model_inputs_.attention_inputs.kv_cache_block_id   = inputs.attention_inputs.kv_cache_block_id;
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group =
-            inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group;
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_by_group =
-            inputs.attention_inputs.kv_cache_kernel_block_id_by_group;
-        py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
-        py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
-        py_model_inputs_.attention_inputs.prefix_lengths_device   = inputs.attention_inputs.prefix_lengths_device;
-        py_model_inputs_.attention_inputs.combo_position_ids      = inputs.attention_inputs.combo_position_ids;
-        py_model_inputs_.input_ids                                = inputs.input_ids;
-        py_model_inputs_.combo_position_ids                       = inputs.combo_position_ids;
+        py_model_inputs_.attention_inputs.kv_cache_block_id        = inputs.attention_inputs.kv_cache_block_id;
+        py_model_inputs_.attention_inputs_by_tag                   = inputs.attention_inputs_by_tag;
+        py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
+        py_model_inputs_.attention_inputs.prefix_lengths_device    = inputs.attention_inputs.prefix_lengths_device;
+        py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;
+        py_model_inputs_.input_ids                                 = inputs.input_ids;
+        py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
         py_model_inputs_.attention_inputs.cu_seqlens_device       = inputs.attention_inputs.cu_seqlens_device;
-        py_model_inputs_.attention_inputs.cu_seqlens         = inputs.attention_inputs.cu_seqlens;
+        py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;
         py_model_inputs_.attention_inputs.cu_kv_seqlens_device    = inputs.attention_inputs.cu_kv_seqlens_device;
         py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
@@ -59,11 +56,12 @@ public:
 
         py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
             inputs.attention_inputs.prefill_cuda_graph_copy_params;
-        py_model_inputs_.bert_embedding_inputs                      = inputs.bert_embedding_inputs;
-        py_model_inputs_.attention_inputs.is_s_padded               = inputs.attention_inputs.is_s_padded;
-        py_model_inputs_.attention_inputs.decode_cu_seqlens_device  = inputs.attention_inputs.decode_cu_seqlens_device;
-        py_model_inputs_.attention_inputs.decode_cu_seqlens    = inputs.attention_inputs.decode_cu_seqlens;
-        py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device = inputs.attention_inputs.sequence_lengths_plus_1_device;
+        py_model_inputs_.bert_embedding_inputs                     = inputs.bert_embedding_inputs;
+        py_model_inputs_.attention_inputs.is_s_padded              = inputs.attention_inputs.is_s_padded;
+        py_model_inputs_.attention_inputs.decode_cu_seqlens_device = inputs.attention_inputs.decode_cu_seqlens_device;
+        py_model_inputs_.attention_inputs.decode_cu_seqlens        = inputs.attention_inputs.decode_cu_seqlens;
+        py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device =
+            inputs.attention_inputs.sequence_lengths_plus_1_device;
     }
 
 public:
@@ -100,10 +98,10 @@ public:
                          reinterpret_cast<void*>(origin_stream_.stream()));
     }
 
-    CudaGraphStreamLife(const CudaGraphStreamLife&)            = delete;
+    CudaGraphStreamLife(const CudaGraphStreamLife&) = delete;
     CudaGraphStreamLife& operator=(const CudaGraphStreamLife&) = delete;
     CudaGraphStreamLife(CudaGraphStreamLife&&)                 = delete;
-    CudaGraphStreamLife& operator=(CudaGraphStreamLife&&)      = delete;
+    CudaGraphStreamLife& operator=(CudaGraphStreamLife&&) = delete;
 
 private:
     rtp_llm::cuda_graph::GraphStream origin_stream_;
@@ -120,15 +118,13 @@ public:
             rtp_llm::cuda_graph::exit_graph_capture(ctx_);
         } catch (const std::exception& e) {
             RTP_LLM_LOG_WARNING("Exception in CudaGraphCaptureGuard destructor: %s", e.what());
-        } catch (...) {
-            RTP_LLM_LOG_WARNING("Unknown exception in CudaGraphCaptureGuard destructor");
-        }
+        } catch (...) { RTP_LLM_LOG_WARNING("Unknown exception in CudaGraphCaptureGuard destructor"); }
     }
 
-    CudaGraphCaptureGuard(const CudaGraphCaptureGuard&)            = delete;
+    CudaGraphCaptureGuard(const CudaGraphCaptureGuard&) = delete;
     CudaGraphCaptureGuard& operator=(const CudaGraphCaptureGuard&) = delete;
     CudaGraphCaptureGuard(CudaGraphCaptureGuard&&)                 = delete;
-    CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
+    CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&) = delete;
 
 private:
     rtp_llm::cuda_graph::GraphNcclCaptureContext* ctx_{nullptr};

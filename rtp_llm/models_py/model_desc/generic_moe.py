@@ -6,7 +6,10 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_fmha_params,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -80,9 +83,9 @@ class GenericMoeLayer(nn.Module):
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
-        assert (
-            self.w1 is not None and self.w2 is not None
-        ), "Weights w1 and w2 must be provided"
+        assert self.w1 is not None and self.w2 is not None, (
+            "Weights w1 and w2 must be provided"
+        )
         self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
@@ -350,16 +353,14 @@ class GenericMoeModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(
-                inputs
-            )  # pyright: ignore[reportUnreachable]
+            fmha_impl = self.prepare_fmha_impl(inputs)  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
             hidden_states = output.hidden_states
@@ -367,7 +368,7 @@ class GenericMoeModel(GptModelBase):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states, get_fmha_params(fmha_impl))
 
 
 __all__ = [
