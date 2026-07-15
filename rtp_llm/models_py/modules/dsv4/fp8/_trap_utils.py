@@ -1,10 +1,9 @@
-"""Debug gates for DSV4 FP8 invalid KV/state cache access."""
+"""Validation helpers for DSV4 FP8 invalid KV/state cache access."""
 
 from __future__ import annotations
 
 import os
 
-DSV4_TRAP_INVALID_KV_ACCESS_ENV = "DSV4_TRAP_INVALID_KV_ACCESS"
 DSV4_VALIDATE_INVALID_KV_ACCESS_ENV = "DSV4_VALIDATE_INVALID_KV_ACCESS"
 DSV4_INVALID_KV_ACCESS_DUMP_LIMIT_ENV = "DSV4_INVALID_KV_ACCESS_DUMP_LIMIT"
 
@@ -17,10 +16,13 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 def trap_invalid_kv_access_enabled() -> bool:
-    return _env_flag(DSV4_TRAP_INVALID_KV_ACCESS_ENV, True)
+    """Keep device-side invalid-access traps enabled in every kernel specialization."""
+    return True
 
 
 def invalid_kv_access_validation_enabled() -> bool:
+    # This diagnostic performs tensor scans and GPU-to-CPU synchronization at
+    # every call site, so keep it opt-in rather than part of the serving path.
     return _env_flag(DSV4_VALIDATE_INVALID_KV_ACCESS_ENV, False)
 
 

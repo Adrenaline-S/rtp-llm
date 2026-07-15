@@ -1,8 +1,6 @@
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 
 #include <algorithm>
-#include <cstdlib>
-#include <string>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -25,21 +23,9 @@ bool shouldAllocateBlock(
            || (enable_reuse_cache && step_hit);
 }
 
-bool dsv4TrapInvalidKVAccessEnabled() {
-    const char* value = std::getenv("DSV4_TRAP_INVALID_KV_ACCESS");
-    if (value == nullptr) {
-        return false;
-    }
-    const std::string flag(value);
-    return !flag.empty() && flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
-}
-
 }  // namespace
 
 bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
-    if (!dsv4TrapInvalidKVAccessEnabled()) {
-        return false;
-    }
     return policy().validate_tail_blocks;
 }
 
