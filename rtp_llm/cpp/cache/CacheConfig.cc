@@ -15,9 +15,63 @@ CacheGroupType groupTypeForSpec(const KVCacheSpec& spec) {
 }  // namespace
 
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
-    return lhs.reuse_policy == rhs.reuse_policy && lhs.evict_policy == rhs.evict_policy
-           && lhs.validate_tail_blocks == rhs.validate_tail_blocks && lhs.prefix_reusable == rhs.prefix_reusable
-           && lhs.is_reservable == rhs.is_reservable && lhs.group_type == rhs.group_type;
+    return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
+           && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
+           && lhs.explicit_block_num == rhs.explicit_block_num
+           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
+           && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
+           && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;
+}
+
+void CacheConfig::syncCacheTopology() {
+    if (groups.empty() || layers.empty()) {
+        cache_topology.reset();
+        return;
+    }
+
+    std::vector<CacheGroup> topology_groups;
+    topology_groups.reserve(groups.size());
+    for (const auto& legacy_group : groups) {
+        RTP_LLM_CHECK_WITH_INFO(legacy_group.spec != nullptr, "CacheConfig topology contains null spec");
+
+        CacheGroup group;
+        group.tag       = legacy_group.spec->tag;
+        group.spec      = legacy_group.spec->clone();
+        group.policy    = legacy_group.policy;
+        group.layer_ids = legacy_group.layer_ids;
+        group.block_num =
+            group_block_layout_initialized && legacy_group.block_num > 0 ? legacy_group.block_num : block_num;
+        group.local_kv_head_num  = legacy_group.local_kv_head_num;
+        group.seq_size_per_block = legacy_group.spec->seq_size_per_block > 0 ? legacy_group.spec->seq_size_per_block :
+                                                                               std::max<size_t>(1, seq_size_per_block);
+        group.kernel_seq_size_per_block =
+            group.policy.group_type == CacheGroupType::FULL && kernel_seq_size_per_block > 0 ?
+                std::min(kernel_seq_size_per_block, group.seq_size_per_block) :
+                group.seq_size_per_block;
+        group.kv_block_stride_bytes =
+            group_block_layout_initialized ? legacy_group.kv_block_stride_bytes : legacy_group.spec->block_size_bytes();
+        group.kv_scale_stride_bytes = group_block_layout_initialized ? legacy_group.kv_scale_stride_bytes :
+                                                                       legacy_group.spec->scale_block_size_bytes();
+        topology_groups.push_back(std::move(group));
+    }
+
+    std::vector<CacheLayer> topology_layers;
+    topology_layers.reserve(layers.size());
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
+        CacheLayer layer;
+        layer.layer_id = static_cast<int>(layer_id);
+        layer.group_tags.reserve(layers[layer_id].group_ids.size());
+        for (int gid : layers[layer_id].group_ids) {
+            RTP_LLM_CHECK_WITH_INFO(gid >= 0 && static_cast<size_t>(gid) < topology_groups.size(),
+                                    "CacheConfig layer=%zu has invalid group slot=%d",
+                                    layer_id,
+                                    gid);
+            layer.group_tags.push_back(topology_groups[static_cast<size_t>(gid)].tag);
+        }
+        topology_layers.push_back(std::move(layer));
+    }
+
+    cache_topology = CacheTopology::create(std::move(topology_groups), std::move(topology_layers));
 }
 
 std::shared_ptr<CacheConfig>
@@ -154,6 +208,8 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     sub_cfg->layers                         = std::move(sub_layers);
     sub_cfg->tag_to_gid                     = std::move(sub_tag_to_gid);
     sub_cfg->group_block_layout_initialized = group_block_layout_initialized;
+    sub_cfg->syncCacheTopology();
+    syncCacheTopology();
     return sub_cfg;
 }
 
@@ -172,7 +228,8 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
         RTP_LLM_CHECK_WITH_INFO(
             !group.spec->tag.empty(), "CacheConfig::setTopology requires non-empty tag for group %zu", gid);
         const auto expected_group_type = groupTypeForSpec(*group.spec);
-        RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == expected_group_type,
+        RTP_LLM_CHECK_WITH_INFO(expected_group_type != CacheGroupType::LINEAR
+                                    || group.policy.group_type == CacheGroupType::LINEAR,
                                 "CacheConfig::setTopology group %zu tag=%s policy type %s does not match spec type %d",
                                 gid,
                                 group.spec->tag.c_str(),
@@ -272,6 +329,7 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
     layers                         = std::move(new_layers);
     tag_to_gid                     = std::move(new_tag_to_gid);
     group_block_layout_initialized = false;
+    syncCacheTopology();
 }
 
 void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
@@ -349,13 +407,42 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
 }
 
 void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+    // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
     (void)runtime_config;
-    if (global_block_num == 0 || groups.empty()) {
+    if (global_block_num > 0) {
+        block_num = global_block_num;
+        for (auto& sub_cfg : mtp_sub_configs) {
+            if (sub_cfg != nullptr) {
+                sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
+            }
+        }
+    }
+
+    if (!use_independent_block_pools || !group_block_layout_initialized || groups.empty()) {
+        explicitly_sized_pool_reserve_bytes = 0;
+        syncCacheTopology();
         return;
     }
-    for (auto& group : groups) {
-        group.block_num = global_block_num;
+
+    size_t     reserve = 0;
+    const auto step    = static_cast<uint32_t>(std::max(1, linear_step));
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        const auto explicit_independent_blocks = explicitIndependentBlocks(gid);
+        uint32_t   rule_blocks                 = global_block_num;
+        if (explicit_independent_blocks > 0) {
+            rule_blocks = explicit_independent_blocks;
+        } else if (typeForGroup(gid) == CacheGroupType::SWA) {
+            rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
+        }
+        groups[gid].block_num = rule_blocks;
+
+        // Only groups that opt in reserve paged-pool budget for explicit blocks.
+        if (explicit_independent_blocks > 0 && groups[gid].policy.charge_to_paged_budget) {
+            reserve += static_cast<size_t>(rule_blocks) * blockSizeBytesForGroup(gid);
+        }
     }
+    explicitly_sized_pool_reserve_bytes = reserve;
+    syncCacheTopology();
 }
 
 std::string CacheConfig::debugString(size_t indent) const {

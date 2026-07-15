@@ -6,6 +6,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
 namespace rtp_llm {
 
@@ -43,8 +44,9 @@ public:
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
-    int curBlocksNum() const;
-    int mallocFailedTimes() const;
+    int  curBlocksNum() const;
+    int  mallocFailedTimes() const;
+    bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
