@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
+#include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #endif
 
 using namespace std;
@@ -54,6 +55,30 @@ void PyWrappedModel::releaseBuffers() {
         held_attn_pyobj_ = py::object();
     }
     buffer_holder_.release();
+}
+
+torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
+    if (!py_model_) {
+        return torch::Tensor();
+    }
+    py::gil_scoped_acquire gil;
+    if (!py::hasattr(py_model_, "get_mtp_target_hidden_states")) {
+        return torch::Tensor();
+    }
+    py::object result = py_model_.attr("get_mtp_target_hidden_states")(num_tokens);
+    return result.is_none() ? torch::Tensor() : result.cast<torch::Tensor>();
+}
+
+torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
+    if (!py_model_) {
+        return torch::Tensor();
+    }
+    py::gil_scoped_acquire gil;
+    if (!py::hasattr(py_model_, "get_mtp_last_hidden_states")) {
+        return torch::Tensor();
+    }
+    py::object result = py_model_.attr("get_mtp_last_hidden_states")(num_tokens);
+    return result.is_none() ? torch::Tensor() : result.cast<torch::Tensor>();
 }
 
 PyWrappedModel::~PyWrappedModel() {
@@ -545,13 +570,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         fusedCopy(d2d_copies_);
 
         auto           py_model_inputs = PyModelInputs({token_ids,
-                                              input_hiddens,
-                                              combo_position_ids,
-                                              embedding_inputs,
-                                              multimodal_inputs,
-                                              attention_inputs,
-                                              attention_inputs_by_tag,
-                                              bert_embedding_inputs});
+                                                        input_hiddens,
+                                                        combo_position_ids,
+                                                        embedding_inputs,
+                                                        multimodal_inputs,
+                                                        attention_inputs,
+                                                        attention_inputs_by_tag,
+                                                        bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -589,7 +614,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        if (device_props_.enable_prefill_cp) {
+        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        if (device_props_.enable_prefill_cp && has_context_request) {
+            if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
+                context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
+                return forwardPostLayersLastHidden(hidden_states, inputs);
+            }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
@@ -724,7 +754,15 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         printTorchTensorData(last_hidden, "last_hidden");
 
-        auto logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
+        torch::Tensor logits;
+#if USING_CUDA
+        if (lm_head->kernel.dtype() == torch::kBFloat16) {
+            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
+        } else
+#endif
+        {
+            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
+        }
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
@@ -746,6 +784,33 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
     } else {
         return {torch::Tensor(), torch::Tensor(), hidden};
     }
+}
+
+GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs) {
+    DevicePerfWrapper wrapper(enable_device_perf_, "forwardPostLayersLastHidden");
+    const auto&       lm_head = weights_.lm_head;
+    if (!lm_head) {
+        return {torch::Tensor(), torch::Tensor(), hidden};
+    }
+
+    torch::Tensor last_hidden = hidden;
+    torch::Tensor logits;
+#if USING_CUDA
+    if (lm_head->kernel.dtype() == torch::kBFloat16) {
+        logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
+    } else
+#endif
+    {
+        logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
+    }
+    if (device_props_.tp_size > 1) {
+        logits = tpSyncEmbeddingOrLogits(logits);
+    }
+    if (check_nan_) {
+        RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
+        RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
+    }
+    return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
@@ -1014,7 +1079,6 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.attention_mask);
     buffer_holder_.hold_host(inputs.kv_cache_block_id);
-    buffer_holder_.hold_host(inputs.kv_cache_layer_to_group);
     buffer_holder_.hold_host(inputs.kv_cache_group_types);
     buffer_holder_.hold_host(inputs.kv_cache_update_mapping);
 

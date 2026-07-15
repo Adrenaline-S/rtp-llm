@@ -337,6 +337,7 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
     const auto layer_group_ids  = config_.layerGroupIdsSnapshot();
     const auto layer_tag_to_gid = config_.layerTagToGroupIdSnapshot();
     layout.group_types          = config_.groupTypesSnapshot();
+    layout.group_spec_types     = config_.groupSpecTypesSnapshot();
     if (config_.use_independent_block_pools) {
         layout.group_seq_block_sizes            = config_.groupSeqBlockSizesSnapshot();
         layout.group_kernel_seq_block_sizes     = config_.groupKernelSeqBlockSizesSnapshot();
@@ -415,8 +416,9 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
     }
-    layout.group_tags  = mtp_sub_config->groupTagsSnapshot();
-    layout.group_types = mtp_sub_config->groupTypesSnapshot();
+    layout.group_tags       = mtp_sub_config->groupTagsSnapshot();
+    layout.group_types      = mtp_sub_config->groupTypesSnapshot();
+    layout.group_spec_types = mtp_sub_config->groupSpecTypesSnapshot();
     if (config_.use_independent_block_pools) {
         layout.group_seq_block_sizes            = mtp_sub_config->groupSeqBlockSizesSnapshot();
         layout.group_kernel_seq_block_sizes     = mtp_sub_config->groupKernelSeqBlockSizesSnapshot();

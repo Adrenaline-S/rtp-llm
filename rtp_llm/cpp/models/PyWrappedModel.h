@@ -40,6 +40,8 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -69,6 +71,7 @@ private:
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
                                       bool                  skip_final_layernorm = false);
+    GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
     MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
@@ -171,6 +174,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         kv_cache.layer_attn_types                 = layout.layer_attn_types;
         kv_cache.layer_to_group_ids               = layout.layer_to_group_ids;
         kv_cache.group_types                      = layout.group_types;
+        kv_cache.group_spec_types                 = layout.group_spec_types;
         kv_cache.group_seq_block_sizes            = layout.group_seq_block_sizes;
         kv_cache.group_kernel_seq_block_sizes     = layout.group_kernel_seq_block_sizes;
         kv_cache.group_kernel_blocks_per_kv_block = layout.group_kernel_blocks_per_kv_block;
@@ -180,6 +184,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         kv_cache.kv_scale_base_by_layer_group     = layout.layers_to_scale_buffer_ptrs_by_group;
         init_resources.kv_cache                   = kv_cache;
     }
+    init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
+    init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
+    init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
@@ -203,6 +210,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.tokens_per_block             = params.tokens_per_block;
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
+        graph_params.hc_mult                      = params.hc_mult;
         graph_params.model_data_type              = dtype;
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
@@ -242,7 +250,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         } else {
             graph_params.num_tokens_per_bs = 1;
         }
-        graph_params.is_target_verify = use_spec_decoding;
+        // Target-model decode with SP enabled is the multi-token verify path.
+        // NormalExecutor::decodeWarmUp does not set use_spec_decoding, so infer
+        // this graph role from the model/config identity as well; otherwise the
+        // Python model sees is_prefill=true and incorrectly enters prefill.
+        const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
+                                             && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
+                                             && !is_prefill_cuda_graph_mode;
+        graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
@@ -276,7 +291,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
-    cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>();
+    cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
 
     if (device_props_.enable_prefill_cp) {
         context_parallel_processor_ =

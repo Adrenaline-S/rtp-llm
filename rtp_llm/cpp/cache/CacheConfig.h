@@ -211,6 +211,20 @@ public:
         return types;
     }
 
+    std::vector<KVCacheSpecType> groupSpecTypesSnapshot() const {
+        if (cache_topology != nullptr) {
+            const auto& snapshot = cache_topology->groupSpecTypesSnapshot();
+            return {snapshot.begin(), snapshot.end()};
+        }
+        std::vector<KVCacheSpecType> types;
+        types.reserve(groups.size());
+        for (const auto& group : groups) {
+            RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig::groupSpecTypesSnapshot null spec");
+            types.push_back(group.spec->type);
+        }
+        return types;
+    }
+
     std::vector<std::string> groupTagsSnapshot() const {
         if (cache_topology != nullptr) {
             const auto& snapshot = cache_topology->groupTagsSnapshot();

@@ -8,6 +8,7 @@
 
 #include <torch/extension.h>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -18,14 +19,15 @@ struct BlockBufferPtrInfo {
 };
 
 struct CacheLayerLayout {
-    std::vector<std::vector<int>> layer_to_group_ids;
-    std::vector<CacheGroupType>   group_types;
-    std::vector<size_t>           group_seq_block_sizes;
-    std::vector<size_t>           group_kernel_seq_block_sizes;
-    std::vector<size_t>           group_kernel_blocks_per_kv_block;
-    std::vector<std::string>        group_tags;
+    std::vector<std::vector<int>>           layer_to_group_ids;
+    std::vector<CacheGroupType>             group_types;
+    std::vector<KVCacheSpecType>            group_spec_types;
+    std::vector<size_t>                     group_seq_block_sizes;
+    std::vector<size_t>                     group_kernel_seq_block_sizes;
+    std::vector<size_t>                     group_kernel_blocks_per_kv_block;
+    std::vector<std::string>                group_tags;
     std::vector<std::map<std::string, int>> layer_tag_to_group_id;
-    std::vector<CacheGroupType>   layer_attn_types;
+    std::vector<CacheGroupType>             layer_attn_types;
     std::vector<torch::Tensor>              layers_to_kv_buffer_ptrs;
     std::vector<torch::Tensor>              layers_to_scale_buffer_ptrs;
     std::vector<std::vector<torch::Tensor>> layers_to_kv_buffer_ptrs_by_group;
@@ -33,12 +35,13 @@ struct CacheLayerLayout {
 };
 
 struct CacheGroupLayerLayout {
-    int            group_id           = -1;
-    std::string    group_tag;
-    CacheGroupType group_type         = CacheGroupType::FULL;
-    size_t         seq_size_per_block = 0;
-    size_t         kernel_seq_size_per_block = 0;
-    size_t         kernel_blocks_per_kv_block = 1;
+    int              group_id = -1;
+    std::string      group_tag;
+    CacheGroupType   group_type                 = CacheGroupType::FULL;
+    KVCacheSpecType  cache_spec_type            = KVCacheSpecType::MultiHeadAttention;
+    size_t           seq_size_per_block         = 0;
+    size_t           kernel_seq_size_per_block  = 0;
+    size_t           kernel_blocks_per_kv_block = 1;
     CacheLayerLayout layout;
 };
 
@@ -47,12 +50,13 @@ struct GroupedCacheLayerLayout {
 
     // Compatibility snapshot used by existing call sites while the grouped API
     // is rolled through model/runtime boundaries.
-    std::vector<std::vector<int>> layer_to_group_ids;
-    std::vector<CacheGroupType>   group_types;
-    std::vector<size_t>           group_seq_block_sizes;
-    std::vector<size_t>           group_kernel_seq_block_sizes;
-    std::vector<size_t>           group_kernel_blocks_per_kv_block;
-    std::vector<std::string>      group_tags;
+    std::vector<std::vector<int>>           layer_to_group_ids;
+    std::vector<CacheGroupType>             group_types;
+    std::vector<KVCacheSpecType>            group_spec_types;
+    std::vector<size_t>                     group_seq_block_sizes;
+    std::vector<size_t>                     group_kernel_seq_block_sizes;
+    std::vector<size_t>                     group_kernel_blocks_per_kv_block;
+    std::vector<std::string>                group_tags;
     std::vector<std::map<std::string, int>> layer_tag_to_group_id;
     std::vector<CacheGroupType>             layer_attn_types;
     std::vector<torch::Tensor>              layers_to_kv_buffer_ptrs;
@@ -94,17 +98,18 @@ struct GroupedCacheLayerLayout {
 
     static GroupedCacheLayerLayout fromFlat(const CacheLayerLayout& flat) {
         GroupedCacheLayerLayout grouped;
-        grouped.layer_to_group_ids = flat.layer_to_group_ids;
-        grouped.group_types = flat.group_types;
-        grouped.group_seq_block_sizes = flat.group_seq_block_sizes;
-        grouped.group_kernel_seq_block_sizes = flat.group_kernel_seq_block_sizes;
-        grouped.group_kernel_blocks_per_kv_block = flat.group_kernel_blocks_per_kv_block;
-        grouped.group_tags = flat.group_tags;
-        grouped.layer_tag_to_group_id = flat.layer_tag_to_group_id;
-        grouped.layer_attn_types = flat.layer_attn_types;
-        grouped.layers_to_kv_buffer_ptrs = flat.layers_to_kv_buffer_ptrs;
-        grouped.layers_to_scale_buffer_ptrs = flat.layers_to_scale_buffer_ptrs;
-        grouped.layers_to_kv_buffer_ptrs_by_group = flat.layers_to_kv_buffer_ptrs_by_group;
+        grouped.layer_to_group_ids                   = flat.layer_to_group_ids;
+        grouped.group_types                          = flat.group_types;
+        grouped.group_spec_types                     = flat.group_spec_types;
+        grouped.group_seq_block_sizes                = flat.group_seq_block_sizes;
+        grouped.group_kernel_seq_block_sizes         = flat.group_kernel_seq_block_sizes;
+        grouped.group_kernel_blocks_per_kv_block     = flat.group_kernel_blocks_per_kv_block;
+        grouped.group_tags                           = flat.group_tags;
+        grouped.layer_tag_to_group_id                = flat.layer_tag_to_group_id;
+        grouped.layer_attn_types                     = flat.layer_attn_types;
+        grouped.layers_to_kv_buffer_ptrs             = flat.layers_to_kv_buffer_ptrs;
+        grouped.layers_to_scale_buffer_ptrs          = flat.layers_to_scale_buffer_ptrs;
+        grouped.layers_to_kv_buffer_ptrs_by_group    = flat.layers_to_kv_buffer_ptrs_by_group;
         grouped.layers_to_scale_buffer_ptrs_by_group = flat.layers_to_scale_buffer_ptrs_by_group;
 
         const size_t group_count = std::max(flat.group_types.size(), flat.group_tags.size());
@@ -118,6 +123,9 @@ struct GroupedCacheLayerLayout {
             if (gid < flat.group_types.size()) {
                 group_layout.group_type = flat.group_types[gid];
             }
+            if (gid < flat.group_spec_types.size()) {
+                group_layout.cache_spec_type = flat.group_spec_types[gid];
+            }
             if (gid < flat.group_seq_block_sizes.size()) {
                 group_layout.seq_size_per_block = flat.group_seq_block_sizes[gid];
             }
@@ -127,10 +135,11 @@ struct GroupedCacheLayerLayout {
             if (gid < flat.group_kernel_blocks_per_kv_block.size()) {
                 group_layout.kernel_blocks_per_kv_block = flat.group_kernel_blocks_per_kv_block[gid];
             }
-            group_layout.layout.group_types = {group_layout.group_type};
-            group_layout.layout.group_tags = {group_layout.group_tag};
-            group_layout.layout.group_seq_block_sizes = {group_layout.seq_size_per_block};
-            group_layout.layout.group_kernel_seq_block_sizes = {group_layout.kernel_seq_size_per_block};
+            group_layout.layout.group_types                      = {group_layout.group_type};
+            group_layout.layout.group_spec_types                 = {group_layout.cache_spec_type};
+            group_layout.layout.group_tags                       = {group_layout.group_tag};
+            group_layout.layout.group_seq_block_sizes            = {group_layout.seq_size_per_block};
+            group_layout.layout.group_kernel_seq_block_sizes     = {group_layout.kernel_seq_size_per_block};
             group_layout.layout.group_kernel_blocks_per_kv_block = {group_layout.kernel_blocks_per_kv_block};
             group_layout.layout.layer_to_group_ids.resize(flat.layer_to_group_ids.size());
             group_layout.layout.layer_tag_to_group_id.resize(flat.layer_tag_to_group_id.size());
@@ -159,7 +168,8 @@ struct GroupedCacheLayerLayout {
                     group_layout.layout.layers_to_scale_buffer_ptrs[layer_id] =
                         flat.layers_to_scale_buffer_ptrs_by_group[layer_id][gid];
                 } else if (gids.size() == 1 && layer_id < flat.layers_to_scale_buffer_ptrs.size()) {
-                    group_layout.layout.layers_to_scale_buffer_ptrs[layer_id] = flat.layers_to_scale_buffer_ptrs[layer_id];
+                    group_layout.layout.layers_to_scale_buffer_ptrs[layer_id] =
+                        flat.layers_to_scale_buffer_ptrs[layer_id];
                 }
             }
             grouped.group_layouts.push_back(std::move(group_layout));
@@ -167,7 +177,7 @@ struct GroupedCacheLayerLayout {
         if (grouped.group_layouts.empty() && !flat.layers_to_kv_buffer_ptrs.empty()) {
             CacheGroupLayerLayout group_layout;
             group_layout.group_id = 0;
-            group_layout.layout = flat;
+            group_layout.layout   = flat;
             grouped.group_layouts.push_back(std::move(group_layout));
         }
         return grouped;

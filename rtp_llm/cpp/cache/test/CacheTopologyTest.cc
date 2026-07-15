@@ -53,8 +53,11 @@ TEST(CacheTopologyTest, CompatibilitySnapshotsAreLazyStableAndReadOnly) {
 
     const auto& tags_first  = topology->groupTagsSnapshot();
     const auto& tags_second = topology->groupTagsSnapshot();
+    const auto& spec_types  = topology->groupSpecTypesSnapshot();
     EXPECT_EQ(&tags_first, &tags_second);
     EXPECT_EQ(tags_first, (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(spec_types,
+              (std::vector<KVCacheSpecType>{KVCacheSpecType::MultiHeadAttention, KVCacheSpecType::MultiHeadAttention}));
     EXPECT_EQ(topology->layerGroupIdsSnapshot(), (std::vector<std::vector<int>>{{0, 1}}));
     EXPECT_EQ(topology->layerTagToGroupIdSnapshot().front().at("linear"), 1);
 }

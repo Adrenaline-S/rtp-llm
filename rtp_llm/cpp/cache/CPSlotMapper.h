@@ -22,7 +22,8 @@ struct CpGroupLayout {
 };
 
 // One cache-store registration step: pair a cache key from the full logical
-// namespace with a kv_cache_offset slot from the rank-local namespace.
+// namespace with a slot in the tag-local physical block table. Under CP,
+// both round-robin FULL groups and compact STATE/SWA groups use local slots.
 struct CacheStoreBlockPair {
     int key_index;
     int offset_index;

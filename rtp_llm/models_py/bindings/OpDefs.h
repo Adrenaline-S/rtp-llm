@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -55,6 +56,7 @@ struct KVCache {
 
     // Per-group topology from CacheLayerLayout.
     std::vector<rtp_llm::CacheGroupType>    group_types;
+    std::vector<rtp_llm::KVCacheSpecType>   group_spec_types;
     std::vector<size_t>                     group_seq_block_sizes;
     std::vector<size_t>                     group_kernel_seq_block_sizes;
     std::vector<size_t>                     group_kernel_blocks_per_kv_block;
@@ -155,6 +157,21 @@ struct KVCache {
         }
     }
 
+    bool usesStandardAttentionLayout(int group_slot) const {
+        if (group_slot >= 0 && static_cast<size_t>(group_slot) < group_spec_types.size()) {
+            const auto type = group_spec_types[static_cast<size_t>(group_slot)];
+            return type == rtp_llm::KVCacheSpecType::MultiHeadAttention
+                   || type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention;
+        }
+        return group_slot >= 0 && static_cast<size_t>(group_slot) < group_types.size()
+               && group_types[static_cast<size_t>(group_slot)] == rtp_llm::CacheGroupType::FULL;
+    }
+
+    bool hasKernelBlockSubdivision(int group_slot) const {
+        return group_slot >= 0 && static_cast<size_t>(group_slot) < group_types.size()
+               && group_types[static_cast<size_t>(group_slot)] == rtp_llm::CacheGroupType::FULL;
+    }
+
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
         layer_cache.layer_id = idx;
@@ -238,22 +255,46 @@ private:
         if (static_cast<size_t>(group_slot) < group_tags.size()) {
             layer_cache.tag = group_tags[static_cast<size_t>(group_slot)];
         }
-        const bool is_full_group = static_cast<size_t>(group_slot) < group_types.size()
-                                   && group_types[static_cast<size_t>(group_slot)] == rtp_llm::CacheGroupType::FULL;
+        const bool    has_kernel_block_subdivision = hasKernelBlockSubdivision(group_slot);
+        const bool    uses_standard_layout         = usesStandardAttentionLayout(group_slot);
         torch::Tensor scale;
         if (!kv_scale_base_by_layer_group.empty() && layer < kv_scale_base_by_layer_group.size()
             && static_cast<size_t>(group_slot) < kv_scale_base_by_layer_group[layer].size()) {
             scale = kv_scale_base_by_layer_group[layer][static_cast<size_t>(group_slot)];
         }
 
-        if (!is_full_group) {
+        if (!has_kernel_block_subdivision) {
             layer_cache.seq_size_per_block = groupSeqBlockSize(group_slot);
             layer_cache.kv_cache_base      = base;
             layer_cache.kv_scale_base      = scale;
             return layer_cache;
         }
 
-        setFullAttentionView(layer_cache, base, scale, group_slot);
+        if (uses_standard_layout) {
+            setFullAttentionView(layer_cache, base, scale, group_slot);
+            return layer_cache;
+        }
+
+        layer_cache.seq_size_per_block           = groupKernelSeqBlockSize(group_slot);
+        const int64_t kernel_blocks_per_kv_block = groupKernelBlocksPerKvBlock(group_slot);
+
+        if (base.defined() && base.dim() == 2) {
+            const int64_t physical_block_num = base.size(0);
+            const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
+            RTP_LLM_CHECK_WITH_INFO(base.size(1) % kernel_blocks_per_kv_block == 0,
+                                    "opaque KV cache physical stride=%ld is not divisible by kernel blocks=%ld, "
+                                    "layer=%d tag=%s",
+                                    base.size(1),
+                                    kernel_blocks_per_kv_block,
+                                    idx,
+                                    layer_cache.tag.c_str());
+            layer_cache.kv_cache_base =
+                base.reshape({kernel_block_num, base.size(1) / kernel_blocks_per_kv_block});
+        } else {
+            layer_cache.kv_cache_base = base;
+        }
+
+        layer_cache.kv_scale_base = scale;
         return layer_cache;
     }
 
@@ -294,6 +335,9 @@ public:
 
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
+    bool                   is_speculative         = false;
+    bool                   is_decode_role         = false;
+    int64_t                max_context_batch_size = 1;
 };
 
 struct PyCacheStoreInputs {

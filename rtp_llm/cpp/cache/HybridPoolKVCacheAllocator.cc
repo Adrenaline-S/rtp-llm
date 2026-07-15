@@ -107,10 +107,11 @@ bool HybridPoolKVCacheAllocator::doInit() {
         const auto  group_type  = config_.typeForGroup(static_cast<size_t>(gid));
         const auto  policy      = config_.policyForGroup(static_cast<size_t>(gid));
 
-        auto group_pool = std::make_shared<BlockPool>(pool_config,
-                                                      allocationTypeForPlacement(policy.memory_placement, allocation_type_),
-                                                      pinnedCpuBackingForPlacement(policy.memory_placement),
-                                                      use_cuda_malloc_block_pool_);
+        auto group_pool =
+            std::make_shared<BlockPool>(pool_config,
+                                        allocationTypeForPlacement(policy.memory_placement, allocation_type_),
+                                        pinnedCpuBackingForPlacement(policy.memory_placement),
+                                        use_cuda_malloc_block_pool_);
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 
@@ -195,14 +196,15 @@ void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesTy
 
 GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
-    const auto       layer_group_ids = config_.layerGroupIdsSnapshot();
-    layout.layer_to_group_ids        = layer_group_ids;
-    layout.group_types                     = config_.groupTypesSnapshot();
-    layout.group_seq_block_sizes           = config_.groupSeqBlockSizesSnapshot();
-    layout.group_kernel_seq_block_sizes    = config_.groupKernelSeqBlockSizesSnapshot();
+    const auto       layer_group_ids        = config_.layerGroupIdsSnapshot();
+    layout.layer_to_group_ids               = layer_group_ids;
+    layout.group_types                      = config_.groupTypesSnapshot();
+    layout.group_spec_types                 = config_.groupSpecTypesSnapshot();
+    layout.group_seq_block_sizes            = config_.groupSeqBlockSizesSnapshot();
+    layout.group_kernel_seq_block_sizes     = config_.groupKernelSeqBlockSizesSnapshot();
     layout.group_kernel_blocks_per_kv_block = config_.groupKernelBlocksPerKvBlockSnapshot();
-    layout.group_tags                      = config_.groupTagsSnapshot();
-    layout.layer_tag_to_group_id           = config_.layerTagToGroupIdSnapshot();
+    layout.group_tags                       = config_.groupTagsSnapshot();
+    layout.layer_tag_to_group_id            = config_.layerTagToGroupIdSnapshot();
     layout.layer_attn_types.resize(config_.layer_all_num, CacheGroupType::FULL);
     for (size_t layer_id = 0; layer_id < layer_group_ids.size() && layer_id < layout.layer_attn_types.size();
          ++layer_id) {
@@ -575,9 +577,9 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
             continue;
         }
         const size_t seq_size = config_.seqSizePerBlockForGroup(gid);
-        total_tokens     = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
-        available_tokens = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
-        has_pool         = true;
+        total_tokens          = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
+        available_tokens      = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
+        has_pool              = true;
     }
     return has_pool ? KVCacheTokenCapacity{total_tokens, available_tokens} : KVCacheTokenCapacity{};
 }

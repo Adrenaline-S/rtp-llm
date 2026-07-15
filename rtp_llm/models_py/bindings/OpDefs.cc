@@ -8,7 +8,9 @@ void registerCacheGroupType(pybind11::module& m) {
         auto config_m            = pybind11::module_::import("libth_transformer_config");
         m.attr("CacheGroupType") = config_m.attr("CacheGroupType");
         return;
-    } catch (const pybind11::error_already_set& e) { PyErr_Clear(); }
+    } catch (const pybind11::error_already_set& e) {
+        PyErr_Clear();
+    }
 
     pybind11::enum_<rtp_llm::CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
@@ -48,6 +50,7 @@ void registerPyOpDefs(pybind11::module& m) {
                        "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
                        "Empty = all layers treated as FULL (backward compatibility).")
         .def_readwrite("group_types", &KVCache::group_types, "Per-group cache types (FULL, LINEAR).")
+        .def_readwrite("group_spec_types", &KVCache::group_spec_types, "Per-group cache spec types.")
         .def_readwrite("group_seq_block_sizes", &KVCache::group_seq_block_sizes, "Per-group physical block sizes.")
         .def_readwrite(
             "group_kernel_seq_block_sizes", &KVCache::group_kernel_seq_block_sizes, "Per-group kernel block sizes.")
@@ -79,7 +82,10 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
-        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers");
+        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
+        .def_readonly("is_speculative", &PyModelInitResources::is_speculative)
+        .def_readonly("is_decode_role", &PyModelInitResources::is_decode_role)
+        .def_readonly("max_context_batch_size", &PyModelInitResources::max_context_batch_size);
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 

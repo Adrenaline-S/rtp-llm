@@ -226,7 +226,6 @@ class PyAttentionInputs:
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
-    kv_cache_layer_to_group: torch.Tensor
     padding_offset: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
@@ -289,6 +288,12 @@ class PyModelInitResources:
         """
         Layered kv cache for all layers
         """
+    @property
+    def is_speculative(self) -> bool: ...
+    @property
+    def is_decode_role(self) -> bool: ...
+    @property
+    def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
     @typing.overload

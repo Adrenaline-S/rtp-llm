@@ -107,6 +107,7 @@ GroupedCacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
 
     layout.layer_to_group_ids    = config_.layerGroupIdsSnapshot();
     layout.group_types           = config_.groupTypesSnapshot();
+    layout.group_spec_types      = config_.groupSpecTypesSnapshot();
     layout.group_tags            = config_.groupTagsSnapshot();
     layout.layer_tag_to_group_id = config_.layerTagToGroupIdSnapshot();
     const auto layer_all_num     = static_cast<size_t>(config_.layer_all_num);

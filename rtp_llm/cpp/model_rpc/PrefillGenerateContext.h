@@ -48,8 +48,8 @@ struct RPCContext {
         return request->request_id();
     }
 
-    const GenerateInputPB*                 request;
-    grpc::ServerWriter<GenerateOutputsPB>* writer;
+    const GenerateInputPB*                            request;
+    grpc::internal::WriterInterface<GenerateOutputsPB>* writer;
 };
 
 class PrefillGenerateContext: public GenerateContext {

@@ -121,7 +121,6 @@ TEST_F(CPSlotMapperTest, NonShardedPassthrough) {
     EXPECT_EQ(mapper.effectiveSeqLenForAlloc(10), 10);
 }
 
-
 TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
     CPSlotMapper mapper(0, 2, 4);
 
@@ -131,9 +130,11 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
                                              /*use_hybrid=*/true);
     ASSERT_EQ(default_swa.size(), 2);
     EXPECT_EQ(default_swa[0].key_index, 3);
+    EXPECT_EQ(default_swa[0].offset_index, 1);
     EXPECT_EQ(default_swa[1].key_index, 4);
+    EXPECT_EQ(default_swa[1].offset_index, 2);
 
-    CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    CacheGroupPolicy policy   = defaultCacheGroupPolicy(CacheGroupType::SWA);
     policy.active_tail_blocks = 1;
     auto custom_swa = mapper.buildStorePlan(policy,
                                             /*total_logical_blocks=*/5,
@@ -141,6 +142,7 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
                                             /*use_hybrid=*/true);
     ASSERT_EQ(custom_swa.size(), 1);
     EXPECT_EQ(custom_swa[0].key_index, 4);
+    EXPECT_EQ(custom_swa[0].offset_index, 2);
 }
 
 TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
@@ -148,13 +150,13 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     config.seq_size_per_block = 8;
 
     GroupBase full_group;
-    full_group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-    full_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
+    full_group.policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
     config.groups.push_back(full_group);
 
     GroupBase swa_group;
-    swa_group.policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_group.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
     config.groups.push_back(swa_group);
 

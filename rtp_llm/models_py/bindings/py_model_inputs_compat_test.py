@@ -2,8 +2,13 @@ import unittest
 
 import torch
 
+from rtp_llm.ops import KVCacheSpecType
 from rtp_llm.models_py.model_desc.block_map import (
     select_attention_inputs_for_layer,
+)
+from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, SWA_KV
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    require_pool_tokens_per_block,
 )
 from rtp_llm.ops.compute_ops import (
     CacheGroupType,
@@ -257,6 +262,52 @@ class PyModelInputsCompatTest(unittest.TestCase):
             (2, 64), tuple(kv_cache.get_layer_cache(0, "linear").kv_cache_base.shape)
         )
         self.assertEqual(2, len(kv_cache.get_layer_caches(0)))
+
+    def test_full_opaque_group_exposes_kernel_block_view(self) -> None:
+        kv_cache = KVCache()
+        kv_cache.seq_size_per_block = 8
+        kv_cache.kernel_seq_size_per_block = 2
+        kv_cache.group_types = [CacheGroupType.FULL]
+        kv_cache.group_spec_types = [KVCacheSpecType.OPAQUE_KV]
+        kv_cache.group_seq_block_sizes = [8]
+        kv_cache.group_kernel_seq_block_sizes = [2]
+        kv_cache.group_kernel_blocks_per_kv_block = [4]
+        kv_cache.group_tags = ["compressed_kv"]
+        kv_cache.layer_to_group_ids = [[0]]
+        kv_cache.layer_tag_to_group_id = [{"compressed_kv": 0}]
+
+        physical = torch.arange(3 * 64, dtype=torch.uint8).reshape(3, 64)
+        kv_cache.kv_cache_base_by_layer_group = [[physical]]
+
+        layer = kv_cache.get_layer_cache(0, "compressed_kv")
+
+        self.assertEqual(2, layer.seq_size_per_block)
+        self.assertEqual((12, 16), tuple(layer.kv_cache_base.shape))
+        self.assertEqual(physical.data_ptr(), layer.kv_cache_base.data_ptr())
+
+    def test_dsv4_pool_block_size_is_selected_by_tagged_topology(self) -> None:
+        kv_cache = KVCache()
+        kv_cache.seq_size_per_block = 256
+        kv_cache.kernel_seq_size_per_block = 128
+        kv_cache.group_tags = ["swa_kv", "csa_kv"]
+        kv_cache.group_seq_block_sizes = [512, 256]
+        kv_cache.group_kernel_seq_block_sizes = [512, 128]
+
+        self.assertEqual(
+            512, require_pool_tokens_per_block(kv_cache, region=SWA_KV)
+        )
+        self.assertEqual(
+            128, require_pool_tokens_per_block(kv_cache, region=CSA_KV)
+        )
+
+    def test_dsv4_multi_group_block_size_has_no_scalar_fallback(self) -> None:
+        kv_cache = KVCache()
+        kv_cache.seq_size_per_block = 256
+        kv_cache.kernel_seq_size_per_block = 128
+        kv_cache.group_tags = ["swa_kv", "csa_kv"]
+
+        with self.assertRaisesRegex(RuntimeError, "cannot be inferred"):
+            require_pool_tokens_per_block(kv_cache, region=SWA_KV)
 
 
 if __name__ == "__main__":

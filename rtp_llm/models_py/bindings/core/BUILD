@@ -337,6 +337,7 @@ cc_library(
     srcs = ["CacheStoreAsyncWriter.cc"],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:device_pin",
         "@havenask//aios/autil:lock_free",
     ],
     visibility = ["//visibility:public"],

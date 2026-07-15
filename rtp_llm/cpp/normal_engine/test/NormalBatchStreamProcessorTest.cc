@@ -26,6 +26,49 @@ static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
 
+TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 1;
+
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PREFILL;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    { GroupBase g; g.policy.group_type = CacheGroupType::FULL; cache_config.groups.push_back(g); }
+    RuntimeConfig runtime_config;
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids        = hostIntBuffer({1, 2, 3});
+    query->generate_config  = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(1, 1, {{0}});
+    resource.setBatchBlocks(0, 0, {1, 2});
+    resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103, 104, 105});
+    stream->setKVCache(resource);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    EXPECT_EQ(stream_groups.curBlocksNum(), 2);
+    EXPECT_EQ(stream_groups.maxCacheKeysNum(), 5);
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    auto merge_input_status = processor.gatherModelInput(stream_groups);
+    ASSERT_TRUE(merge_input_status.ok());
+    const auto& cache_keys = merge_input_status.value().cache_keys;
+    ASSERT_TRUE(cache_keys.defined());
+    EXPECT_EQ(cache_keys.size(0), 1);
+    EXPECT_EQ(cache_keys.size(1), 5);
+    EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 104, 105}));
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;
     ModelConfig     model_config;

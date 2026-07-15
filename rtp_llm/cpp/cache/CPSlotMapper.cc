@@ -121,8 +121,8 @@ CPSlotMapper::CPSlotMapper(int cp_rank, int cp_size, int block_size):
 
 CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, size_t gid) const {
     CpGroupLayout layout;
-    const auto    policy = gid < static_cast<size_t>(config.groupNums()) ? config.policyForGroup(gid) :
-                                                                              defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto    policy      = gid < static_cast<size_t>(config.groupNums()) ? config.policyForGroup(gid) :
+                                                                                defaultCacheGroupPolicy(CacheGroupType::FULL);
     layout.active_tail_blocks = policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
     if (!isSharded() || gid >= static_cast<size_t>(config.groupNums())) {
         return layout;

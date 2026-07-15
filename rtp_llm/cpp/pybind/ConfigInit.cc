@@ -428,8 +428,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("enable_gpu_prefix_tree", &KVCacheConfig::enable_gpu_prefix_tree)
         .def_readwrite("enable_prefix_tree_memory_cache", &KVCacheConfig::enable_prefix_tree_memory_cache)
-        .def_readwrite("enable_legacy_memory_connector_fallback", &KVCacheConfig::enable_legacy_memory_connector_fallback)
-        .def_readwrite("prefix_tree_memory_state_swa_pool_ratio", &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
+        .def_readwrite("enable_legacy_memory_connector_fallback",
+                       &KVCacheConfig::enable_legacy_memory_connector_fallback)
+        .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
+                       &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
@@ -562,17 +564,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_client_config                   = t[41].cast<std::string>();
                     c.ssm_state_dtype                      = t[42].cast<std::string>();
                     if (t.size() >= 54) {
-                        c.enable_memory_cache_disk             = t[43].cast<bool>();
-                        c.memory_cache_disk_paths              = t[44].cast<std::string>();
-                        c.memory_cache_disk_size_mb            = t[45].cast<int64_t>();
-                        c.memory_cache_disk_buffered_io        = t[46].cast<bool>();
-                        c.memory_cache_disk_sync_timeout_ms    = t[47].cast<int64_t>();
-                        c.enable_gpu_prefix_tree               = t[48].cast<bool>();
-                        c.enable_prefix_tree_memory_cache      = t[49].cast<bool>();
+                        c.enable_memory_cache_disk                = t[43].cast<bool>();
+                        c.memory_cache_disk_paths                 = t[44].cast<std::string>();
+                        c.memory_cache_disk_size_mb               = t[45].cast<int64_t>();
+                        c.memory_cache_disk_buffered_io           = t[46].cast<bool>();
+                        c.memory_cache_disk_sync_timeout_ms       = t[47].cast<int64_t>();
+                        c.enable_gpu_prefix_tree                  = t[48].cast<bool>();
+                        c.enable_prefix_tree_memory_cache         = t[49].cast<bool>();
                         c.enable_legacy_memory_connector_fallback = t[50].cast<bool>();
                         c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
-                        c.enable_independent_group_eviction    = t[52].cast<bool>();
-                        c.load_cache_retry_times               = t[53].cast<int>();
+                        c.enable_independent_group_eviction       = t[52].cast<bool>();
+                        c.load_cache_retry_times                  = t[53].cast<int>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
@@ -1557,12 +1559,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_prefix_reuse", &CacheReusePolicyDesc::enable_prefix_reuse)
         .def_readwrite("evict_policy", &CacheReusePolicyDesc::evict_policy)
         .def(py::pickle(
-            [](const CacheReusePolicyDesc& self) { return py::make_tuple(self.enable_prefix_reuse, self.evict_policy); },
+            [](const CacheReusePolicyDesc& self) {
+                return py::make_tuple(self.enable_prefix_reuse, self.evict_policy);
+            },
             [](py::tuple t) {
                 CacheReusePolicyDesc c;
-                if (t.size() != 2) throw std::runtime_error("Invalid CacheReusePolicyDesc state!");
+                if (t.size() != 2)
+                    throw std::runtime_error("Invalid CacheReusePolicyDesc state!");
                 c.enable_prefix_reuse = t[0].cast<std::optional<bool>>();
-                c.evict_policy = t[1].cast<std::optional<CacheEvictPolicy>>();
+                c.evict_policy        = t[1].cast<std::optional<CacheEvictPolicy>>();
                 return c;
             }));
 
@@ -1577,9 +1582,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 CacheCapacityPolicyDesc c;
-                if (t.size() != 3) throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
-                c.reservable = t[0].cast<std::optional<bool>>();
-                c.explicit_block_num = t[1].cast<std::optional<uint32_t>>();
+                if (t.size() != 3)
+                    throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
+                c.reservable             = t[0].cast<std::optional<bool>>();
+                c.explicit_block_num     = t[1].cast<std::optional<uint32_t>>();
                 c.charge_to_paged_budget = t[2].cast<std::optional<bool>>();
                 return c;
             }));
@@ -1587,25 +1593,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<CacheMemoryPolicyDesc>(m, "CacheMemoryPolicyDesc")
         .def(py::init<>())
         .def_readwrite("placement", &CacheMemoryPolicyDesc::placement)
-        .def(py::pickle(
-            [](const CacheMemoryPolicyDesc& self) { return py::make_tuple(self.placement); },
-            [](py::tuple t) {
-                CacheMemoryPolicyDesc c;
-                if (t.size() != 1) throw std::runtime_error("Invalid CacheMemoryPolicyDesc state!");
-                c.placement = t[0].cast<std::optional<CacheMemoryPlacement>>();
-                return c;
-            }));
+        .def(py::pickle([](const CacheMemoryPolicyDesc& self) { return py::make_tuple(self.placement); },
+                        [](py::tuple t) {
+                            CacheMemoryPolicyDesc c;
+                            if (t.size() != 1)
+                                throw std::runtime_error("Invalid CacheMemoryPolicyDesc state!");
+                            c.placement = t[0].cast<std::optional<CacheMemoryPlacement>>();
+                            return c;
+                        }));
 
     py::class_<CacheTailPolicyDesc>(m, "CacheTailPolicyDesc")
         .def(py::init<>())
         .def_readwrite("active_tail_blocks", &CacheTailPolicyDesc::active_tail_blocks)
         .def_readwrite("validate_tail_blocks", &CacheTailPolicyDesc::validate_tail_blocks)
         .def(py::pickle(
-            [](const CacheTailPolicyDesc& self) { return py::make_tuple(self.active_tail_blocks, self.validate_tail_blocks); },
+            [](const CacheTailPolicyDesc& self) {
+                return py::make_tuple(self.active_tail_blocks, self.validate_tail_blocks);
+            },
             [](py::tuple t) {
                 CacheTailPolicyDesc c;
-                if (t.size() != 2) throw std::runtime_error("Invalid CacheTailPolicyDesc state!");
-                c.active_tail_blocks = t[0].cast<std::optional<uint32_t>>();
+                if (t.size() != 2)
+                    throw std::runtime_error("Invalid CacheTailPolicyDesc state!");
+                c.active_tail_blocks   = t[0].cast<std::optional<uint32_t>>();
                 c.validate_tail_blocks = t[1].cast<std::optional<bool>>();
                 return c;
             }));
@@ -1619,15 +1628,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefill_slice_layout", &CacheCpPolicyDesc::prefill_slice_layout)
         .def(py::pickle(
             [](const CacheCpPolicyDesc& self) {
-                return py::make_tuple(self.mapping, self.slice, self.scale_seq_size, self.align_payload, self.prefill_slice_layout);
+                return py::make_tuple(
+                    self.mapping, self.slice, self.scale_seq_size, self.align_payload, self.prefill_slice_layout);
             },
             [](py::tuple t) {
                 CacheCpPolicyDesc c;
-                if (t.size() != 5) throw std::runtime_error("Invalid CacheCpPolicyDesc state!");
-                c.mapping = t[0].cast<std::optional<CpBlockMappingMode>>();
-                c.slice = t[1].cast<std::optional<CpBlockSliceMode>>();
-                c.scale_seq_size = t[2].cast<std::optional<bool>>();
-                c.align_payload = t[3].cast<std::optional<bool>>();
+                if (t.size() != 5)
+                    throw std::runtime_error("Invalid CacheCpPolicyDesc state!");
+                c.mapping              = t[0].cast<std::optional<CpBlockMappingMode>>();
+                c.slice                = t[1].cast<std::optional<CpBlockSliceMode>>();
+                c.scale_seq_size       = t[2].cast<std::optional<bool>>();
+                c.align_payload        = t[3].cast<std::optional<bool>>();
                 c.prefill_slice_layout = t[4].cast<std::optional<CpPrefillSliceLayout>>();
                 return c;
             }));
@@ -1656,36 +1667,51 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
         .def(py::pickle(
             [](const KVCacheSpecDesc& self) {
-                return py::make_tuple(self.tag, self.cache_type, self.dtype, self.is_state_cache, self.entry_elems,
-                                      self.entry_dtype, self.entry_count_mode, self.explicit_entry_count,
-                                      self.compression_ratio, self.state_ring_overlap,
-                                      self.state_ring_include_gen_num_per_cycle, self.block_stride_bytes_override,
-                                      self.block_stride_bytes_alignment, self.block_stride_alignment_min_entries,
-                                      self.group_type, self.reuse, self.capacity, self.memory, self.tail, self.cp);
+                return py::make_tuple(self.tag,
+                                      self.cache_type,
+                                      self.dtype,
+                                      self.is_state_cache,
+                                      self.entry_elems,
+                                      self.entry_dtype,
+                                      self.entry_count_mode,
+                                      self.explicit_entry_count,
+                                      self.compression_ratio,
+                                      self.state_ring_overlap,
+                                      self.state_ring_include_gen_num_per_cycle,
+                                      self.block_stride_bytes_override,
+                                      self.block_stride_bytes_alignment,
+                                      self.block_stride_alignment_min_entries,
+                                      self.group_type,
+                                      self.reuse,
+                                      self.capacity,
+                                      self.memory,
+                                      self.tail,
+                                      self.cp);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20) throw std::runtime_error("Invalid KVCacheSpecDesc state!");
-                c.tag = t[0].cast<std::string>();
-                c.cache_type = t[1].cast<KVCacheSpecType>();
-                c.dtype = t[2].cast<DataType>();
-                c.is_state_cache = t[3].cast<bool>();
-                c.entry_elems = t[4].cast<uint32_t>();
-                c.entry_dtype = t[5].cast<DataType>();
-                c.entry_count_mode = t[6].cast<OpaqueBlockEntryCountMode>();
-                c.explicit_entry_count = t[7].cast<uint32_t>();
-                c.compression_ratio = t[8].cast<uint32_t>();
-                c.state_ring_overlap = t[9].cast<uint32_t>();
+                if (t.size() != 20)
+                    throw std::runtime_error("Invalid KVCacheSpecDesc state!");
+                c.tag                                  = t[0].cast<std::string>();
+                c.cache_type                           = t[1].cast<KVCacheSpecType>();
+                c.dtype                                = t[2].cast<DataType>();
+                c.is_state_cache                       = t[3].cast<bool>();
+                c.entry_elems                          = t[4].cast<uint32_t>();
+                c.entry_dtype                          = t[5].cast<DataType>();
+                c.entry_count_mode                     = t[6].cast<OpaqueBlockEntryCountMode>();
+                c.explicit_entry_count                 = t[7].cast<uint32_t>();
+                c.compression_ratio                    = t[8].cast<uint32_t>();
+                c.state_ring_overlap                   = t[9].cast<uint32_t>();
                 c.state_ring_include_gen_num_per_cycle = t[10].cast<bool>();
-                c.block_stride_bytes_override = t[11].cast<size_t>();
-                c.block_stride_bytes_alignment = t[12].cast<size_t>();
-                c.block_stride_alignment_min_entries = t[13].cast<uint32_t>();
-                c.group_type = t[14].cast<std::optional<CacheGroupType>>();
-                c.reuse = t[15].cast<std::optional<CacheReusePolicyDesc>>();
-                c.capacity = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
-                c.memory = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
-                c.tail = t[18].cast<std::optional<CacheTailPolicyDesc>>();
-                c.cp = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                c.block_stride_bytes_override          = t[11].cast<size_t>();
+                c.block_stride_bytes_alignment         = t[12].cast<size_t>();
+                c.block_stride_alignment_min_entries   = t[13].cast<uint32_t>();
+                c.group_type                           = t[14].cast<std::optional<CacheGroupType>>();
+                c.reuse                                = t[15].cast<std::optional<CacheReusePolicyDesc>>();
+                c.capacity                             = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
+                c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
+                c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
+                c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
                 return c;
             }));
 
@@ -1733,6 +1759,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("embedding_size", &ModelConfig::embedding_size)
         .def_readwrite("moe_normalize_expert_scale", &ModelConfig::moe_normalize_expert_scale)
         .def_readwrite("scoring_func", &ModelConfig::scoring_func)
+        .def_readwrite("hc_mult", &ModelConfig::hc_mult)
+        .def_readwrite("hc_sinkhorn_iters", &ModelConfig::hc_sinkhorn_iters)
+        .def_readwrite("hc_eps", &ModelConfig::hc_eps)
+        .def_readwrite("swiglu_limit", &ModelConfig::swiglu_limit)
+        .def_readwrite("num_hash_layers", &ModelConfig::num_hash_layers)
         .def_readwrite("has_positional_encoding", &ModelConfig::has_positional_encoding)
         .def_readwrite("has_pre_decoder_layernorm", &ModelConfig::has_pre_decoder_layernorm)
         .def_readwrite("has_post_decoder_layernorm", &ModelConfig::has_post_decoder_layernorm)

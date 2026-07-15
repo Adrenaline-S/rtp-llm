@@ -66,6 +66,7 @@ public:
     // object is returned for the lifetime of this topology.
     const std::vector<std::string>&                groupTagsSnapshot() const;
     const std::vector<CacheGroupType>&             groupTypesSnapshot() const;
+    const std::vector<KVCacheSpecType>&            groupSpecTypesSnapshot() const;
     const std::vector<std::vector<int>>&           layerGroupIdsSnapshot() const;
     const std::vector<std::map<std::string, int>>& layerTagToGroupIdSnapshot() const;
 
@@ -73,6 +74,7 @@ private:
     struct SnapshotCache {
         std::vector<std::string>                group_tags;
         std::vector<CacheGroupType>             group_types;
+        std::vector<KVCacheSpecType>            group_spec_types;
         std::vector<std::vector<int>>           layer_group_ids;
         std::vector<std::map<std::string, int>> layer_tag_to_group_id;
     };
