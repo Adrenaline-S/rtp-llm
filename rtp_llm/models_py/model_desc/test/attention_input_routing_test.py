@@ -15,7 +15,7 @@ class FakeKVCache:
     def __init__(self, layer_tags: list[list[str]]):
         self.layer_tags = layer_tags
 
-    def get_layer_caches(self, layer_idx: int):
+    def get_layer_cache_groups(self, layer_idx: int):
         return [SimpleNamespace(tag=tag) for tag in self.layer_tags[layer_idx]]
 
 

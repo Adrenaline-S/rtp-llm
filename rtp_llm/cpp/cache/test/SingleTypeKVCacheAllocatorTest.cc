@@ -685,13 +685,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTens
             ASSERT_TRUE(local_group.at(local_layer).kv_scale_addr.defined());
         }
 
-        torch_ext::KVCache kv_cache;
-        kv_cache.grouped_layout            = local_layout;
-        kv_cache.seq_size_per_block        = 4;
-        kv_cache.kernel_seq_size_per_block = 4;
+        torch_ext::KVCache kv_cache(local_layout);
 
         const auto by_tag   = kv_cache.getLayerCache(/*idx=*/0, "default");
-        const auto by_group = kv_cache.getLayerCache(/*idx=*/0, "default");
+        const auto by_group = kv_cache.getLayerCacheByGroup(/*idx=*/0, /*group_id=*/0);
         EXPECT_TRUE(by_tag.kv_cache_base.defined());
         EXPECT_TRUE(by_group.kv_cache_base.defined());
         EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), local_group.at(0).kv_addr.data_ptr());

@@ -73,6 +73,19 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_layout_view_test",
+    srcs = ["KVCacheLayoutViewTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    env = {},
+)
+
+cc_test(
     name = "cp_slot_mapper_test",
     srcs = [
         "CPSlotMapperTest.cc",

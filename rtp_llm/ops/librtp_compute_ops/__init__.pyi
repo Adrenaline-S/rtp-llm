@@ -119,7 +119,18 @@ class CacheGroupType:
 class LayerKVCache:
     """Per-layer KV cache view. Returned by KVCache.get_layer_cache()."""
 
+    @typing.overload
     def __init__(self) -> None: ...
+    @typing.overload
+    def __init__(
+        self,
+        kv_cache_base: torch.Tensor,
+        seq_size_per_block: int,
+        layer_id: int = -1,
+        group_id: int = -1,
+        tag: str = "default",
+        kv_scale_base: torch.Tensor | None = None,
+    ) -> None: ...
     @property
     def kv_cache_base(self) -> torch.Tensor:
         """
@@ -161,25 +172,12 @@ class LayerKVCache:
         """
 
 class KVCache:
-    """Whole-model KV cache holding tensors for all layers."""
+    """Read-only whole-model KV cache created by the C++ runtime."""
 
-    kv_cache_base_by_layer: list[torch.Tensor]
-    kv_scale_base_by_layer: list[torch.Tensor]
-    seq_size_per_block: int
-    kernel_seq_size_per_block: int
-    num_kv_heads: int
-    head_dim: int
-    use_mla: bool
-    kv_lora_rank: int
-    rope_head_dim: int
-    layer_attn_types: list[CacheGroupType]
-    group_types: list[CacheGroupType]
-    group_tags: list[str]
-    layer_to_group_ids: list[list[int]]
-    layer_tag_to_group_id: list[dict[str, int]]
-    kv_cache_base_by_layer_group: list[list[torch.Tensor]]
-    kv_scale_base_by_layer_group: list[list[torch.Tensor]]
-    def __init__(self) -> None: ...
+    @property
+    def group_tags(self) -> list[str]: ...
+    @property
+    def layer_count(self) -> int: ...
     @typing.overload
     def get_layer_cache(self, arg0: int) -> LayerKVCache:
         """Return a per-layer LayerKVCache for the given global layer id."""
@@ -191,8 +189,14 @@ class KVCache:
     def get_layer_cache_by_group(self, arg0: int, arg1: int) -> LayerKVCache:
         """Return a LayerKVCache for the given layer and group id."""
         ...
-    def get_layer_caches(self, arg0: int) -> list[LayerKVCache]:
+    def get_layer_cache_groups(self, arg0: int) -> list[LayerKVCache]:
         """Return all LayerKVCache objects for every group the layer owns."""
+        ...
+    def get_seq_size_per_block(self, arg0: str) -> int:
+        """Return the physical sequence size per block for a cache tag."""
+        ...
+    def get_kernel_seq_size_per_block(self, arg0: str) -> int:
+        """Return the kernel sequence size per block for a cache tag."""
         ...
 
 class ParamsBase:

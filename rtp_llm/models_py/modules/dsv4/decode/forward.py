@@ -41,6 +41,7 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     TAG_BY_ATTN_TYPE,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    require_kernel_block_table_tokens_per_block,
     require_pool_tokens_per_block,
 )
 
@@ -48,25 +49,17 @@ _ATTN_TYPE_BY_TAG = {tag: attn_type for attn_type, tag in TAG_BY_ATTN_TYPE.items
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
-    """No-fallback accessor for KVCache.kernel_seq_size_per_block.
+    """No-fallback accessor for the dense kernel block-table geometry.
 
-    Mirrors the helper in dsv4/fp8/attention.py — surfaces the C++
-    propagation bug instead of silently writing ring buffer with the
-    wrong stride.
+    The grouped layout has no global scalar projection.  Framework block
+    tables nevertheless share one dense group-axis width, determined by the
+    smallest per-tag kernel block size.
     """
     if kv_cache is None:
         raise RuntimeError(
             "DSV4 decode: kv_cache is None when sizing paged pool specs."
         )
-    ksb = int(getattr(kv_cache, "kernel_seq_size_per_block", 0))
-    if ksb <= 0:
-        spb = int(getattr(kv_cache, "seq_size_per_block", 0))
-        grp = getattr(kv_cache, "group_tags", None)
-        raise RuntimeError(
-            "DSV4 KVCache.kernel_seq_size_per_block is %d (expected >0). "
-            "seq_size_per_block=%d, group_tags=%r." % (ksb, spb, grp)
-        )
-    return ksb
+    return require_kernel_block_table_tokens_per_block(kv_cache)
 
 
 def _dsv4_pool_tokens_per_block(kv_cache: Any, attn_type: int) -> int:

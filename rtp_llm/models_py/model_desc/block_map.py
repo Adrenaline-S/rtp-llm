@@ -22,9 +22,6 @@ def get_primary_attention_inputs(
     value = get_attention_inputs_value(inputs)
     if isinstance(value, PyAttentionInputs):
         return value
-    if kv_cache is not None and getattr(kv_cache, "group_tags", None):
-        primary_tag = str(kv_cache.group_tags[0])
-        return select_attention_inputs_for_tag(value, primary_tag)
     return next(iter(value.values()))
 
 
@@ -47,7 +44,7 @@ def select_attention_inputs_for_tag(
 def get_layer_tags(kv_cache: Any, local_layer_idx: int) -> list[str]:
     if kv_cache is None:
         return []
-    layer_caches = kv_cache.get_layer_caches(local_layer_idx)
+    layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
     tags = [str(cache.tag) for cache in layer_caches]
     if not tags or any(not tag for tag in tags):
         raise RuntimeError(f"local layer {local_layer_idx} has no cache group tag")

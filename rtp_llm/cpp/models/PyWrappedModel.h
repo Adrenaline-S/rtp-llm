@@ -153,74 +153,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
 
     if (params.kv_cache_layer_layout.has_value()) {
-        torch_ext::KVCache kv_cache;
-        kv_cache.seq_size_per_block        = static_cast<int>(params.tokens_per_block);
-        kv_cache.kernel_seq_size_per_block = static_cast<int>(params.kernel_tokens_per_block);
-        const auto& layout                 = params.kv_cache_layer_layout.value();
-        const auto& topology               = layout.topology();
-        const auto  layer_count            = topology.layers().size();
-        const auto  group_count            = topology.groups().size();
-        kv_cache.grouped_layout            = layout;
-        kv_cache.num_kv_heads              = params.description.attention_conf.kv_head_num;
-        kv_cache.head_dim                  = params.description.attention_conf.size_per_head;
-        kv_cache.use_mla                   = params.description.attention_conf.use_mla;
-        kv_cache.kv_lora_rank              = params.description.attention_conf.kv_lora_rank;
-        kv_cache.rope_head_dim             = params.description.attention_conf.rope_head_dim;
-
-        kv_cache.group_tags            = topology.groupTagsSnapshot();
-        kv_cache.group_types           = topology.groupTypesSnapshot();
-        kv_cache.group_spec_types      = topology.groupSpecTypesSnapshot();
-        kv_cache.layer_to_group_ids    = topology.layerGroupIdsSnapshot();
-        kv_cache.layer_tag_to_group_id = topology.layerTagToGroupIdSnapshot();
-        kv_cache.group_seq_block_sizes.reserve(group_count);
-        kv_cache.group_kernel_seq_block_sizes.reserve(group_count);
-        kv_cache.group_kernel_blocks_per_kv_block.reserve(group_count);
-        for (const auto& group : topology.groups()) {
-            kv_cache.group_seq_block_sizes.push_back(group.seq_size_per_block);
-            kv_cache.group_kernel_seq_block_sizes.push_back(group.kernel_seq_size_per_block);
-            kv_cache.group_kernel_blocks_per_kv_block.push_back(group.seq_size_per_block
-                                                                / group.kernel_seq_size_per_block);
-        }
-
-        kv_cache.kv_cache_base_by_layer.resize(layer_count);
-        kv_cache.layer_attn_types.resize(layer_count, CacheGroupType::FULL);
-        kv_cache.kv_cache_base_by_layer_group.assign(layer_count, std::vector<torch::Tensor>(group_count));
-        kv_cache.kv_scale_base_by_layer_group.assign(layer_count, std::vector<torch::Tensor>(group_count));
-        std::vector<size_t> active_groups_per_layer(layer_count, 0);
-        bool                has_scale = false;
-        for (size_t gid = 0; gid < group_count; ++gid) {
-            const auto& group_config = topology.groupBySlot(gid);
-            const auto& group_layout = layout.group(group_config.tag);
-            if (group_layout.empty()) {
-                continue;
-            }
-            for (size_t layer_id = 0; layer_id < layer_count; ++layer_id) {
-                if (!group_layout.hasLayer(layer_id)) {
-                    continue;
-                }
-                const auto& buffers                                  = group_layout.at(layer_id);
-                kv_cache.kv_cache_base_by_layer_group[layer_id][gid] = buffers.kv_addr;
-                kv_cache.kv_scale_base_by_layer_group[layer_id][gid] = buffers.kv_scale_addr;
-                active_groups_per_layer[layer_id]++;
-                has_scale = has_scale || buffers.kv_scale_addr.defined();
-            }
-        }
-        if (has_scale) {
-            kv_cache.kv_scale_base_by_layer.resize(layer_count);
-        }
-        for (size_t layer_id = 0; layer_id < layer_count; ++layer_id) {
-            if (active_groups_per_layer[layer_id] != 1) {
-                continue;
-            }
-            const auto& buffers                       = layout.at(layer_id);
-            kv_cache.kv_cache_base_by_layer[layer_id] = buffers.kv_addr;
-            if (has_scale) {
-                kv_cache.kv_scale_base_by_layer[layer_id] = buffers.kv_scale_addr;
-            }
-            const auto gid                      = kv_cache.layer_to_group_ids[layer_id].front();
-            kv_cache.layer_attn_types[layer_id] = topology.groupBySlot(static_cast<size_t>(gid)).policy.group_type;
-        }
-        init_resources.kv_cache = kv_cache;
+        init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);

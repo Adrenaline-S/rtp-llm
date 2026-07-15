@@ -446,7 +446,7 @@ def forward_layers(
             if _rt_on:
                 _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
             if write_cache_store_impl_by_tag:
-                for layer_cache in kv_cache.get_layer_caches(layer_idx):
+                for layer_cache in kv_cache.get_layer_cache_groups(layer_idx):
                     writer = write_cache_store_impl_by_tag.get(str(layer_cache.tag))
                     if writer is None:
                         raise RuntimeError(
@@ -455,7 +455,7 @@ def forward_layers(
                         )
                     writer(layer_cache)
             elif write_cache_store_impl is not None:
-                layer_caches = kv_cache.get_layer_caches(layer_idx)
+                layer_caches = kv_cache.get_layer_cache_groups(layer_idx)
                 if len(layer_caches) != 1:
                     raise RuntimeError(
                         "plain cache-store inputs require exactly one cache group for "

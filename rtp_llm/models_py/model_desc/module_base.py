@@ -7,11 +7,11 @@ from torch import Tensor, nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
 )
+from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -59,19 +59,20 @@ class GptModelBase(nn.Module):
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
-            num_layers = len(self.kv_cache.kv_cache_base_by_layer)
-            layer0_shape = (
-                self.kv_cache.kv_cache_base_by_layer[0].shape
-                if num_layers > 0
-                and self.kv_cache.kv_cache_base_by_layer[0] is not None
-                else None
+            num_layers = self.kv_cache.layer_count
+            layer0_caches = (
+                self.kv_cache.get_layer_cache_groups(0) if num_layers > 0 else []
             )
-            num_scale_layers = len(self.kv_cache.kv_scale_base_by_layer)
+            layer0_shapes = [cache.kv_cache_base.shape for cache in layer0_caches]
+            layer0_scale_count = sum(
+                cache.kv_scale_base is not None and cache.kv_scale_base.numel() > 0
+                for cache in layer0_caches
+            )
             logging.info(
                 f"GptModelBase initialized with "
                 f"num_kv_layers={num_layers}, "
-                f"layer0_kv_cache_shape={layer0_shape}, "
-                f"num_scale_layers={num_scale_layers}, "
+                f"layer0_kv_cache_shapes={layer0_shapes}, "
+                f"layer0_scale_groups={layer0_scale_count}, "
             )
         return True
 
