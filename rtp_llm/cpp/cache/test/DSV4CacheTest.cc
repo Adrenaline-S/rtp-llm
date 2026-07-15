@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
@@ -2055,9 +2056,42 @@ TEST_F(DSV4AllocatorTest, BlockPoolCreatedWithCorrectTensors) {
 
     // allLayerCacheBase should return tensors for all 61 layers
     auto layout = allocator->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_num));
-    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
-        EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined()) << "undefined kv buffer for layer " << i;
+    EXPECT_EQ(layout.topology().layers().size(), static_cast<size_t>(config.layer_num));
+    for (size_t i = 0; i < layout.topology().layers().size(); ++i) {
+        for (const auto& tag : layout.topology().layer(static_cast<int>(i)).group_tags) {
+            EXPECT_TRUE(layout.group(tag).hasLayer(i)) << "undefined kv buffer for layer " << i << " tag=" << tag;
+        }
+    }
+}
+
+TEST_F(DSV4AllocatorTest, SharedLogicalGroupsProduceDeduplicatedMrBufferList) {
+    auto config    = makeDSV4AllocatorConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const auto layout               = allocator->allLayerCacheBase();
+    size_t     logical_buffer_count = 0;
+    for (const auto& [tag, group_layout] : layout.groups()) {
+        (void)tag;
+        if (group_layout.empty()) {
+            continue;
+        }
+        for (const auto& layer : group_layout.layers()) {
+            logical_buffer_count += layer.kv_addr.defined() ? 1 : 0;
+            logical_buffer_count += layer.kv_scale_addr.defined() ? 1 : 0;
+        }
+    }
+
+    LayerBlockConverterImpl converter(allocator);
+    const auto              mr_buffers = converter.getAllBuffers();
+    EXPECT_LT(mr_buffers.size(), logical_buffer_count);
+    for (size_t i = 0; i < mr_buffers.size(); ++i) {
+        for (size_t j = i + 1; j < mr_buffers.size(); ++j) {
+            const auto& lhs = mr_buffers[i].first;
+            const auto& rhs = mr_buffers[j].first;
+            EXPECT_FALSE(lhs.addr == rhs.addr && lhs.size_bytes == rhs.size_bytes
+                         && lhs.device_index == rhs.device_index && lhs.scalar_type == rhs.scalar_type);
+        }
     }
 }
 
@@ -2196,9 +2230,11 @@ TEST_F(DSV4AllocatorTest, FlashBlockPoolTensors) {
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), 43u);
-    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
-        EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined()) << "Flash undefined kv buffer for layer " << i;
+    EXPECT_EQ(layout.topology().layers().size(), 43u);
+    for (size_t i = 0; i < layout.topology().layers().size(); ++i) {
+        for (const auto& tag : layout.topology().layer(static_cast<int>(i)).group_tags) {
+            EXPECT_TRUE(layout.group(tag).hasLayer(i)) << "Flash undefined kv buffer for layer " << i << " tag=" << tag;
+        }
     }
 }
 

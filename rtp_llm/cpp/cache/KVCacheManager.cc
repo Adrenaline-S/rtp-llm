@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <numeric>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -94,6 +95,58 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_snapshot.pool_name);
     metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
+}
+
+std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
+                                                     const std::vector<size_t>& global_layer_ids) {
+    std::vector<CacheGroup> groups = source.groups();
+    for (auto& group : groups) {
+        group.layer_ids.clear();
+    }
+
+    std::vector<CacheLayer> layers;
+    layers.reserve(global_layer_ids.size());
+    for (size_t local_layer_id = 0; local_layer_id < global_layer_ids.size(); ++local_layer_id) {
+        const auto& source_layer = source.layer(static_cast<int>(global_layer_ids[local_layer_id]));
+        CacheLayer  layer;
+        layer.layer_id   = static_cast<int>(local_layer_id);
+        layer.group_tags = source_layer.group_tags;
+        for (const auto& tag : layer.group_tags) {
+            groups[source.slotForTag(tag)].layer_ids.push_back(static_cast<int>(local_layer_id));
+        }
+        layers.push_back(std::move(layer));
+    }
+    return CacheTopology::create(std::move(groups), std::move(layers));
+}
+
+GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       source,
+                                      std::shared_ptr<const CacheTopology> target_topology,
+                                      const std::vector<size_t>&           global_layer_ids) {
+    RTP_LLM_CHECK_WITH_INFO(target_topology != nullptr, "cache layout projection requires a target topology");
+    RTP_LLM_CHECK_WITH_INFO(target_topology->layers().size() == global_layer_ids.size(),
+                            "cache layout projection topology layers=%zu mapping size=%zu",
+                            target_topology->layers().size(),
+                            global_layer_ids.size());
+
+    GroupedCacheLayerLayout::GroupLayouts groups;
+    for (const auto& target_group : target_topology->groups()) {
+        std::vector<BlockBufferPtrInfo> layers(global_layer_ids.size());
+        const auto&                     source_group = source.group(target_group.tag);
+        for (int local_layer_id : target_group.layer_ids) {
+            RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0
+                                        && static_cast<size_t>(local_layer_id) < global_layer_ids.size(),
+                                    "cache layout projection tag=%s invalid local layer=%d",
+                                    target_group.tag.c_str(),
+                                    local_layer_id);
+            const auto local  = static_cast<size_t>(local_layer_id);
+            const auto global = global_layer_ids[local];
+            if (source_group.hasLayer(global)) {
+                layers[local] = source_group.at(global);
+            }
+        }
+        groups.emplace(target_group.tag, CacheLayerLayout(std::move(layers)));
+    }
+    return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
 }
 
 }  // namespace
@@ -322,75 +375,11 @@ GroupedCacheLayerLayout KVCacheManager::allLayerCacheBase() const {
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() const {
-    CacheLayerLayout layout;
-
-    auto  all_layout        = allocator_->allLayerCacheBase();
-    auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
-    auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
-
-    layout.layer_to_group_ids.resize(config_.layer_num);
-    layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
-    if (!all_scale_tensors.empty()) {
-        layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
-    }
-
-    const auto layer_group_ids  = config_.layerGroupIdsSnapshot();
-    const auto layer_tag_to_gid = config_.layerTagToGroupIdSnapshot();
-    layout.group_types          = config_.groupTypesSnapshot();
-    layout.group_spec_types     = config_.groupSpecTypesSnapshot();
-    if (config_.use_independent_block_pools) {
-        layout.group_seq_block_sizes            = config_.groupSeqBlockSizesSnapshot();
-        layout.group_kernel_seq_block_sizes     = config_.groupKernelSeqBlockSizesSnapshot();
-        layout.group_kernel_blocks_per_kv_block = config_.groupKernelBlocksPerKvBlockSnapshot();
-    }
-    layout.group_tags = config_.groupTagsSnapshot();
-    layout.layer_tag_to_group_id.resize(config_.layer_num);
-    layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
-    layout.layers_to_kv_buffer_ptrs_by_group.resize(config_.layer_num);
-    if (!all_layout.layers_to_scale_buffer_ptrs_by_group.empty()) {
-        layout.layers_to_scale_buffer_ptrs_by_group.resize(config_.layer_num);
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(config_.layer_num <= all_layer_tensors.size(),
-                            "config_.layer_num[%d] > all_layer_tensors.size()[%ld]",
-                            config_.layer_num,
-                            all_layer_tensors.size());
-
-    for (int layer_id = 0; layer_id < static_cast<int>(config_.layer_num); ++layer_id) {
-        if (static_cast<size_t>(layer_id) < all_layer_tensors.size()) {
-            layout.layers_to_kv_buffer_ptrs[layer_id] = all_layer_tensors[layer_id];
-        } else {
-            RTP_LLM_CHECK(false);
-        }
-
-        if (!all_scale_tensors.empty()) {
-            if (static_cast<size_t>(layer_id) < all_scale_tensors.size()) {
-                layout.layers_to_scale_buffer_ptrs[layer_id] = all_scale_tensors[layer_id];
-            } else {
-                RTP_LLM_CHECK(false);
-            }
-        }
-        if (static_cast<size_t>(layer_id) < layer_group_ids.size()) {
-            layout.layer_to_group_ids[layer_id] = layer_group_ids[static_cast<size_t>(layer_id)];
-            if (!layout.layer_to_group_ids[layer_id].empty()) {
-                const auto first_gid              = static_cast<size_t>(layout.layer_to_group_ids[layer_id].front());
-                layout.layer_attn_types[layer_id] = config_.typeForGroup(first_gid);
-            }
-        }
-        if (static_cast<size_t>(layer_id) < layer_tag_to_gid.size()) {
-            layout.layer_tag_to_group_id[layer_id] = layer_tag_to_gid[static_cast<size_t>(layer_id)];
-        }
-        if (static_cast<size_t>(layer_id) < all_layout.layers_to_kv_buffer_ptrs_by_group.size()) {
-            layout.layers_to_kv_buffer_ptrs_by_group[layer_id] =
-                all_layout.layers_to_kv_buffer_ptrs_by_group[static_cast<size_t>(layer_id)];
-        }
-        if (static_cast<size_t>(layer_id) < all_layout.layers_to_scale_buffer_ptrs_by_group.size()) {
-            layout.layers_to_scale_buffer_ptrs_by_group[layer_id] =
-                all_layout.layers_to_scale_buffer_ptrs_by_group[static_cast<size_t>(layer_id)];
-        }
-    }
-
-    return GroupedCacheLayerLayout::fromFlat(layout);
+    const auto          all_layout = allocator_->allLayerCacheBase();
+    std::vector<size_t> global_layer_ids(config_.layer_num);
+    std::iota(global_layer_ids.begin(), global_layer_ids.end(), 0);
+    auto main_topology = projectTopology(all_layout.topology(), global_layer_ids);
+    return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
@@ -398,8 +387,6 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const {
-    CacheLayerLayout layout;
-
     RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
                             mtp_module_id,
@@ -407,33 +394,9 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
 
     const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    const uint32_t mtp_layer_num     = mtp_sub_config->layer_num;
-    auto           all_layout        = allocator_->allLayerCacheBase();
-    auto&          all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
-    auto&          all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
-
-    layout.layers_to_kv_buffer_ptrs.resize(mtp_layer_num);
-    if (!all_scale_tensors.empty()) {
-        layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
-    }
-    layout.group_tags       = mtp_sub_config->groupTagsSnapshot();
-    layout.group_types      = mtp_sub_config->groupTypesSnapshot();
-    layout.group_spec_types = mtp_sub_config->groupSpecTypesSnapshot();
-    if (config_.use_independent_block_pools) {
-        layout.group_seq_block_sizes            = mtp_sub_config->groupSeqBlockSizesSnapshot();
-        layout.group_kernel_seq_block_sizes     = mtp_sub_config->groupKernelSeqBlockSizesSnapshot();
-        layout.group_kernel_blocks_per_kv_block = mtp_sub_config->groupKernelBlocksPerKvBlockSnapshot();
-    }
-
-    const size_t group_count = layout.group_tags.size();
-    if (config_.use_independent_block_pools) {
-        layout.layers_to_kv_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
-        layout.layers_to_scale_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
-    }
-    layout.layer_to_group_ids.resize(mtp_layer_num);
-    layout.layer_tag_to_group_id.resize(mtp_layer_num);
-    layout.layer_attn_types.resize(mtp_layer_num, CacheGroupType::FULL);
-
+    const uint32_t      mtp_layer_num = mtp_sub_config->layer_num;
+    std::vector<size_t> global_layer_ids;
+    global_layer_ids.reserve(mtp_layer_num);
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
         const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
             config_.layer_num, mtp_module_id, mtp_layer_num, static_cast<int>(local_layer_id));
@@ -443,82 +406,9 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
                                 mtp_module_id,
                                 mtp_layer_num,
                                 local_layer_id);
-
-        if (static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
-            layout.layers_to_kv_buffer_ptrs[local_layer_id] = all_layer_tensors[global_layer_id];
-        } else {
-            RTP_LLM_CHECK(false);
-        }
-
-        if (!all_scale_tensors.empty()) {
-            if (static_cast<size_t>(global_layer_id) < all_scale_tensors.size()) {
-                layout.layers_to_scale_buffer_ptrs[local_layer_id] = all_scale_tensors[global_layer_id];
-            } else {
-                RTP_LLM_CHECK(false);
-            }
-        }
-        if (static_cast<size_t>(local_layer_id) < mtp_sub_config->layers.size()) {
-            layout.layer_to_group_ids[local_layer_id] =
-                mtp_sub_config->layers[static_cast<size_t>(local_layer_id)].group_ids;
-            layout.layer_tag_to_group_id[local_layer_id] =
-                mtp_sub_config->layers[static_cast<size_t>(local_layer_id)].tag_to_gid;
-            if (!layout.layer_to_group_ids[local_layer_id].empty()) {
-                const auto first_gid = static_cast<size_t>(layout.layer_to_group_ids[local_layer_id].front());
-                layout.layer_attn_types[local_layer_id] = mtp_sub_config->typeForGroup(first_gid);
-            }
-        }
-
-        if (!config_.use_independent_block_pools) {
-            if (static_cast<size_t>(global_layer_id) < all_layout.layers_to_kv_buffer_ptrs_by_group.size()) {
-                layout.layers_to_kv_buffer_ptrs_by_group.resize(mtp_layer_num);
-                layout.layers_to_kv_buffer_ptrs_by_group[local_layer_id] =
-                    all_layout.layers_to_kv_buffer_ptrs_by_group[global_layer_id];
-            }
-            if (static_cast<size_t>(global_layer_id) < all_layout.layers_to_scale_buffer_ptrs_by_group.size()) {
-                layout.layers_to_scale_buffer_ptrs_by_group.resize(mtp_layer_num);
-                layout.layers_to_scale_buffer_ptrs_by_group[local_layer_id] =
-                    all_layout.layers_to_scale_buffer_ptrs_by_group[global_layer_id];
-            }
-            continue;
-        }
-
-        for (size_t local_gid = 0; local_gid < group_count; ++local_gid) {
-            const auto& group_layers = mtp_sub_config->layerIdsForGroup(local_gid);
-            if (std::find(group_layers.begin(), group_layers.end(), static_cast<int>(local_layer_id))
-                == group_layers.end()) {
-                continue;
-            }
-
-            const auto& tag        = mtp_sub_config->tagForGroup(local_gid);
-            const int   global_gid = config_.groupIdForTag(tag);
-            if (std::find(layout.layer_to_group_ids[local_layer_id].begin(),
-                          layout.layer_to_group_ids[local_layer_id].end(),
-                          static_cast<int>(local_gid))
-                == layout.layer_to_group_ids[local_layer_id].end()) {
-                layout.layer_to_group_ids[local_layer_id].push_back(static_cast<int>(local_gid));
-            }
-            layout.layer_tag_to_group_id[local_layer_id][tag] = static_cast<int>(local_gid);
-            layout.layer_attn_types[local_layer_id]           = mtp_sub_config->typeForGroup(local_gid);
-
-            if (static_cast<size_t>(global_layer_id) < all_layout.layers_to_kv_buffer_ptrs_by_group.size()) {
-                const auto& src_kv = all_layout.layers_to_kv_buffer_ptrs_by_group[static_cast<size_t>(global_layer_id)];
-                if (global_gid >= 0 && static_cast<size_t>(global_gid) < src_kv.size()) {
-                    layout.layers_to_kv_buffer_ptrs_by_group[local_layer_id][local_gid] =
-                        src_kv[static_cast<size_t>(global_gid)];
-                }
-            }
-            if (static_cast<size_t>(global_layer_id) < all_layout.layers_to_scale_buffer_ptrs_by_group.size()) {
-                const auto& src_scale =
-                    all_layout.layers_to_scale_buffer_ptrs_by_group[static_cast<size_t>(global_layer_id)];
-                if (global_gid >= 0 && static_cast<size_t>(global_gid) < src_scale.size()) {
-                    layout.layers_to_scale_buffer_ptrs_by_group[local_layer_id][local_gid] =
-                        src_scale[static_cast<size_t>(global_gid)];
-                }
-            }
-        }
+        global_layer_ids.push_back(global_layer_id);
     }
-
-    return GroupedCacheLayerLayout::fromFlat(layout);
+    return projectLayout(allocator_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id) const {

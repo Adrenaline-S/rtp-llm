@@ -27,14 +27,14 @@ class KVCacheGroup {
 public:
     KVCacheGroup(CacheGroup                          cache_group,
                  BlockPoolPtr                        block_pool,
-                 int                                 group_slot,
+                 int                                 group_id,
                  SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         cache_group_(std::move(cache_group)),
         block_pool_(std::move(block_pool)),
         shared_cache_(shared_cache),
         metrics_reporter_(metrics_reporter),
-        group_slot_(group_slot) {}
+        group_id_(group_id) {}
 
     // Transition-only constructor for HybridPool and existing focused tests.
     KVCacheGroup(const LayerIdsType&                 layer_ids,
@@ -79,7 +79,7 @@ public:
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
     const CacheGroup&       config() const;
-    int                     groupSlot() const;
+    int                     group_id() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
@@ -112,7 +112,7 @@ protected:
     BlockPoolPtr                 block_pool_;
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
-    int                          group_slot_       = 0;
+    int                          group_id_         = 0;
 
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;

@@ -588,24 +588,15 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllLayerCacheBaseExposesPerLayerAndPerGro
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
-    ASSERT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_all_num));
-    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
-        EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined()) << "layer " << i << " missing kv buffer";
-    }
-    EXPECT_EQ(layout.layer_to_group_ids, config.layerGroupIdsSnapshot());
-    EXPECT_EQ(layout.group_types, config.groupTypesSnapshot());
-
-    ASSERT_EQ(layout.layers_to_kv_buffer_ptrs_by_group.size(), static_cast<size_t>(config.layer_all_num));
-    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs_by_group.size(); ++i) {
-        EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_group[i].size(), static_cast<size_t>(config.groupNums()));
-    }
-
+    EXPECT_EQ(layout.topology().layerGroupIdsSnapshot(), config.layerGroupIdsSnapshot());
+    EXPECT_EQ(layout.topology().groupTypesSnapshot(), config.groupTypesSnapshot());
+    EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
     for (size_t i = 0; i < static_cast<size_t>(config.layer_all_num); ++i) {
-        ASSERT_FALSE(layout.layer_to_group_ids[i].empty());
-        const auto  gid        = static_cast<size_t>(layout.layer_to_group_ids[i].front());
-        const auto& by_default = layout.layers_to_kv_buffer_ptrs_by_group[i][gid];
-        EXPECT_TRUE(by_default.defined()) << "layer " << i << " primary group tensor undefined";
-        EXPECT_EQ(by_default.data_ptr(), layout.layers_to_kv_buffer_ptrs[i].data_ptr());
+        const auto& layer = layout.topology().layer(static_cast<int>(i));
+        ASSERT_FALSE(layer.group_tags.empty());
+        for (const auto& tag : layer.group_tags) {
+            EXPECT_TRUE(layout.group(tag).hasLayer(i)) << "layer " << i << " tag=" << tag;
+        }
     }
 }
 
@@ -1184,12 +1175,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByTagRoutesToCorrec
     // matches the CSA group's pool.
     auto addr_csa = allocator->convertIndexToAddrByTag(csa_layer, "csa_kv", 1);
     EXPECT_NE(addr_csa.kv_addr, nullptr);
+    const auto csa_gid = config.groupIdForTag("csa_kv");
+    EXPECT_EQ(addr_csa.kv_addr, allocator->convertIndexToAddr(csa_layer, csa_gid, 1).kv_addr);
 
     auto addr_swa = allocator->convertIndexToAddrByTag(csa_layer, "swa_kv", 1);
     EXPECT_NE(addr_swa.kv_addr, nullptr);
 
     // The two tags live in different pools, so their addresses cannot alias.
     EXPECT_NE(addr_csa.kv_addr, addr_swa.kv_addr);
+    EXPECT_THROW((void)allocator->convertIndexToAddrByTag(csa_layer, "missing", 1), std::exception);
+    EXPECT_THROW((void)allocator->convertIndexToAddr(csa_layer, config.groupNums(), 1), std::exception);
 
     // Default single-group access is ambiguous for multi-tag layers.
     EXPECT_THROW((void)allocator->convertIndexToAddr(csa_layer, /*block_id=*/1), std::exception);
@@ -1225,19 +1220,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4AllLayerCacheBaseHasPerGroupTensors) 
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
-    ASSERT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_all_num));
-    ASSERT_EQ(layout.layers_to_kv_buffer_ptrs_by_group.size(), static_cast<size_t>(config.layer_all_num));
-
     for (size_t l = 0; l < static_cast<size_t>(config.layer_all_num); ++l) {
-        if (config.layerTagToGroupIdSnapshot()[l].size() > 1) {
-            EXPECT_FALSE(layout.layers_to_kv_buffer_ptrs[l].defined())
-                << "multi-tag DSV4 layer should not publish a legacy single-group tensor";
-        }
-        const auto& swa_t = layout.layers_to_kv_buffer_ptrs_by_group[l][config.groupIdForLayerTag(l, "swa_kv")];
-        EXPECT_TRUE(swa_t.defined()) << "layer " << l << " missing SWA_KV tensor";
+        EXPECT_TRUE(layout.group("swa_kv").hasLayer(l)) << "layer " << l << " missing SWA_KV tensor";
     }
-    EXPECT_EQ(layout.group_tags.size(), 7u);
-    EXPECT_EQ(layout.group_types.size(), 7u);
+    EXPECT_EQ(layout.groups().size(), 7u);
+    EXPECT_EQ(layout.topology().groups().size(), 7u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups) {

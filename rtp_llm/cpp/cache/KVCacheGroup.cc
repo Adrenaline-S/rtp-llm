@@ -51,7 +51,7 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
 
         const size_t                  need_evict = static_cast<size_t>(required_blocks) - free_blocks;
         SharedBlockCache::EvictResult evict_result;
-        size_t freed = shared_cache_->evictAndFreeForGroup(group_slot_, need_evict, &evict_result);
+        size_t                        freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
 
         if (metrics_reporter_) {
             for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
@@ -103,8 +103,8 @@ void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
-        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_slot_ + 1), NULL_BLOCK_IDX);
-        group_slots[static_cast<size_t>(group_slot_)] = block_indices[i];
+        std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_id_ + 1), NULL_BLOCK_IDX);
+        group_slots[static_cast<size_t>(group_id_)] = block_indices[i];
         shared_cache_->put(cache_keys[i], group_slots, is_resident);
     }
 }
@@ -125,8 +125,8 @@ const CacheGroup& KVCacheGroup::config() const {
     return cache_group_;
 }
 
-int KVCacheGroup::groupSlot() const {
-    return group_slot_;
+int KVCacheGroup::group_id() const {
+    return group_id_;
 }
 
 const CacheGroupPolicy& KVCacheGroup::policy() const {

@@ -223,59 +223,27 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 }
 
 GroupedCacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
-    CacheLayerLayout layout;
-    auto             layer_tensors = full_kv_cache_group_->allLayerCacheBase();
-    auto             scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
+    const auto layer_tensors = full_kv_cache_group_->allLayerCacheBase();
+    const auto scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
+    const auto topology      = config_.topologyPtr();
 
-    layout.layer_to_group_ids    = config_.layerGroupIdsSnapshot();
-    layout.group_types           = config_.groupTypesSnapshot();
-    layout.group_spec_types      = config_.groupSpecTypesSnapshot();
-    layout.group_tags            = config_.groupTagsSnapshot();
-    layout.layer_tag_to_group_id = config_.layerTagToGroupIdSnapshot();
-    const auto group_num         = static_cast<size_t>(config_.groupNums());
-    layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
-    layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
-    layout.layer_attn_types.resize(config_.layer_all_num, CacheGroupType::FULL);
-    layout.layers_to_kv_buffer_ptrs_by_group.resize(config_.layer_all_num);
-    layout.layers_to_scale_buffer_ptrs_by_group.resize(config_.layer_all_num);
-
-    for (int layer_id = 0; layer_id < config_.layer_all_num; ++layer_id) {
-        const auto layer = static_cast<size_t>(layer_id);
-        layout.layers_to_kv_buffer_ptrs_by_group[layer].resize(group_num);
-        layout.layers_to_scale_buffer_ptrs_by_group[layer].resize(group_num);
-
-        torch::Tensor kv_tensor;
-        const auto    kv_it = layer_tensors.find(layer_id);
-        if (kv_it != layer_tensors.end() && kv_it->second.defined() && kv_it->second.numel() > 0) {
-            kv_tensor                              = kv_it->second;
-            layout.layers_to_kv_buffer_ptrs[layer] = kv_tensor;
-        }
-
-        torch::Tensor scale_tensor;
-        const auto    scale_it = scale_tensors.find(layer_id);
-        if (scale_it != scale_tensors.end() && scale_it->second.defined() && scale_it->second.numel() > 0) {
-            scale_tensor                              = scale_it->second;
-            layout.layers_to_scale_buffer_ptrs[layer] = scale_tensor;
-        }
-
-        RTP_LLM_CHECK_WITH_INFO(
-            layer < layout.layer_to_group_ids.size(), "missing cache group route for layer %d", layer_id);
-        for (int gid : layout.layer_to_group_ids[layer]) {
-            RTP_LLM_CHECK_WITH_INFO(
-                gid >= 0 && static_cast<size_t>(gid) < group_num, "invalid cache group %d for layer %d", gid, layer_id);
-            if (kv_tensor.defined()) {
-                layout.layers_to_kv_buffer_ptrs_by_group[layer][static_cast<size_t>(gid)] = kv_tensor;
+    GroupedCacheLayerLayout::GroupLayouts groups;
+    for (const auto& group : topology->groups()) {
+        std::vector<BlockBufferPtrInfo> layers(topology->layers().size());
+        for (int layer_id : group.layer_ids) {
+            const auto layer = static_cast<size_t>(layer_id);
+            const auto kv_it = layer_tensors.find(layer_id);
+            if (kv_it != layer_tensors.end() && kv_it->second.defined()) {
+                layers[layer].kv_addr = kv_it->second;
             }
-            if (scale_tensor.defined()) {
-                layout.layers_to_scale_buffer_ptrs_by_group[layer][static_cast<size_t>(gid)] = scale_tensor;
+            const auto scale_it = scale_tensors.find(layer_id);
+            if (scale_it != scale_tensors.end() && scale_it->second.defined()) {
+                layers[layer].kv_scale_addr = scale_it->second;
             }
         }
-        if (!layout.layer_to_group_ids[layer].empty()) {
-            layout.layer_attn_types[layer] =
-                config_.typeForGroup(static_cast<size_t>(layout.layer_to_group_ids[layer].front()));
-        }
+        groups.emplace(group.tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout::fromFlat(layout);
+    return GroupedCacheLayerLayout(topology, std::move(groups));
 }
 
 BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {

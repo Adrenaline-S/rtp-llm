@@ -71,7 +71,7 @@ bool DefaultLayerGroupPolicy::init() {
     }
     const auto  layer_layout       = allocator_->allLayerCacheBase();
     uint64_t    group_name_bithash = 1;
-    const auto& layer_group_ids    = layer_layout.layer_to_group_ids;
+    const auto& layer_group_ids    = layer_layout.topology().layerGroupIdsSnapshot();
     for (int layer = 0; layer < static_cast<int>(layer_group_ids.size()); ++layer) {
         if (layer_group_ids.at(layer).empty()) {
             RTP_LLM_LOG_ERROR("layer [%d] has no cache group id", layer);

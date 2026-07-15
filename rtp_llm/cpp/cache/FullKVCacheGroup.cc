@@ -50,7 +50,7 @@ MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const
     }
 
     for (const auto& cache_key : cache_keys) {
-        auto block_idx = shared_cache_->matchGroup(cache_key, groupSlot());
+        auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
         if (isNullBlockIdx(block_idx)) {
             break;
         }

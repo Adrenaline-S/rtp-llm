@@ -1,14 +1,15 @@
 #pragma once
 
-#include <algorithm>
 #include <map>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <torch/extension.h>
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
+
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -18,170 +19,142 @@ struct BlockBufferPtrInfo {
     torch::Tensor kv_scale_addr;
 };
 
-struct CacheLayerLayout {
-    std::vector<std::vector<int>>           layer_to_group_ids;
-    std::vector<CacheGroupType>             group_types;
-    std::vector<KVCacheSpecType>            group_spec_types;
-    std::vector<size_t>                     group_seq_block_sizes;
-    std::vector<size_t>                     group_kernel_seq_block_sizes;
-    std::vector<size_t>                     group_kernel_blocks_per_kv_block;
-    std::vector<std::string>                group_tags;
-    std::vector<std::map<std::string, int>> layer_tag_to_group_id;
-    std::vector<CacheGroupType>             layer_attn_types;
-    std::vector<torch::Tensor>              layers_to_kv_buffer_ptrs;
-    std::vector<torch::Tensor>              layers_to_scale_buffer_ptrs;
-    std::vector<std::vector<torch::Tensor>> layers_to_kv_buffer_ptrs_by_group;
-    std::vector<std::vector<torch::Tensor>> layers_to_scale_buffer_ptrs_by_group;
+// Dense, immutable all-layer view for one cache group. A group that does not
+// own a layer stores an undefined kv_addr at that layer. Scale storage is
+// optional even for active layers.
+class CacheLayerLayout {
+public:
+    CacheLayerLayout() = default;
+
+    explicit CacheLayerLayout(std::vector<BlockBufferPtrInfo> layers): layers_(std::move(layers)) {
+        for (const auto& layer : layers_) {
+            active_layer_count_ += layer.kv_addr.defined() ? 1 : 0;
+        }
+    }
+
+    bool empty() const noexcept {
+        return active_layer_count_ == 0;
+    }
+
+    size_t activeLayerCount() const noexcept {
+        return active_layer_count_;
+    }
+
+    size_t size() const noexcept {
+        return layers_.size();
+    }
+
+    bool hasLayer(size_t layer_id) const {
+        RTP_LLM_CHECK_WITH_INFO(
+            layer_id < layers_.size(), "CacheLayerLayout invalid layer_id=%zu size=%zu", layer_id, layers_.size());
+        return layers_[layer_id].kv_addr.defined();
+    }
+
+    const BlockBufferPtrInfo& at(size_t layer_id) const {
+        RTP_LLM_CHECK_WITH_INFO(
+            layer_id < layers_.size(), "CacheLayerLayout invalid layer_id=%zu size=%zu", layer_id, layers_.size());
+        return layers_[layer_id];
+    }
+
+    const std::vector<BlockBufferPtrInfo>& layers() const noexcept {
+        return layers_;
+    }
+
+private:
+    std::vector<BlockBufferPtrInfo> layers_;
+    size_t                          active_layer_count_ = 0;
 };
 
-struct CacheGroupLayerLayout {
-    int              group_id = -1;
-    std::string      group_tag;
-    CacheGroupType   group_type                 = CacheGroupType::FULL;
-    KVCacheSpecType  cache_spec_type            = KVCacheSpecType::MultiHeadAttention;
-    size_t           seq_size_per_block         = 0;
-    size_t           kernel_seq_size_per_block  = 0;
-    size_t           kernel_blocks_per_kv_block = 1;
-    CacheLayerLayout layout;
-};
+// Canonical KV-cache buffer layout: semantic group tag -> dense all-layer
+// layout. CacheTopology is the sole owner of group metadata and numeric slots.
+class GroupedCacheLayerLayout {
+public:
+    using GroupLayouts = std::map<std::string, CacheLayerLayout>;
 
-struct GroupedCacheLayerLayout {
-    std::vector<CacheGroupLayerLayout> group_layouts;
+    GroupedCacheLayerLayout() = default;
 
-    // Compatibility snapshot used by existing call sites while the grouped API
-    // is rolled through model/runtime boundaries.
-    std::vector<std::vector<int>>           layer_to_group_ids;
-    std::vector<CacheGroupType>             group_types;
-    std::vector<KVCacheSpecType>            group_spec_types;
-    std::vector<size_t>                     group_seq_block_sizes;
-    std::vector<size_t>                     group_kernel_seq_block_sizes;
-    std::vector<size_t>                     group_kernel_blocks_per_kv_block;
-    std::vector<std::string>                group_tags;
-    std::vector<std::map<std::string, int>> layer_tag_to_group_id;
-    std::vector<CacheGroupType>             layer_attn_types;
-    std::vector<torch::Tensor>              layers_to_kv_buffer_ptrs;
-    std::vector<torch::Tensor>              layers_to_scale_buffer_ptrs;
-    std::vector<std::vector<torch::Tensor>> layers_to_kv_buffer_ptrs_by_group;
-    std::vector<std::vector<torch::Tensor>> layers_to_scale_buffer_ptrs_by_group;
-
-    const CacheLayerLayout& defaultLayout() const {
-        RTP_LLM_CHECK_WITH_INFO(group_layouts.size() == 1,
-                                "GroupedCacheLayerLayout::defaultLayout requires exactly one group, got %zu",
-                                group_layouts.size());
-        return group_layouts.front().layout;
+    GroupedCacheLayerLayout(std::shared_ptr<const CacheTopology> topology, GroupLayouts groups):
+        topology_(std::move(topology)), groups_(std::move(groups)) {
+        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "GroupedCacheLayerLayout requires a topology");
+        RTP_LLM_CHECK_WITH_INFO(groups_.size() == topology_->groups().size(),
+                                "GroupedCacheLayerLayout group count=%zu topology count=%zu",
+                                groups_.size(),
+                                topology_->groups().size());
+        for (const auto& group_config : topology_->groups()) {
+            const auto it = groups_.find(group_config.tag);
+            RTP_LLM_CHECK_WITH_INFO(
+                it != groups_.end(), "GroupedCacheLayerLayout missing topology tag=%s", group_config.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(it->second.size() == topology_->layers().size(),
+                                    "GroupedCacheLayerLayout tag=%s layer count=%zu topology count=%zu",
+                                    group_config.tag.c_str(),
+                                    it->second.size(),
+                                    topology_->layers().size());
+        }
     }
 
-    CacheLayerLayout& defaultLayout() {
-        RTP_LLM_CHECK_WITH_INFO(group_layouts.size() == 1,
-                                "GroupedCacheLayerLayout::defaultLayout requires exactly one group, got %zu",
-                                group_layouts.size());
-        return group_layouts.front().layout;
+    const CacheLayerLayout& group(std::string_view tag) const {
+        const std::string value(tag);
+        const auto        it = groups_.find(value);
+        RTP_LLM_CHECK_WITH_INFO(it != groups_.end(), "GroupedCacheLayerLayout missing tag=%s", value.c_str());
+        return it->second;
     }
 
-    const CacheGroupLayerLayout& groupLayout(int group_id) const {
-        for (const auto& group_layout : group_layouts) {
-            if (group_layout.group_id == group_id) {
-                return group_layout;
+    const CacheLayerLayout& group(size_t group_id) const {
+        return group(topology().groupBySlot(group_id).tag);
+    }
+
+    const BlockBufferPtrInfo& at(std::string_view tag, size_t layer_id) const {
+        return group(tag).at(layer_id);
+    }
+
+    const BlockBufferPtrInfo& at(size_t group_id, size_t layer_id) const {
+        return group(group_id).at(layer_id);
+    }
+
+    // Layer-only access is valid only when exactly one group has data for the
+    // requested layer.
+    const BlockBufferPtrInfo& at(size_t layer_id) const {
+        const BlockBufferPtrInfo* result = nullptr;
+        size_t                    count  = 0;
+        for (const auto& [tag, layout] : groups_) {
+            (void)tag;
+            if (layout.hasLayer(layer_id)) {
+                result = &layout.at(layer_id);
+                ++count;
             }
         }
-        RTP_LLM_FAIL("GroupedCacheLayerLayout missing group_id=%d", group_id);
+        RTP_LLM_CHECK_WITH_INFO(count == 1,
+                                "GroupedCacheLayerLayout layer=%zu requires exactly one active group, got %zu",
+                                layer_id,
+                                count);
+        return *result;
     }
 
-    CacheGroupLayerLayout& groupLayout(int group_id) {
-        for (auto& group_layout : group_layouts) {
-            if (group_layout.group_id == group_id) {
-                return group_layout;
-            }
-        }
-        RTP_LLM_FAIL("GroupedCacheLayerLayout missing group_id=%d", group_id);
+    const GroupLayouts& groups() const noexcept {
+        return groups_;
     }
 
-    static GroupedCacheLayerLayout fromFlat(const CacheLayerLayout& flat) {
-        GroupedCacheLayerLayout grouped;
-        grouped.layer_to_group_ids                   = flat.layer_to_group_ids;
-        grouped.group_types                          = flat.group_types;
-        grouped.group_spec_types                     = flat.group_spec_types;
-        grouped.group_seq_block_sizes                = flat.group_seq_block_sizes;
-        grouped.group_kernel_seq_block_sizes         = flat.group_kernel_seq_block_sizes;
-        grouped.group_kernel_blocks_per_kv_block     = flat.group_kernel_blocks_per_kv_block;
-        grouped.group_tags                           = flat.group_tags;
-        grouped.layer_tag_to_group_id                = flat.layer_tag_to_group_id;
-        grouped.layer_attn_types                     = flat.layer_attn_types;
-        grouped.layers_to_kv_buffer_ptrs             = flat.layers_to_kv_buffer_ptrs;
-        grouped.layers_to_scale_buffer_ptrs          = flat.layers_to_scale_buffer_ptrs;
-        grouped.layers_to_kv_buffer_ptrs_by_group    = flat.layers_to_kv_buffer_ptrs_by_group;
-        grouped.layers_to_scale_buffer_ptrs_by_group = flat.layers_to_scale_buffer_ptrs_by_group;
-
-        const size_t group_count = std::max(flat.group_types.size(), flat.group_tags.size());
-        grouped.group_layouts.reserve(group_count);
-        for (size_t gid = 0; gid < group_count; ++gid) {
-            CacheGroupLayerLayout group_layout;
-            group_layout.group_id = static_cast<int>(gid);
-            if (gid < flat.group_tags.size()) {
-                group_layout.group_tag = flat.group_tags[gid];
-            }
-            if (gid < flat.group_types.size()) {
-                group_layout.group_type = flat.group_types[gid];
-            }
-            if (gid < flat.group_spec_types.size()) {
-                group_layout.cache_spec_type = flat.group_spec_types[gid];
-            }
-            if (gid < flat.group_seq_block_sizes.size()) {
-                group_layout.seq_size_per_block = flat.group_seq_block_sizes[gid];
-            }
-            if (gid < flat.group_kernel_seq_block_sizes.size()) {
-                group_layout.kernel_seq_size_per_block = flat.group_kernel_seq_block_sizes[gid];
-            }
-            if (gid < flat.group_kernel_blocks_per_kv_block.size()) {
-                group_layout.kernel_blocks_per_kv_block = flat.group_kernel_blocks_per_kv_block[gid];
-            }
-            group_layout.layout.group_types                      = {group_layout.group_type};
-            group_layout.layout.group_spec_types                 = {group_layout.cache_spec_type};
-            group_layout.layout.group_tags                       = {group_layout.group_tag};
-            group_layout.layout.group_seq_block_sizes            = {group_layout.seq_size_per_block};
-            group_layout.layout.group_kernel_seq_block_sizes     = {group_layout.kernel_seq_size_per_block};
-            group_layout.layout.group_kernel_blocks_per_kv_block = {group_layout.kernel_blocks_per_kv_block};
-            group_layout.layout.layer_to_group_ids.resize(flat.layer_to_group_ids.size());
-            group_layout.layout.layer_tag_to_group_id.resize(flat.layer_tag_to_group_id.size());
-            group_layout.layout.layer_attn_types.resize(flat.layer_attn_types.size(), group_layout.group_type);
-            group_layout.layout.layers_to_kv_buffer_ptrs.resize(flat.layers_to_kv_buffer_ptrs.size());
-            group_layout.layout.layers_to_scale_buffer_ptrs.resize(flat.layers_to_scale_buffer_ptrs.size());
-
-            for (size_t layer_id = 0; layer_id < flat.layer_to_group_ids.size(); ++layer_id) {
-                const auto& gids = flat.layer_to_group_ids[layer_id];
-                if (std::find(gids.begin(), gids.end(), static_cast<int>(gid)) == gids.end()) {
-                    continue;
-                }
-                group_layout.layout.layer_to_group_ids[layer_id] = {static_cast<int>(gid)};
-                if (layer_id < flat.layer_tag_to_group_id.size()) {
-                    group_layout.layout.layer_tag_to_group_id[layer_id] = flat.layer_tag_to_group_id[layer_id];
-                }
-                if (layer_id < flat.layers_to_kv_buffer_ptrs_by_group.size()
-                    && gid < flat.layers_to_kv_buffer_ptrs_by_group[layer_id].size()) {
-                    group_layout.layout.layers_to_kv_buffer_ptrs[layer_id] =
-                        flat.layers_to_kv_buffer_ptrs_by_group[layer_id][gid];
-                } else if (gids.size() == 1 && layer_id < flat.layers_to_kv_buffer_ptrs.size()) {
-                    group_layout.layout.layers_to_kv_buffer_ptrs[layer_id] = flat.layers_to_kv_buffer_ptrs[layer_id];
-                }
-                if (layer_id < flat.layers_to_scale_buffer_ptrs_by_group.size()
-                    && gid < flat.layers_to_scale_buffer_ptrs_by_group[layer_id].size()) {
-                    group_layout.layout.layers_to_scale_buffer_ptrs[layer_id] =
-                        flat.layers_to_scale_buffer_ptrs_by_group[layer_id][gid];
-                } else if (gids.size() == 1 && layer_id < flat.layers_to_scale_buffer_ptrs.size()) {
-                    group_layout.layout.layers_to_scale_buffer_ptrs[layer_id] =
-                        flat.layers_to_scale_buffer_ptrs[layer_id];
-                }
-            }
-            grouped.group_layouts.push_back(std::move(group_layout));
-        }
-        if (grouped.group_layouts.empty() && !flat.layers_to_kv_buffer_ptrs.empty()) {
-            CacheGroupLayerLayout group_layout;
-            group_layout.group_id = 0;
-            group_layout.layout   = flat;
-            grouped.group_layouts.push_back(std::move(group_layout));
-        }
-        return grouped;
+    bool hasGroupData(std::string_view tag) const {
+        return !group(tag).empty();
     }
+
+    size_t groupId(std::string_view tag) const {
+        return topology().slotForTag(tag);
+    }
+
+    const CacheTopology& topology() const {
+        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "GroupedCacheLayerLayout has no topology");
+        return *topology_;
+    }
+
+    const std::shared_ptr<const CacheTopology>& topologyPtr() const {
+        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "GroupedCacheLayerLayout has no topology");
+        return topology_;
+    }
+
+private:
+    std::shared_ptr<const CacheTopology> topology_;
+    GroupLayouts                         groups_;
 };
 
 struct KVCacheBuffer {

@@ -2,14 +2,12 @@ import unittest
 
 import torch
 
-from rtp_llm.ops import KVCacheSpecType
-from rtp_llm.models_py.model_desc.block_map import (
-    select_attention_inputs_for_layer,
-)
+from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
 from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, SWA_KV
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.ops import KVCacheSpecType
 from rtp_llm.ops.compute_ops import (
     CacheGroupType,
     KVCache,
@@ -98,6 +96,10 @@ class PyModelInputsCompatTest(unittest.TestCase):
         full_group = kv_cache.get_layer_cache(0, "full")
         linear_group = kv_cache.get_layer_cache(1, "linear")
 
+        self.assertEqual(0, full_layer.group_id)
+        self.assertEqual(1, linear_layer.group_id)
+        self.assertEqual(0, full_group.group_id)
+        self.assertEqual(1, linear_group.group_id)
         self.assertEqual(2, full_layer.seq_size_per_block)
         self.assertEqual((12, 2, 1, 2, 4), tuple(full_layer.kv_cache_base.shape))
         self.assertEqual(
@@ -169,8 +171,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
             for physical_block in range(physical_blocks):
                 for token in range(physical_page_size):
                     kernel_block = (
-                        physical_block * blocks_per_physical
-                        + token // kernel_page_size
+                        physical_block * blocks_per_physical + token // kernel_page_size
                     )
                     kernel_token = token % kernel_page_size
                     self.assertTrue(
@@ -193,9 +194,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
             .reshape(8, 8, 6)
         )
         scale = (
-            torch.arange(8 * 8 * 3, dtype=torch.int32)
-            .to(torch.uint8)
-            .reshape(8, 8, 3)
+            torch.arange(8 * 8 * 3, dtype=torch.int32).to(torch.uint8).reshape(8, 8, 3)
         )
 
         self._assert_mla_kernel_view(base, scale, kernel_page_size=2)
@@ -228,12 +227,11 @@ class PyModelInputsCompatTest(unittest.TestCase):
             .reshape(8, 8, 6)
         )
         scale = (
-            torch.arange(8 * 8 * 3, dtype=torch.int32)
-            .to(torch.uint8)
-            .reshape(8, 8, 3)
+            torch.arange(8 * 8 * 3, dtype=torch.int32).to(torch.uint8).reshape(8, 8, 3)
         )
 
         self._assert_mla_kernel_view(base, scale, kernel_page_size=8)
+
     def test_multi_group_layer_requires_explicit_cache_group(self) -> None:
         kv_cache = KVCache()
         kv_cache.seq_size_per_block = 8
@@ -261,16 +259,17 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(
             (2, 64), tuple(kv_cache.get_layer_cache(0, "linear").kv_cache_base.shape)
         )
-        self.assertEqual(2, len(kv_cache.get_layer_caches(0)))
+        layer_caches = kv_cache.get_layer_caches(0)
+        self.assertEqual([0, 1], [cache.group_id for cache in layer_caches])
 
     def test_full_opaque_group_exposes_kernel_block_view(self) -> None:
         kv_cache = KVCache()
-        kv_cache.seq_size_per_block = 8
-        kv_cache.kernel_seq_size_per_block = 2
+        kv_cache.seq_size_per_block = 512
+        kv_cache.kernel_seq_size_per_block = 128
         kv_cache.group_types = [CacheGroupType.FULL]
         kv_cache.group_spec_types = [KVCacheSpecType.OPAQUE_KV]
-        kv_cache.group_seq_block_sizes = [8]
-        kv_cache.group_kernel_seq_block_sizes = [2]
+        kv_cache.group_seq_block_sizes = [512]
+        kv_cache.group_kernel_seq_block_sizes = [128]
         kv_cache.group_kernel_blocks_per_kv_block = [4]
         kv_cache.group_tags = ["compressed_kv"]
         kv_cache.layer_to_group_ids = [[0]]
@@ -281,7 +280,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         layer = kv_cache.get_layer_cache(0, "compressed_kv")
 
-        self.assertEqual(2, layer.seq_size_per_block)
+        self.assertEqual(128, layer.seq_size_per_block)
         self.assertEqual((12, 16), tuple(layer.kv_cache_base.shape))
         self.assertEqual(physical.data_ptr(), layer.kv_cache_base.data_ptr())
 
@@ -293,12 +292,8 @@ class PyModelInputsCompatTest(unittest.TestCase):
         kv_cache.group_seq_block_sizes = [512, 256]
         kv_cache.group_kernel_seq_block_sizes = [512, 128]
 
-        self.assertEqual(
-            512, require_pool_tokens_per_block(kv_cache, region=SWA_KV)
-        )
-        self.assertEqual(
-            128, require_pool_tokens_per_block(kv_cache, region=CSA_KV)
-        )
+        self.assertEqual(512, require_pool_tokens_per_block(kv_cache, region=SWA_KV))
+        self.assertEqual(128, require_pool_tokens_per_block(kv_cache, region=CSA_KV))
 
     def test_dsv4_multi_group_block_size_has_no_scalar_fallback(self) -> None:
         kv_cache = KVCache()

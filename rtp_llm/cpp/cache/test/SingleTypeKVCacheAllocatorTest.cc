@@ -647,21 +647,17 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     allocator_->init();
 
     auto layout = allocator_->allLayerCacheBase();
-    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), config.layer_num);
-    EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
-    EXPECT_EQ((std::vector<std::vector<int>>(4, std::vector<int>{0})), layout.layer_to_group_ids);
-    EXPECT_EQ(layout.group_types, std::vector<CacheGroupType>{CacheGroupType::FULL});
-    EXPECT_EQ(layout.group_tags, std::vector<std::string>{"default"});
-    EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_group.size(), config.layer_num);
-    EXPECT_EQ(layout.layers_to_scale_buffer_ptrs_by_group.size(), config.layer_num);
-
-    for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
-        EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined());
-        EXPECT_GT(layout.layers_to_kv_buffer_ptrs[i].nbytes(), 0u);
-        ASSERT_EQ(layout.layers_to_kv_buffer_ptrs_by_group[i].size(), 1u);
-        ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_group[i][0].defined());
-        EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_group[i][0].data_ptr(),
-                  layout.layers_to_kv_buffer_ptrs[i].data_ptr());
+    ASSERT_EQ(layout.groups().size(), 1u);
+    EXPECT_EQ(layout.topology().layerGroupIdsSnapshot(), (std::vector<std::vector<int>>(4, std::vector<int>{0})));
+    EXPECT_EQ(layout.topology().groupTypesSnapshot(), std::vector<CacheGroupType>{CacheGroupType::FULL});
+    EXPECT_EQ(layout.topology().groupTagsSnapshot(), std::vector<std::string>{"default"});
+    const auto& default_layout = layout.group("default");
+    EXPECT_EQ(default_layout.size(), config.layer_num);
+    EXPECT_EQ(default_layout.activeLayerCount(), config.layer_num);
+    for (size_t i = 0; i < default_layout.size(); ++i) {
+        ASSERT_TRUE(default_layout.hasLayer(i));
+        EXPECT_GT(default_layout.at(i).kv_addr.nbytes(), 0u);
+        EXPECT_EQ(layout.group(0).at(i).kv_addr.data_ptr(), default_layout.at(i).kv_addr.data_ptr());
     }
 }
 
@@ -673,48 +669,33 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTens
 
     const auto all_layout  = manager->allLayerCacheBase();
     const auto main_layout = manager->getMainModelCacheLayerLayout();
-    ASSERT_EQ(all_layout.layers_to_kv_buffer_ptrs.size(), 8u);
+    ASSERT_EQ(all_layout.group("default").size(), 8u);
 
     auto verify_layout = [](const GroupedCacheLayerLayout& local_layout,
                             const GroupedCacheLayerLayout& all,
                             size_t                         global_begin) {
-        ASSERT_EQ(local_layout.group_types, std::vector<CacheGroupType>{CacheGroupType::FULL});
-        ASSERT_EQ(local_layout.group_tags, std::vector<std::string>{"default"});
-        ASSERT_EQ(local_layout.layers_to_kv_buffer_ptrs_by_group.size(), local_layout.layers_to_kv_buffer_ptrs.size());
-        for (size_t local_layer = 0; local_layer < local_layout.layers_to_kv_buffer_ptrs.size(); ++local_layer) {
+        ASSERT_EQ(local_layout.topology().groupTypesSnapshot(), std::vector<CacheGroupType>{CacheGroupType::FULL});
+        ASSERT_EQ(local_layout.topology().groupTagsSnapshot(), std::vector<std::string>{"default"});
+        const auto& local_group = local_layout.group("default");
+        const auto& all_group   = all.group("default");
+        for (size_t local_layer = 0; local_layer < local_group.size(); ++local_layer) {
             const size_t global_layer = global_begin + local_layer;
-            ASSERT_TRUE(local_layout.layers_to_kv_buffer_ptrs[local_layer].defined());
-            EXPECT_EQ(local_layout.layers_to_kv_buffer_ptrs[local_layer].data_ptr(),
-                      all.layers_to_kv_buffer_ptrs[global_layer].data_ptr());
-            ASSERT_EQ(local_layout.layers_to_kv_buffer_ptrs_by_group[local_layer].size(), 1u);
-            ASSERT_TRUE(local_layout.layers_to_kv_buffer_ptrs_by_group[local_layer][0].defined());
-            EXPECT_EQ(local_layout.layers_to_kv_buffer_ptrs_by_group[local_layer][0].data_ptr(),
-                      local_layout.layers_to_kv_buffer_ptrs[local_layer].data_ptr());
-            ASSERT_EQ(local_layout.layers_to_scale_buffer_ptrs_by_group[local_layer].size(), 1u);
-            ASSERT_TRUE(local_layout.layers_to_scale_buffer_ptrs_by_group[local_layer][0].defined());
-            EXPECT_EQ(local_layout.layers_to_scale_buffer_ptrs_by_group[local_layer][0].data_ptr(),
-                      local_layout.layers_to_scale_buffer_ptrs[local_layer].data_ptr());
+            ASSERT_TRUE(local_group.hasLayer(local_layer));
+            EXPECT_EQ(local_group.at(local_layer).kv_addr.data_ptr(), all_group.at(global_layer).kv_addr.data_ptr());
+            ASSERT_TRUE(local_group.at(local_layer).kv_scale_addr.defined());
         }
 
         torch_ext::KVCache kv_cache;
-        kv_cache.kv_cache_base_by_layer       = local_layout.layers_to_kv_buffer_ptrs;
-        kv_cache.kv_scale_base_by_layer       = local_layout.layers_to_scale_buffer_ptrs;
-        kv_cache.layer_attn_types             = local_layout.layer_attn_types;
-        kv_cache.group_types                  = local_layout.group_types;
-        kv_cache.group_tags                   = local_layout.group_tags;
-        kv_cache.layer_to_group_ids           = local_layout.layer_to_group_ids;
-        kv_cache.layer_tag_to_group_id        = local_layout.layer_tag_to_group_id;
-        kv_cache.kv_cache_base_by_layer_group = local_layout.layers_to_kv_buffer_ptrs_by_group;
-        kv_cache.kv_scale_base_by_layer_group = local_layout.layers_to_scale_buffer_ptrs_by_group;
-        kv_cache.seq_size_per_block           = 4;
-        kv_cache.kernel_seq_size_per_block    = 4;
+        kv_cache.grouped_layout            = local_layout;
+        kv_cache.seq_size_per_block        = 4;
+        kv_cache.kernel_seq_size_per_block = 4;
 
         const auto by_tag   = kv_cache.getLayerCache(/*idx=*/0, "default");
         const auto by_group = kv_cache.getLayerCache(/*idx=*/0, "default");
         EXPECT_TRUE(by_tag.kv_cache_base.defined());
         EXPECT_TRUE(by_group.kv_cache_base.defined());
-        EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), local_layout.layers_to_kv_buffer_ptrs[0].data_ptr());
-        EXPECT_EQ(by_group.kv_cache_base.data_ptr(), local_layout.layers_to_kv_buffer_ptrs[0].data_ptr());
+        EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), local_group.at(0).kv_addr.data_ptr());
+        EXPECT_EQ(by_group.kv_cache_base.data_ptr(), local_group.at(0).kv_addr.data_ptr());
     };
 
     verify_layout(main_layout, all_layout, /*global_begin=*/0);

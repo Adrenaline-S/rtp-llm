@@ -96,12 +96,22 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_layout",
+    hdrs = ["BufferTypes.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+)
+
+cc_library(
     name = "cache_types",
     srcs = [
         "Types.cc",
     ],
     hdrs = [
-        "BufferTypes.h",
         "CacheConfig.h",
         "Types.h",
         "WarmUpResult.h",
@@ -113,6 +123,7 @@ cc_library(
         ":batch_kv_cache_resource",
         ":cache_config",
         ":cache_group_type",
+        ":cache_layout",
         ":kv_cache_specs",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",

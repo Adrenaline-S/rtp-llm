@@ -10,10 +10,10 @@ class FullKVCacheGroup: public KVCacheGroup {
 public:
     FullKVCacheGroup(CacheGroup                          cache_group,
                      BlockPoolPtr                        block_pool,
-                     int                                 group_slot,
+                     int                                 group_id,
                      SharedBlockCache*                   shared_cache     = nullptr,
                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_slot, shared_cache, metrics_reporter) {}
+        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter) {}
 
     // Transition-only overload.
     FullKVCacheGroup(const LayerIdsType&                 layer_ids,

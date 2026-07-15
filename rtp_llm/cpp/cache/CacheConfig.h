@@ -153,6 +153,11 @@ public:
         return *cache_topology;
     }
 
+    const std::shared_ptr<const CacheTopology>& topologyPtr() const {
+        RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
+        return cache_topology;
+    }
+
     const CacheGroup& group(const std::string& tag) const {
         return topology().group(tag);
     }

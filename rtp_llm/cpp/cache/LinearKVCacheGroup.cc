@@ -79,7 +79,7 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     if (!shared_cache_) {
         return result;
     }
-    auto block_idx = shared_cache_->matchGroup(cache_key, groupSlot());
+    auto block_idx = shared_cache_->matchGroup(cache_key, group_id());
     if (!isNullBlockIdx(block_idx)) {
         result.block_indices = {block_idx};
     }

@@ -198,7 +198,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     const KVCacheGroupPtr reuse_group =
         full_group_ids_.empty() ? KVCacheGroupPtr{} : kv_cache_groups_[static_cast<size_t>(full_group_ids_.front())];
     const int reuse_unit_tokens =
-        (reuse_group ? cpLogicalSeqSizeForGroup(cp_mapper, config_, reuse_group->groupSlot(), seqSizePerBlock()) :
+        (reuse_group ? cpLogicalSeqSizeForGroup(cp_mapper, config_, reuse_group->group_id(), seqSizePerBlock()) :
                        seqSizePerBlock());
 
     const auto&                   cache_keys         = kv_resource->cacheKeys(0);

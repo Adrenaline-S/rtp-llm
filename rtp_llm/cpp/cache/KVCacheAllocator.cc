@@ -120,36 +120,42 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
 }
 
 BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, int group_id, int block_id) const {
-    (void)group_id;
-    return convertIndexToAddr(layer_id, block_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
+    return convertIndexToAddrByTag(
+        layer_id, config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag, block_id);
 }
 
 std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
-    (void)group_id;
-    return convertIndexToBuffer(layer_id, block_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
+    return convertIndexToBufferByTag(
+        layer_id, config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag, block_id);
 }
 
 std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
     int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
-    (void)group_id;
-    return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
+    return convertIndexToBufferByTag(layer_id,
+                                     config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag,
+                                     block_id,
+                                     partition_count,
+                                     partition_id);
 }
 
 BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
-    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
-    return convertIndexToAddr(layer_id, group_id, block_id);
+    (void)config_.groupForLayer(layer_id, tag);
+    return convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo>
 KVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
-    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
-    return convertIndexToBuffer(layer_id, group_id, block_id);
+    (void)config_.groupForLayer(layer_id, tag);
+    return convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo> KVCacheAllocator::convertIndexToBufferByTag(
     int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
-    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
-    return convertIndexToBuffer(layer_id, group_id, block_id, partition_count, partition_id);
+    (void)config_.groupForLayer(layer_id, tag);
+    return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
@@ -183,7 +189,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         config_.groupNums() == 1, "blockBatchCopy currently expects a single cache group, got %d", config_.groupNums());
 
     BatchCopyParams copy_params;
-    const size_t buffers_per_layer = config_.kv_scale_stride_bytes > 0 ? 2 : 1;
+    const size_t    buffers_per_layer = config_.kv_scale_stride_bytes > 0 ? 2 : 1;
     copy_params.reserve(copy_type,
                         static_cast<size_t>(end_ptr - begin_ptr) * static_cast<size_t>(config_.layer_num)
                             * buffers_per_layer);
@@ -208,10 +214,8 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
 
             if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
-                copy_params.add(dst_addr_info.kv_scale_addr,
-                                src_addr_info.kv_scale_addr,
-                                config_.kv_scale_stride_bytes,
-                                copy_type);
+                copy_params.add(
+                    dst_addr_info.kv_scale_addr, src_addr_info.kv_scale_addr, config_.kv_scale_stride_bytes, copy_type);
             }
         }
     }

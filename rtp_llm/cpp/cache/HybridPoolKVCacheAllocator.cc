@@ -195,78 +195,34 @@ void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesTy
 }
 
 GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
-    CacheLayerLayout layout;
-    const auto       layer_group_ids        = config_.layerGroupIdsSnapshot();
-    layout.layer_to_group_ids               = layer_group_ids;
-    layout.group_types                      = config_.groupTypesSnapshot();
-    layout.group_spec_types                 = config_.groupSpecTypesSnapshot();
-    layout.group_seq_block_sizes            = config_.groupSeqBlockSizesSnapshot();
-    layout.group_kernel_seq_block_sizes     = config_.groupKernelSeqBlockSizesSnapshot();
-    layout.group_kernel_blocks_per_kv_block = config_.groupKernelBlocksPerKvBlockSnapshot();
-    layout.group_tags                       = config_.groupTagsSnapshot();
-    layout.layer_tag_to_group_id            = config_.layerTagToGroupIdSnapshot();
-    layout.layer_attn_types.resize(config_.layer_all_num, CacheGroupType::FULL);
-    for (size_t layer_id = 0; layer_id < layer_group_ids.size() && layer_id < layout.layer_attn_types.size();
-         ++layer_id) {
-        if (!layer_group_ids[layer_id].empty()) {
-            layout.layer_attn_types[layer_id] =
-                config_.typeForGroup(static_cast<size_t>(layer_group_ids[layer_id].front()));
-        }
-    }
+    const auto topology = config_.topologyPtr();
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_groups_.size() == topology->groups().size(),
+                            "cache group count=%zu topology count=%zu",
+                            kv_cache_groups_.size(),
+                            topology->groups().size());
 
-    layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
-    layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
-    const size_t group_count = kv_cache_groups_.size();
-    layout.layers_to_kv_buffer_ptrs_by_group.resize(config_.layer_all_num);
-    layout.layers_to_scale_buffer_ptrs_by_group.resize(config_.layer_all_num);
-    for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
-        layout.layers_to_kv_buffer_ptrs_by_group[layer_id].resize(group_count);
-        layout.layers_to_scale_buffer_ptrs_by_group[layer_id].resize(group_count);
-    }
-
-    for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
-        if (layer_id >= layer_group_ids.size() || layer_group_ids[layer_id].size() != 1) {
-            continue;
-        }
-        const int gid = layer_group_ids[layer_id][0];
-        RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()),
-                                "invalid single-tag group id %d for layer %zu",
-                                gid,
-                                layer_id);
-        const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
-        const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
-        auto       it            = layer_tensors.find(static_cast<int>(layer_id));
-        if (it != layer_tensors.end()) {
-            layout.layers_to_kv_buffer_ptrs[layer_id] = it->second;
-        }
-        auto scale_it = scale_tensors.find(static_cast<int>(layer_id));
-        if (scale_it != scale_tensors.end()) {
-            layout.layers_to_scale_buffer_ptrs[layer_id] = scale_it->second;
-        }
-    }
-
-    for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
-        const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
+    GroupedCacheLayerLayout::GroupLayouts groups;
+    for (size_t gid = 0; gid < kv_cache_groups_.size(); ++gid) {
+        std::vector<BlockBufferPtrInfo> layers(topology->layers().size());
+        const auto                      layer_tensors = kv_cache_groups_[gid]->allLayerCacheBase();
+        const auto                      scale_tensors = kv_cache_groups_[gid]->allLayerScaleCacheBase();
         for (const auto& [layer_id, tensor] : layer_tensors) {
-            RTP_LLM_CHECK_WITH_INFO(
-                layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layers_to_kv_buffer_ptrs_by_group.size(),
-                "layer_id %d out of by-group kv layout range %zu",
-                layer_id,
-                layout.layers_to_kv_buffer_ptrs_by_group.size());
-            layout.layers_to_kv_buffer_ptrs_by_group[static_cast<size_t>(layer_id)][static_cast<size_t>(gid)] = tensor;
+            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
+                                    "layer_id %d out of group kv layout range %zu",
+                                    layer_id,
+                                    layers.size());
+            layers[static_cast<size_t>(layer_id)].kv_addr = tensor;
         }
         for (const auto& [layer_id, tensor] : scale_tensors) {
-            RTP_LLM_CHECK_WITH_INFO(
-                layer_id >= 0 && static_cast<size_t>(layer_id) < layout.layers_to_scale_buffer_ptrs_by_group.size(),
-                "layer_id %d out of by-group scale layout range %zu",
-                layer_id,
-                layout.layers_to_scale_buffer_ptrs_by_group.size());
-            layout.layers_to_scale_buffer_ptrs_by_group[static_cast<size_t>(layer_id)][static_cast<size_t>(gid)] =
-                tensor;
+            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
+                                    "layer_id %d out of group scale layout range %zu",
+                                    layer_id,
+                                    layers.size());
+            layers[static_cast<size_t>(layer_id)].kv_scale_addr = tensor;
         }
+        groups.emplace(topology->groupBySlot(gid).tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout::fromFlat(layout);
+    return GroupedCacheLayerLayout(topology, std::move(groups));
 }
 
 BlockAddrInfo HybridPoolKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
@@ -289,19 +245,46 @@ std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(int laye
 }
 
 BlockAddrInfo HybridPoolKVCacheAllocator::convertIndexToAddr(int layer_id, int group_id, int block_id) const {
-    const int gid = validateGroupIdForLayer(layer_id, group_id);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
+    return convertIndexToAddrByTag(
+        layer_id, config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag, block_id);
 }
 
 std::vector<BlockInfo>
 HybridPoolKVCacheAllocator::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
-    const int gid = validateGroupIdForLayer(layer_id, group_id);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
+    return convertIndexToBufferByTag(
+        layer_id, config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag, block_id);
 }
 
 std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(
     int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
-    const int gid = validateGroupIdForLayer(layer_id, group_id);
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid cache topology slot=%d", group_id);
+    return convertIndexToBufferByTag(layer_id,
+                                     config_.topology().groupBySlot(static_cast<size_t>(group_id)).tag,
+                                     block_id,
+                                     partition_count,
+                                     partition_id);
+}
+
+BlockAddrInfo
+HybridPoolKVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
+    const auto gid = static_cast<int>(config_.topology().slotForTag(tag));
+    validateGroupIdForLayer(layer_id, gid);
+    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
+}
+
+std::vector<BlockInfo>
+HybridPoolKVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
+    const auto gid = static_cast<int>(config_.topology().slotForTag(tag));
+    validateGroupIdForLayer(layer_id, gid);
+    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
+}
+
+std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBufferByTag(
+    int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
+    const auto gid = static_cast<int>(config_.topology().slotForTag(tag));
+    validateGroupIdForLayer(layer_id, gid);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
 }

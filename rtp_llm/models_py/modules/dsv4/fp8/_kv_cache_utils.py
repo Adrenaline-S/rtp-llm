@@ -48,10 +48,10 @@ def _tagged_block_size(kv_cache: Any, attr: str, tag: str) -> Optional[int]:
     if len(group_tags) != len(group_sizes):
         return None
     try:
-        group_slot = [str(value) for value in group_tags].index(str(tag))
+        group_id = [str(value) for value in group_tags].index(str(tag))
     except ValueError:
         return None
-    return _positive_int(group_sizes[group_slot])
+    return _positive_int(group_sizes[group_id])
 
 
 def require_pool_tokens_per_block(

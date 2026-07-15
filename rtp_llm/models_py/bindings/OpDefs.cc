@@ -30,6 +30,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
+        .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
     pybind11::class_<KVCache>(m, "KVCache")
@@ -76,6 +77,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int, const std::string&)>(&KVCache::getLayerCache),
              "Return a LayerKVCache for the given layer and tag")
+        .def("get_layer_cache_by_group",
+             &KVCache::getLayerCacheByGroup,
+             "Compatibility accessor using a CacheTopology slot")
         .def("get_layer_caches",
              &KVCache::getLayerCaches,
              "Return all LayerKVCache objects for every group the layer owns");

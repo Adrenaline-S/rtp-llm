@@ -12,11 +12,11 @@ class LinearKVCacheGroup: public KVCacheGroup {
 public:
     LinearKVCacheGroup(CacheGroup                          cache_group,
                        BlockPoolPtr                        block_pool,
-                       int                                 group_slot,
+                       int                                 group_id,
                        int                                 linear_step      = 0,
                        SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_slot, shared_cache, metrics_reporter),
+        KVCacheGroup(std::move(cache_group), std::move(block_pool), group_id, shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 
     // Transition-only overload.
