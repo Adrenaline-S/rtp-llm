@@ -158,9 +158,11 @@ void CacheTopology::buildSnapshots() const {
     auto snapshots = std::make_shared<SnapshotCache>();
     snapshots->group_tags.reserve(groups_.size());
     snapshots->group_types.reserve(groups_.size());
+    snapshots->group_spec_types.reserve(groups_.size());
     for (const auto& group : groups_) {
         snapshots->group_tags.push_back(group.tag);
         snapshots->group_types.push_back(group.policy.group_type);
+        snapshots->group_spec_types.push_back(group.spec->type);
     }
 
     snapshots->layer_group_ids.reserve(layers_.size());
@@ -188,6 +190,11 @@ const std::vector<std::string>& CacheTopology::groupTagsSnapshot() const {
 const std::vector<CacheGroupType>& CacheTopology::groupTypesSnapshot() const {
     std::call_once(snapshot_once_, [this]() { buildSnapshots(); });
     return snapshots_->group_types;
+}
+
+const std::vector<KVCacheSpecType>& CacheTopology::groupSpecTypesSnapshot() const {
+    std::call_once(snapshot_once_, [this]() { buildSnapshots(); });
+    return snapshots_->group_spec_types;
 }
 
 const std::vector<std::vector<int>>& CacheTopology::layerGroupIdsSnapshot() const {

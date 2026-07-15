@@ -25,12 +25,39 @@ bool shouldAllocateBlock(
 
 }  // namespace
 
+bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
+    return policy().validate_tail_blocks;
+}
+
 bool SWAKVCacheGroup::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
     return enable_reuse_cache && policy().enable_prefix_reuse;
 }
 
 int SWAKVCacheGroup::activeTailBlockCount() const {
     return static_cast<int>(std::max(1u, policy().active_tail_blocks));
+}
+
+void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
+    if (!shouldCheckSWATailBlockIds()) {
+        return;
+    }
+
+    const auto& blocks = block_ids.blocks();
+    if (blocks.empty()) {
+        return;
+    }
+
+    const size_t block_num = blocks.size();
+    RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(blocks[block_num - 1]),
+                            "%s invalid SWA block ids: tail block is NULL, block_num=%zu",
+                            caller,
+                            block_num);
+    if (activeTailBlockCount() >= 2 && block_num >= 2) {
+        RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(blocks[block_num - 2]),
+                                "%s invalid SWA block ids: tail-1 block is NULL, block_num=%zu",
+                                caller,
+                                block_num);
+    }
 }
 
 void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
@@ -93,6 +120,7 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
     const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (new_blocks_len == 0) {
+        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
         return true;
     }
 
@@ -143,12 +171,14 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
                             allocated_idx,
                             allocated_blocks.size());
     block_ids.add(new_ids);
+    checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
     return true;
 }
 
 void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
+        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
         return;
     }
     const int  step                    = std::max(1, linear_step_);
@@ -172,6 +202,7 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         block_pool_->requestFree(blocks_to_free);
         block_ids.remove(pos_to_remove);
     }
+    checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
 }
 
 void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {

@@ -45,6 +45,8 @@ private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
     int  activeTailBlockCount() const;
     bool effectiveReuseCacheForAllocation(bool enable_reuse_cache) const;
+    bool shouldCheckSWATailBlockIds() const;
+    void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
 
     int linear_step_ = 0;
 };

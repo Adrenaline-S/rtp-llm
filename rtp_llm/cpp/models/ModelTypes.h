@@ -49,6 +49,7 @@ struct GptModelInitParams {
     size_t                                       tokens_per_block        = 0;
     size_t                                       kernel_tokens_per_block = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
+    int64_t                                      hc_mult = 1;
 };
 
 enum GptModelInputIndex : size_t {
@@ -58,6 +59,7 @@ enum GptModelInputIndex : size_t {
     prefixLengths,
     maxKernelBlocksPerBatch,
     maxBlocksPerBatch,
+    cacheKeysWidth,
     kvCacheGroupNum,
     kvCacheLayerToGroupLen,
     kvCacheGroupTypesLen,
@@ -73,6 +75,7 @@ enum GptModelInputIndex : size_t {
     mmHasExtraInput,    // number of extra-input tensors (model-specific, e.g. deepstack)
     mmExtraInputDtype,  // dtype of extra-input elements
     needAllLogits,
+    needAllHiddenStates,
     mtpHiddenStates,
     mtpHiddenStatesDtype,
     skipRun,
@@ -123,6 +126,12 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual torch::Tensor   getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
+    virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

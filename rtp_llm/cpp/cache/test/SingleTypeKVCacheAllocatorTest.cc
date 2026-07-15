@@ -555,6 +555,32 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
     EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types[0], HybridAttentionType::SLIDING_WINDOW);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
+    auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.enable_hybrid_attention           = true;
+    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    config.hybrid_attention_config.hybrid_attention_types            = {};
+    auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
+    second_desc.tag                                                  = "layer1_state";
+    config.kv_cache_spec_descs[1].push_back(second_desc);
+
+    const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
+
+    ASSERT_EQ(single_layer.num_layers, 1);
+    ASSERT_EQ(single_layer.kv_cache_spec_descs.size(), 1u);
+    ASSERT_EQ(single_layer.kv_cache_spec_descs[0].size(), 2u);
+    EXPECT_EQ(single_layer.kv_cache_spec_descs[0][1].tag, "layer1_state");
+    EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigRejectsLegacyHybridWithoutAttentionTypes) {
+    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {};
+
+    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/0), std::runtime_error);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;

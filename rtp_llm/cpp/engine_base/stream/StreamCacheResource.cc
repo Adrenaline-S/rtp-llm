@@ -631,10 +631,20 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * seqSizePerBlock();
-    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * seqSizePerBlock();
-    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * seqSizePerBlock();
-    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * seqSizePerBlock();
+    const int block_tokens     = reuseBlockTokens();
+    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
+    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
+    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
+    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
+    RTP_LLM_LOG_DEBUG("CACHE_REUSE_BLOCK_CONVERSION stream_id=%ld block_tokens=%d total_blocks=%zu device_blocks=%zu "
+                      "memory_blocks=%zu remote_blocks=%zu total_tokens=%d",
+                      stream_->streamId(),
+                      block_tokens,
+                      read_context->resource()->reuseBlockNum(),
+                      read_context->resource()->deviceReuseBlockNum(),
+                      read_context->resource()->memoryReuseBlockNum(),
+                      read_context->resource()->remoteReuseBlockNum(),
+                      total_reuse_len);
     if (total_reuse_len > 0) {
         stream_->setInitialReuseLength(total_reuse_len);
         stream_->setReuseLength(total_reuse_len);

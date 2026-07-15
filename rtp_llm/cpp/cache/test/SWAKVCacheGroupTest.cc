@@ -277,6 +277,15 @@ TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), free_after_first);
 }
 
+TEST_F(SWAKVCacheGroupTest, Malloc_SkipsHCAStateNullTailCheck) {
+    auto     spec  = makeDsv4StateSpec("hca_state", 4);
+    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 5, 0, shared_cache_.get(), nullptr, makePolicy(true));
+    BlockIds block_ids(1);
+    block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+
+    EXPECT_NO_THROW((void)group.malloc(block_ids, 12));
+}
+
 TEST_F(SWAKVCacheGroupTest, Malloc_HCAStateReuseEnabledAllocatesTailOnly) {
     auto spec = makeDsv4StateSpec("hca_state", 4);
     auto group =
@@ -307,6 +316,24 @@ TEST_F(SWAKVCacheGroupTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) {
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[8]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[9]));
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 4);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_ChecksSWAKVNullTailByDefault) {
+    auto     spec  = makeDsv4StateSpec("swa_kv", 4);
+    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 6, 0, shared_cache_.get(), nullptr, makePolicy());
+    BlockIds block_ids(1);
+    block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+
+    EXPECT_THROW((void)group.malloc(block_ids, 12), std::exception);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_ChecksNonSkipStateNullTailByDefault) {
+    auto     spec  = makeDsv4StateSpec("csa_state", 4);
+    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 4, 0, shared_cache_.get(), nullptr, makePolicy());
+    BlockIds block_ids(1);
+    block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+
+    EXPECT_THROW((void)group.malloc(block_ids, 12), std::exception);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_WithReserveStep) {
