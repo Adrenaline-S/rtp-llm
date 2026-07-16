@@ -30,12 +30,12 @@ public:
         seq_size_per_block_(graph_params.tokens_per_block),
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
+        hc_mult_(static_cast<int>(graph_params.hc_mult)),
         sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
-        kv_cache_group_num_(graph_params.kv_cache_group_num),
+        kv_cache_group_tags_(graph_params.kv_cache_group_tags),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
@@ -99,6 +99,9 @@ private:
     bool isMtpDraftPrefillCudaGraph() const {
         return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
     }
+    bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
+        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+    }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
     // Common memory hold creation logic
@@ -133,6 +136,7 @@ private:
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
+    int                     hc_mult_{1};
     int                     sp_steps_{0};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
@@ -150,9 +154,8 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<int32_t> kv_cache_layer_to_group_;
-    int32_t              kv_cache_group_num_     = 0;
-    int                  position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    std::vector<std::string> kv_cache_group_tags_;
+    int                      position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
