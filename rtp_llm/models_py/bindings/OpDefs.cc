@@ -54,7 +54,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
     pybind11::class_<KVCache>(m, "KVCache")
-        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology slot order")
+        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology group id order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
@@ -62,9 +62,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int, const std::string&) const>(&KVCache::getLayerCache),
              "Return a LayerKVCache for the given layer and tag")
-        .def("get_layer_cache_by_group",
-             &KVCache::getLayerCacheByGroup,
-             "Compatibility accessor using a CacheTopology slot")
         .def("get_layer_cache_groups",
              &KVCache::getLayerCacheGroups,
              "Return every valid LayerKVCache group owned by the layer")

@@ -93,7 +93,6 @@ requirement([
     "torch",
     "torchvision",
     "triton",
-    "triton-kernels",
     "numpy",
     "safetensors",
     "einops",
@@ -518,7 +517,6 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
-            ":triton-kernels",
         ],
         "//conditions:default": [
             ":models",

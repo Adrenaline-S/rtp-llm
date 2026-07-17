@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 namespace rtp_llm {
@@ -24,6 +25,22 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             /*partition_id=*/0,
             /*server_context=*/nullptr,
             prefill_cp_size};
+}
+
+GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->tag                = tag;
+    spec->seq_size_per_block = 8;
+
+    GroupBase group;
+    group.tag                       = std::move(tag);
+    group.spec                      = std::move(spec);
+    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids                 = std::move(layer_ids);
+    group.block_num                 = 8;
+    group.seq_size_per_block        = 8;
+    group.kernel_seq_size_per_block = 8;
+    return group;
 }
 
 }  // namespace
@@ -71,6 +88,45 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
 }
 
+TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
+    auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
+                                                            {{0, {"linear"}}, {1, {"full"}}});
+    BroadcastLoadRequestPB request;
+    auto*                  full = request.add_tagged_group_block_ids();
+    full->set_tag("full");
+    full->add_block_ids(10);
+    auto* linear = request.add_tagged_group_block_ids();
+    linear->set_tag("linear");
+    linear->add_block_ids(20);
+
+    const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
+    EXPECT_EQ(blocks[topology->groupIdForTag("full")]->blocks(), (BlockIndicesType{10}));
+    EXPECT_EQ(blocks[topology->groupIdForTag("linear")]->blocks(), (BlockIndicesType{20}));
+
+    auto reordered = CacheTopology::create({makeRpcGroup("full", {1}), makeRpcGroup("linear", {0})},
+                                           {{0, {"linear"}}, {1, {"full"}}});
+    EXPECT_NE(topology->groupIdForTag("full"), reordered->groupIdForTag("full"));
+    EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, topology->group("full").tag),
+              DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered->group("full").tag));
+}
+
+TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {
+    auto                   topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
+    BroadcastLoadRequestPB request;
+    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, *topology));
+}
+
+TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
+    auto topology =
+        CacheTopology::create({makeRpcGroup("full", {0}), makeRpcGroup("linear", {0})}, {{0, {"full", "linear"}}});
+    BroadcastLoadRequestPB missing_tag;
+    auto*                  row = missing_tag.add_tagged_group_block_ids();
+    row->set_tag("full");
+    row->add_block_ids(1);
+
+    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology));
+}
+
 TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
     PrefillRpcServer server;
     GenerateInputPB  input;
@@ -101,6 +157,25 @@ TEST(PrefillRpcServerTest, PDSepEligibilityRejectsUnsupportedGenerationModes) {
     auto explicitly_disabled = input;
     explicitly_disabled.mutable_generate_config()->set_can_use_pd_separation(false);
     EXPECT_FALSE(server.canUsePDSep(explicitly_disabled));
+
+    auto expect_aux_output_rejected = [&](auto setter) {
+        auto with_aux_output = input;
+        setter(*with_aux_output.mutable_generate_config());
+        EXPECT_FALSE(server.canUsePDSep(with_aux_output));
+    };
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_calculate_loss(1); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_hidden_states(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_hidden_states(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_logits(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_probs(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_all_probs_mode(2); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_softmax_probs(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_cum_log_probs(true); });
+    expect_aux_output_rejected([](GenerateConfigPB& config) { config.set_return_prompt_logits(true); });
+
+    auto target_logprob_without_prompt_logits = input;
+    target_logprob_without_prompt_logits.mutable_generate_config()->set_return_target_logprob(true);
+    EXPECT_TRUE(server.canUsePDSep(target_logprob_without_prompt_logits));
 }
 
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {

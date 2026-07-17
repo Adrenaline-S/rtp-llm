@@ -186,9 +186,6 @@ class KVCache:
     def get_layer_cache(self, arg0: int, arg1: str) -> LayerKVCache:
         """Return a LayerKVCache for the given layer and tag."""
         ...
-    def get_layer_cache_by_group(self, arg0: int, arg1: int) -> LayerKVCache:
-        """Return a LayerKVCache for the given layer and group id."""
-        ...
     def get_layer_cache_groups(self, arg0: int) -> list[LayerKVCache]:
         """Return all LayerKVCache objects for every group the layer owns."""
         ...

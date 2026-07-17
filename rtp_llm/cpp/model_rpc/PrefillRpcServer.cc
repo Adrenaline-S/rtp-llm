@@ -163,8 +163,12 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 
 bool PrefillRpcServer::canUsePDSep(const GenerateInputPB& request) const {
     const auto& config = request.generate_config();
+    const bool  has_prefill_only_output =
+        config.calculate_loss() != 0 || config.return_hidden_states() || config.return_all_hidden_states()
+        || config.return_logits() || config.return_all_probs() || config.return_all_probs_mode() > 1
+        || config.return_softmax_probs() || config.return_cum_log_probs() || config.return_prompt_logits();
     return config.max_new_tokens() > 1 && config.num_beams() <= 1 && config.variable_num_beams().size() == 0
-           && config.num_return_sequences() <= 1 && config.can_use_pd_separation();
+           && config.num_return_sequences() <= 1 && config.can_use_pd_separation() && !has_prefill_only_output;
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {

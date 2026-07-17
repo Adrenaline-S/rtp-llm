@@ -116,7 +116,7 @@ protected:
     BlockPoolPtr                 block_pool_;
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
-    int                          group_id_         = 0;
+    int                          group_id_         = -1;
 
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;

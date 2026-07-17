@@ -66,21 +66,22 @@ public:
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;
 
-    virtual GroupedCacheLayerLayout allLayerCacheBase() const                                     = 0;
-    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                  const std::vector<int>&        block_src_batch,
-                                                  bool                           copy_last_block,
-                                                  std::vector<BlockIdPair>&      block_update_mapping) = 0;
-    virtual int                     seqSizePerBlock() const                                       = 0;
+    virtual GroupedCacheLayerLayout allLayerCacheBase() const                                           = 0;
+    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                                                  const std::vector<int>&         block_src_batch,
+                                                  bool                            copy_last_block,
+                                                  std::vector<TaggedBlockIdPair>& block_update_mapping) = 0;
+    virtual int                     seqSizePerBlock() const                                             = 0;
     virtual int                     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                           int                            seq_len,
-                                                          int                            reserve_step) const                 = 0;
+                                                          int                            reserve_step) const                       = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
+    virtual void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
     BlockPoolPtr getBlockPool() const {
         return block_pool_;

@@ -63,14 +63,8 @@ public:
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
-        const auto layer_caches = getLayerCacheGroups(layer_id);
-        if (layer_caches.size() != 1) {
-            throw std::runtime_error("Layer " + std::to_string(layer_id) + " owns "
-                                     + std::to_string(layer_caches.size())
-                                     + " active KV cache groups; use get_layer_cache(layer, tag) "
-                                       "or get_layer_cache_groups");
-        }
-        return layer_caches.front();
+        const auto& group = grouped_layout_.topology().soleGroupForLayer(layer_id);
+        return getLayerCache(layer_id, group.tag);
     }
 
     LayerKVCache getLayerCache(int layer_id, const std::string& tag) const {
@@ -82,14 +76,6 @@ public:
             throw std::runtime_error("Layer " + std::to_string(layer_id) + " has no KV cache tensor for tag " + tag);
         }
         return makeLayerCache(layer_id, group, group_layout.at(layer));
-    }
-
-    LayerKVCache getLayerCacheByGroup(int layer_id, int group_id) const {
-        if (group_id < 0) {
-            throw std::runtime_error("Invalid KV cache group id: " + std::to_string(group_id));
-        }
-        const auto& group = grouped_layout_.topology().groupBySlot(static_cast<size_t>(group_id));
-        return getLayerCache(layer_id, group.tag);
     }
 
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
@@ -175,7 +161,7 @@ private:
                                 layer_id,
                                 group.tag.c_str());
 
-        const int    group_id = static_cast<int>(grouped_layout_.topology().slotForTag(group.tag));
+        const int    group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(group.tag));
         LayerKVCache result(buffers.kv_addr,
                             static_cast<int>(group.seq_size_per_block),
                             layer_id,
@@ -276,8 +262,13 @@ struct PyCacheStoreInputs {
     std::map<std::string, rtp_llm::CacheGroupType>   kv_cache_group_types;
     std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
     std::map<std::string, size_t>                    tokens_per_block_by_tag;
+    // Physical address step and logical transfer length are different for a
+    // shared pool: blocks are max-group-stride apart, while each tag transfers
+    // only the bytes described by its own cache group.
     std::map<std::string, size_t>                    kv_block_stride_bytes_by_tag;
     std::map<std::string, size_t>                    kv_scale_stride_bytes_by_tag;
+    std::map<std::string, size_t>                    kv_block_transfer_bytes_by_tag;
+    std::map<std::string, size_t>                    kv_scale_transfer_bytes_by_tag;
     std::vector<std::string>                         cache_keys;  // [context_batch_size]
     size_t                                           tokens_per_block = 0;
     // Physical KV-manager block strides, supplied by CacheConfig rather than inferred from tensor views.

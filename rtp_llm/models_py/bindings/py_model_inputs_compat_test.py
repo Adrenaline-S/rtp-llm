@@ -82,7 +82,6 @@ class PyModelInputsCompatTest(unittest.TestCase):
             "group_tags",
             "layer_count",
             "get_layer_cache",
-            "get_layer_cache_by_group",
             "get_layer_cache_groups",
             "get_seq_size_per_block",
             "get_kernel_seq_size_per_block",
