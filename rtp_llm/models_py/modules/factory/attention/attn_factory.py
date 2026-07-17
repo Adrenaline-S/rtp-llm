@@ -16,6 +16,9 @@ from rtp_llm.ops import (
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
+AttentionImpl = Union[FMHAImplBase, MlaImplBase]
+AttentionImplFactory = Callable[..., AttentionImpl]
+
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
@@ -44,7 +47,8 @@ def get_mla_impl(
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
+            and attn_inputs.cu_kv_seqlens_device.max().item()
+            <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )
@@ -181,13 +185,7 @@ class AttnImplFactory(object):
     """Factory class for creating FMHA implementations based on attention_type."""
 
     # FMHA implementation registry - maps attention_type to impl method
-    FMHA_IMPL_REGISTRY: Dict[
-        str,
-        Callable[
-            [AttentionConfigs, ModelWeights, PyAttentionInputs, Optional[FMHAConfig]],
-            Union[FMHAImplBase, MlaImplBase],
-        ],
-    ] = {
+    FMHA_IMPL_REGISTRY: Dict[str, AttentionImplFactory] = {
         "mha": get_fmha_impl,
         "mla": get_mla_impl,
     }
@@ -201,7 +199,7 @@ class AttnImplFactory(object):
         attn_inputs: PyAttentionInputs,
         fmha_config: Optional[FMHAConfig] = None,
         is_cuda_graph: bool = False,
-    ) -> FMHAImplBase:
+    ) -> AttentionImpl:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
@@ -223,7 +221,7 @@ class AttnImplFactory(object):
         return instance
 
     @classmethod
-    def get_fmha_impl_method(cls, attention_type: str) -> str:
+    def get_fmha_impl_method(cls, attention_type: str) -> AttentionImplFactory:
         """
         Get the appropriate FMHA implementation method based on attention_type.
 

@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
@@ -269,14 +268,33 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const auto kv_scale_stride_bytes = scale_stride_it != param.kv_scale_stride_bytes_by_tag.end() ?
                                            scale_stride_it->second :
                                            param.kv_scale_stride_bytes;
+    const auto kv_transfer_it        = param.kv_block_transfer_bytes_by_tag.find(param.tag);
+    const auto kv_block_transfer_bytes =
+        kv_transfer_it != param.kv_block_transfer_bytes_by_tag.end() ? kv_transfer_it->second : kv_block_stride_bytes;
+    const auto scale_transfer_it       = param.kv_scale_transfer_bytes_by_tag.find(param.tag);
+    const auto kv_scale_transfer_bytes = scale_transfer_it != param.kv_scale_transfer_bytes_by_tag.end() ?
+                                             scale_transfer_it->second :
+                                             kv_scale_stride_bytes;
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", param.tag.c_str());
     RTP_LLM_CHECK_WITH_INFO(
         kv_block_stride_bytes > 0, "cache-store tag=%s has zero kv block stride", param.tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(
+        kv_block_transfer_bytes > 0, "cache-store tag=%s has zero kv transfer bytes", param.tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(kv_block_transfer_bytes <= kv_block_stride_bytes,
+                            "cache-store tag=%s transfer bytes=%zu exceed physical stride=%zu",
+                            param.tag.c_str(),
+                            kv_block_transfer_bytes,
+                            kv_block_stride_bytes);
+    RTP_LLM_CHECK_WITH_INFO(kv_scale_transfer_bytes <= kv_scale_stride_bytes,
+                            "cache-store tag=%s scale transfer bytes=%zu exceed physical stride=%zu",
+                            param.tag.c_str(),
+                            kv_scale_transfer_bytes,
+                            kv_scale_stride_bytes);
     auto       kv_cache_data  = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
     auto       kv_cache_owner = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
     const bool kv_gpu_mem     = kv_cache.kv_cache_buffer.is_cuda();
-    const bool has_kv_scale =
-        kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0 && kv_scale_stride_bytes > 0;
+    const bool has_kv_scale   = kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0
+                              && kv_scale_stride_bytes > 0 && kv_scale_transfer_bytes > 0;
     uint64_t*                      kv_scale_data = nullptr;
     std::shared_ptr<torch::Tensor> kv_scale_owner;
     if (has_kv_scale) {
@@ -353,7 +371,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                                  param.tag);
             auto        block_id =
                 *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + offset_index);
-            if (isNullBlockIdx(block_id)) {
+            // Host block-offset tables use -1 as the null block sentinel.
+            if (block_id == -1) {
                 RTP_LLM_LOG_DEBUG(
                     "PD_CACHE_KEY_WRITE_SKIP_NULL key=kv_%s request_id=%ld tag=%s layer=%d cp_rank=%d cp_size=%d "
                     "key_index=%d offset_index=%d block_id=%d",
@@ -366,19 +385,6 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                     key_index,
                     offset_index,
                     block_id);
-                if (param.model_id > 0) {
-                    RTP_LLM_LOG_INFO("PD_MTP_CACHE_KEY_WRITE_SKIP_NULL key=kv_%s request_id=%ld tag=%s layer=%d "
-                                     "cp_rank=%d cp_size=%d key_index=%d offset_index=%d block_id=%d",
-                                     cache_key.c_str(),
-                                     request_id,
-                                     param.tag.c_str(),
-                                     param.layer_id,
-                                     param.cp_rank,
-                                     param.cp_size,
-                                     key_index,
-                                     offset_index,
-                                     block_id);
-                }
                 return;
             }
             const bool has_policy_cp_slice = param.cp_size > 1 && group_policy.cp_slice != CpBlockSliceMode::NONE;
@@ -399,7 +405,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
             RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_WRITE_BLOCK key=kv_%s request_id=%ld tag=%s layer=%d cp_rank=%d "
-                              "cp_size=%d cp_slice=%d key_index=%d offset_index=%d block_id=%d addr=%p len=%zu",
+                              "cp_size=%d cp_slice=%d key_index=%d offset_index=%d block_id=%d addr=%p "
+                              "physical_stride=%zu len=%zu",
                               cache_key.c_str(),
                               request_id,
                               param.tag.c_str(),
@@ -411,29 +418,12 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                               offset_index,
                               block_id,
                               kv_addr,
-                              kv_block_stride_bytes);
-            if (param.model_id > 0) {
-                RTP_LLM_LOG_INFO("PD_MTP_CACHE_KEY_WRITE_BLOCK key=kv_%s request_id=%ld tag=%s layer=%d "
-                                 "cp_rank=%d cp_size=%d cp_slice=%d key_index=%d offset_index=%d "
-                                 "block_id=%d addr=%p len=%zu",
-                                 cache_key.c_str(),
-                                 request_id,
-                                 param.tag.c_str(),
-                                 param.layer_id,
-                                 param.cp_rank,
-                                 param.cp_size,
-                                 static_cast<int>(group_policy.cp_slice),
-                                 key_index,
-                                 offset_index,
-                                 block_id,
-                                 kv_addr,
-                                 kv_block_stride_bytes);
-            }
-
+                              kv_block_stride_bytes,
+                              kv_block_transfer_bytes);
             constexpr size_t kDsv4SwaFp8EntryBytes  = 584;
             constexpr size_t kDsv4SwaTokenDataBytes = 576;
             const bool       is_swa_cp_slice        = !has_policy_cp_slice && param.tag == "swa_kv" && param.cp_size > 1
-                                         && kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
+                                         && kv_block_transfer_bytes % kDsv4SwaFp8EntryBytes == 0;
             // Some layouts treat the block as a single opaque KV chunk. Only
             // the legacy MHA path splits k/v. SWA_KV is opaque logically, but
             // its FP8 physical block is striped as DATA then SCALES, so CP
@@ -441,7 +431,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             if (is_swa_cp_slice) {
                 constexpr size_t      kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
                 constexpr size_t      kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
-                const size_t          local_entries       = kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
+                const size_t          local_entries       = kv_block_transfer_bytes / kDsv4SwaFp8EntryBytes;
                 const size_t          data_bytes          = local_entries * kSwaTokenDataBytes;
                 const size_t          scale_bytes         = local_entries * kSwaTokenScaleBytes;
                 void*                 scale_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
@@ -449,10 +439,11 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, data_bytes, kv_gpu_mem, true);
                 request_blocks->addBlock("kv_scale_" + cache_key, scale_block_addr, scale_bytes, kv_gpu_mem, true);
             } else if (use_opaque_key_prefix) {
-                request_blocks->addBlock("kv_" + cache_key, kv_block_addr, kv_block_stride_bytes, kv_gpu_mem, true);
+                request_blocks->addBlock("kv_" + cache_key, kv_block_addr, kv_block_transfer_bytes, kv_gpu_mem, true);
             } else {
-                RTP_LLM_CHECK_WITH_INFO(kv_block_stride_bytes % 2 == 0, "KV stride must split evenly into K/V");
-                const uint32_t        kv_half = static_cast<uint32_t>(kv_block_stride_bytes / 2);
+                RTP_LLM_CHECK_WITH_INFO(kv_block_transfer_bytes % 2 == 0,
+                                        "KV transfer bytes must split evenly into K/V");
+                const uint32_t        kv_half = static_cast<uint32_t>(kv_block_transfer_bytes / 2);
                 void*                 k_addr  = kv_addr;
                 void*                 v_addr  = (void*)((int8_t*)kv_addr + kv_half);
                 std::shared_ptr<void> k_block_addr(kv_cache_owner, k_addr);
@@ -467,10 +458,11 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 std::shared_ptr<void> kv_scale_block_addr(kv_scale_owner, kv_scale_addr);
                 if (use_opaque_key_prefix) {
                     request_blocks->addBlock(
-                        "kv_scale_" + cache_key, kv_scale_block_addr, kv_scale_stride_bytes, kv_scale_gpu_mem, true);
+                        "kv_scale_" + cache_key, kv_scale_block_addr, kv_scale_transfer_bytes, kv_scale_gpu_mem, true);
                 } else {
-                    RTP_LLM_CHECK_WITH_INFO(kv_scale_stride_bytes % 2 == 0, "scale stride must split evenly into K/V");
-                    const uint32_t        sc_half = static_cast<uint32_t>(kv_scale_stride_bytes / 2);
+                    RTP_LLM_CHECK_WITH_INFO(kv_scale_transfer_bytes % 2 == 0,
+                                            "scale transfer bytes must split evenly into K/V");
+                    const uint32_t        sc_half = static_cast<uint32_t>(kv_scale_transfer_bytes / 2);
                     void*                 k_sc    = kv_scale_addr;
                     void*                 v_sc    = (void*)((int8_t*)kv_scale_addr + sc_half);
                     std::shared_ptr<void> k_scale_block_addr(kv_scale_owner, k_sc);
