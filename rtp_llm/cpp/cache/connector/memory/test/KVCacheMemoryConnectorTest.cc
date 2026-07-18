@@ -558,6 +558,13 @@ TEST_F(KVCacheMemoryConnectorTest, DecodeTp2MetricsUsePrefillCp4BlockWidth) {
     EXPECT_EQ(connector.cacheKeyTokensPerBlockForMetrics(), static_cast<int>(cache_config_.seq_size_per_block) * 4);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, StagedCopyScratchCacheIsBoundedPerDevice) {
+    for (int i = 0; i < 3; ++i) {
+        connector_->recycleStagedCopyScratchForDevice(0, std::make_unique<StagedMemoryCopyScratch>());
+    }
+    ASSERT_EQ(connector_->staged_copy_scratch_by_device_.at(0).size(), 2u);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     // 构造空的 worker 地址，BroadcastManager::init() 会失败；业务代码使用 RTP_LLM_CHECK，
     // 因此这里期望抛出 std::runtime_error。
@@ -758,6 +765,24 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WhenPrefixMatched
     EXPECT_TRUE(match_ctx->done());
     EXPECT_TRUE(match_ctx->success());
     EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, MatchContextCanOutliveConnector) {
+    CacheKeysType                          cache_keys{72501, 72502, 72503};
+    std::vector<std::vector<BlockIdxType>> layer_blocks{{1, 1, 1}, {2, 2, 2}, {3, 3, 3}, {4, 4, 4}};
+    auto resource = makeCacheResource(cache_keys, layer_blocks, /*reuse_len=*/0);
+
+    putItemsToCache({cache_keys[0], cache_keys[1]}, memoryCacheBlockBytes(), /*is_complete_flags=*/{false, true});
+    auto match_context = connector_->asyncMatch(resource, std::make_shared<TestReadMeta>(true));
+    ASSERT_NE(match_context, nullptr);
+
+    std::weak_ptr<KVCacheMemoryConnector> weak_connector = connector_;
+    connector_.reset();
+    EXPECT_TRUE(weak_connector.expired());
+
+    // Releasing the retained read plan must use its captured cache/pool state,
+    // not the already-destroyed connector.
+    match_context.reset();
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_MustEndAtBigKey_WhenSmallKeysAlsoHit) {

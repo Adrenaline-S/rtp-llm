@@ -1,8 +1,10 @@
+#include <algorithm>
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 namespace rtp_llm {
@@ -43,29 +45,83 @@ GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
     return group;
 }
 
+CacheConfig makeCpSlicedRpcConfig(const std::string& tag, int cp_size, CpBlockSliceMode slice_mode) {
+    CacheConfig config;
+    config.seq_size_per_block = 16 / static_cast<size_t>(cp_size);
+    config.layer_num          = 1;
+    config.layer_all_num      = 1;
+
+    GroupBase group;
+    group.tag                        = tag;
+    group.spec                       = test::makeResolvedOpaqueSpec(true, tag, DataType::TYPE_UINT8, 64, 16);
+    group.policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    group.policy.active_tail_blocks  = 3;
+    group.policy.cp_mapping          = CpBlockMappingMode::COMPACT_LAST_RANK;
+    group.policy.cp_slice            = slice_mode;
+    group.layer_ids                  = {0};
+    group.block_num                  = 8;
+    group.seq_size_per_block         = 16;
+    group.kernel_seq_size_per_block  = 16;
+
+    LayerBase layer;
+    layer.layer_id   = 0;
+    layer.group_tags = {tag};
+    config.setTopology({std::move(group)}, {std::move(layer)});
+    return config;
+}
+
 }  // namespace
 
+TEST(ModelRpcProtoTest, CacheRpcFieldNumbersRemainStable) {
+    const auto* broadcast = BroadcastLoadRequestPB::descriptor();
+    EXPECT_EQ(broadcast->FindFieldByName("block_ids")->number(), 5);
+    EXPECT_EQ(broadcast->FindFieldByName("block_num")->number(), 6);
+    EXPECT_EQ(broadcast->FindFieldByName("reuse_block_size")->number(), 7);
+    EXPECT_EQ(broadcast->FindFieldByName("timeout_ms")->number(), 8);
+    EXPECT_EQ(broadcast->FindFieldByName("dp_rank")->number(), 9);
+    EXPECT_EQ(broadcast->FindFieldByName("partition_count")->number(), 10);
+    EXPECT_EQ(broadcast->FindFieldByName("partition_id")->number(), 11);
+    EXPECT_EQ(broadcast->FindFieldByName("group_block_ids")->number(), 12);
+    EXPECT_EQ(broadcast->FindFieldByName("prefill_cp_size")->number(), 13);
+    EXPECT_EQ(broadcast->FindFieldByName("tagged_group_block_ids")->number(), 14);
+    EXPECT_TRUE(broadcast->FindFieldByName("block_ids")->options().deprecated());
+    EXPECT_TRUE(broadcast->FindFieldByName("group_block_ids")->options().deprecated());
+
+    const auto* remote = RemoteOperationRequestPB::descriptor();
+    EXPECT_EQ(remote->FindFieldByName("group_ids")->number(), 3);
+    EXPECT_EQ(remote->FindFieldByName("block_ids")->number(), 4);
+    EXPECT_EQ(remote->FindFieldByName("uris")->number(), 5);
+    EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
+    EXPECT_TRUE(remote->FindFieldByName("group_ids")->options().deprecated());
+}
+
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
-    DecodeRpcServer server;
-    server.resource_.workers = {"decode-0", "decode-1"};
+    for (const int cp_size : {2, 4}) {
+        DecodeRpcServer server;
+        server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string               request_key = "request";
-    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys  = {101, 102};
-    const GroupBlockIds             block_ids_by_group;
-    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2);
+        const std::string               request_key = "request";
+        std::vector<std::string>        peer_addrs;
+        const std::vector<CacheKeyType> cache_keys = {101, 102};
+        const GroupBlockIds             block_ids_by_group;
+        for (int rank = 0; rank < cp_size; ++rank) {
+            peer_addrs.push_back("prefill-" + std::to_string(rank));
+        }
+        const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, cp_size);
 
-    const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
+        const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
-    EXPECT_EQ(request.prefill_cp_size(), 2);
-    EXPECT_EQ(request.partition_count(), 1);
-    EXPECT_EQ(request.partition_id(), 0);
-    ASSERT_EQ(request.peer_addrs_size(), 2);
-    EXPECT_EQ(request.peer_addrs(0), "prefill-0");
-    EXPECT_EQ(request.peer_addrs(1), "prefill-1");
-    ASSERT_EQ(request.cache_keys_size(), 2);
-    EXPECT_EQ(request.cache_keys(0), 101);
-    EXPECT_EQ(request.cache_keys(1), 102);
+        EXPECT_EQ(request.prefill_cp_size(), cp_size);
+        EXPECT_EQ(request.partition_count(), 1);
+        EXPECT_EQ(request.partition_id(), 0);
+        ASSERT_EQ(request.peer_addrs_size(), cp_size);
+        for (int rank = 0; rank < cp_size; ++rank) {
+            EXPECT_EQ(request.peer_addrs(rank), "prefill-" + std::to_string(rank));
+        }
+        ASSERT_EQ(request.cache_keys_size(), 2);
+        EXPECT_EQ(request.cache_keys(0), 101);
+        EXPECT_EQ(request.cache_keys(1), 102);
+    }
 }
 
 TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
@@ -88,6 +144,94 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
 }
 
+TEST(DecodeRpcServerTest, Cp2AndCp4PeerPayloadsReconstructDecodeBlocks) {
+    constexpr size_t block_bytes = 64;
+    constexpr size_t block_count = 3;
+
+    for (const int cp_size : {2, 4}) {
+        for (const auto slice_mode : {CpBlockSliceMode::PAYLOAD_BYTES, CpBlockSliceMode::EQUAL_BYTES}) {
+            auto config = makeCpSlicedRpcConfig(
+                slice_mode == CpBlockSliceMode::PAYLOAD_BYTES ? "state" : "swa", cp_size, slice_mode);
+            std::vector<uint8_t> source(block_count * block_bytes);
+            for (size_t i = 0; i < source.size(); ++i) {
+                source[i] = static_cast<uint8_t>((i * 31 + cp_size + static_cast<int>(slice_mode)) % 251);
+            }
+            std::vector<uint8_t> reconstructed(source.size(), 0);
+
+            const size_t logical_key_count = static_cast<size_t>(cp_size * 2 + 1);
+            for (int peer_idx = 0; peer_idx < cp_size; ++peer_idx) {
+                const auto load_plan = DecodeRpcServer::makeCpPeerLoadPlan(config,
+                                                                           /*gid=*/0,
+                                                                           block_count,
+                                                                           logical_key_count,
+                                                                           /*reuse_block_size=*/0,
+                                                                           /*use_hybrid=*/true,
+                                                                           cp_size,
+                                                                           cp_size,
+                                                                           peer_idx);
+                ASSERT_EQ(load_plan.size(), block_count);
+                for (size_t compact_idx = 0; compact_idx < load_plan.size(); ++compact_idx) {
+                    const auto& plan_entry = load_plan[compact_idx];
+                    EXPECT_EQ(plan_entry.block_pos, compact_idx);
+                    EXPECT_EQ(plan_entry.cache_key_index,
+                              std::min((compact_idx + 1) * static_cast<size_t>(cp_size) - 1,
+                                       logical_key_count - 1));
+
+                    BlockInfo destination;
+                    destination.addr       = reconstructed.data() + plan_entry.block_pos * block_bytes;
+                    destination.size_bytes = block_bytes;
+                    auto peer_destination  = DecodeRpcServer::sliceCpDestinationForPeer(
+                        config, /*gid=*/0, {destination}, cp_size, peer_idx);
+                    ASSERT_EQ(peer_destination.size(), 1u);
+
+                    const size_t offset = static_cast<uint8_t*>(peer_destination[0].addr)
+                                          - static_cast<uint8_t*>(destination.addr);
+                    ASSERT_LE(offset + peer_destination[0].size_bytes, block_bytes);
+                    std::copy_n(source.data() + plan_entry.block_pos * block_bytes + offset,
+                                peer_destination[0].size_bytes,
+                                static_cast<uint8_t*>(peer_destination[0].addr));
+                }
+            }
+            EXPECT_EQ(reconstructed, source) << "cp_size=" << cp_size << " slice=" << static_cast<int>(slice_mode);
+        }
+    }
+}
+
+TEST(DecodeRpcServerTest, Cp2AndCp4FullGroupLoadPlanRoutesPartialTailToOwningPeer) {
+    for (const int cp_size : {2, 4}) {
+        const size_t logical_blocks = static_cast<size_t>(cp_size * 2 + 1);
+        CacheConfig  config;
+        config.seq_size_per_block = 8;
+        config.layer_num          = 1;
+        config.layer_all_num      = 1;
+        LayerBase layer;
+        layer.layer_id   = 0;
+        layer.group_tags = {"full"};
+        config.setTopology({makeRpcGroup("full", {0})}, {std::move(layer)});
+
+        std::vector<int> owners(logical_blocks, -1);
+        for (int peer_idx = 0; peer_idx < cp_size; ++peer_idx) {
+            const auto plan = DecodeRpcServer::makeCpPeerLoadPlan(config,
+                                                                 /*gid=*/0,
+                                                                 logical_blocks,
+                                                                 logical_blocks,
+                                                                 /*reuse_block_size=*/0,
+                                                                 /*use_hybrid=*/false,
+                                                                 cp_size,
+                                                                 cp_size,
+                                                                 peer_idx);
+            for (const auto& entry : plan) {
+                EXPECT_EQ(entry.block_pos, entry.cache_key_index);
+                ASSERT_EQ(owners[entry.block_pos], -1);
+                owners[entry.block_pos] = peer_idx;
+            }
+        }
+        for (size_t block_pos = 0; block_pos < logical_blocks; ++block_pos) {
+            EXPECT_EQ(owners[block_pos], static_cast<int>(block_pos % static_cast<size_t>(cp_size)));
+        }
+    }
+}
+
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
                                                             {{0, {"linear"}}, {1, {"full"}}});
@@ -106,6 +250,9 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     auto reordered = CacheTopology::create({makeRpcGroup("full", {1}), makeRpcGroup("linear", {0})},
                                            {{0, {"linear"}}, {1, {"full"}}});
     EXPECT_NE(topology->groupIdForTag("full"), reordered->groupIdForTag("full"));
+    const auto reordered_blocks = DecodeRpcServer::decodeGroupBlockIds(request, *reordered);
+    EXPECT_EQ(reordered_blocks[reordered->groupIdForTag("full")]->blocks(), (BlockIndicesType{10}));
+    EXPECT_EQ(reordered_blocks[reordered->groupIdForTag("linear")]->blocks(), (BlockIndicesType{20}));
     EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, topology->group("full").tag),
               DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered->group("full").tag));
 }

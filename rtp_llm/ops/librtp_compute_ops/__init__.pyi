@@ -238,8 +238,6 @@ class PyAttentionInputs:
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_block_id: torch.Tensor
     kv_cache_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id_by_group: list[torch.Tensor]
-    kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     @property
     def input_lengths_device(self) -> torch.Tensor: ...
     @property

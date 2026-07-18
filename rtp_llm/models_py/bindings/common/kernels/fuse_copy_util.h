@@ -14,14 +14,13 @@ namespace rtp_llm {
 //     plus 1 + group_count strided copies per launch (one launch per replay).
 //   * PyWrappedModel.cc::forwardMicroBatched is the tightest path: it
 //     accumulates across ALL micro-batches before a single flush. Per
-//     micro-batch it adds ~6 contiguous copies (5 from buildPyAttentionInputs
-//     plus 1 padding_offset) plus `group_count` per-group block-id copies.
-//     With the current planMicroBatches cap of 2 micro-batches and a hybrid
-//     KV-cache group_count of 4 that's (6 + 4) * 2 = 20 contiguous copies.
+//     micro-batch it adds ~8 contiguous copies (5 from buildPyAttentionInputs,
+//     1 padding_offset, and up to 2 whole tagged block tables). With the current
+//     planMicroBatches cap of 2 micro-batches that's 8 * 2 = 16 copies.
 //
-// 64 entries gives ~3x headroom over today's worst case (20 contiguous, 5
+// 64 entries gives 4x headroom over today's worst case (16 contiguous, 5
 // strided) and accommodates ~30 KV-cache groups before hitting the cap. Each
-// FusedStridedCopyParams is 6 * 8 * 64 + 4 = 3076 bytes, well under the 32 KB
+// FusedStridedCopyParams is 8 * 8 * 64 + 4 = 4100 bytes, well under the 32 KB
 // kernel parameter buffer available on Volta and newer GPUs (all currently
 // supported targets).
 //
@@ -67,19 +66,34 @@ struct FusedStridedCopyParams {
     void*       dst[MAX_FUSED_STRIDED_COPIES];
     size_t      num_rows[MAX_FUSED_STRIDED_COPIES];
     size_t      row_bytes[MAX_FUSED_STRIDED_COPIES];
+    size_t      dst_num_rows[MAX_FUSED_STRIDED_COPIES];
+    size_t      dst_row_bytes[MAX_FUSED_STRIDED_COPIES];
     size_t      src_row_stride[MAX_FUSED_STRIDED_COPIES];
     size_t      dst_row_stride[MAX_FUSED_STRIDED_COPIES];
     int         num_copies = 0;
 
-    void add(const void* src_ptr, void* dst_ptr, size_t rows, size_t row_b, size_t src_stride, size_t dst_stride) {
+    void add(const void* src_ptr,
+             void*       dst_ptr,
+             size_t      rows,
+             size_t      row_b,
+             size_t      src_stride,
+             size_t      dst_stride,
+             size_t      dst_rows = 0,
+             size_t      dst_row_b = 0) {
         copyParamsAssert(num_copies < MAX_FUSED_STRIDED_COPIES,
                          "FusedStridedCopyParams: num_copies (" + std::to_string(num_copies + 1)
                              + ") exceeds MAX_FUSED_STRIDED_COPIES (" + std::to_string(MAX_FUSED_STRIDED_COPIES)
                              + "). Bump the cap in fuse_copy_util.h after re-checking the sizing rationale.");
+        const size_t target_rows      = dst_rows == 0 ? rows : dst_rows;
+        const size_t target_row_bytes = dst_row_b == 0 ? row_b : dst_row_b;
+        copyParamsAssert(target_rows >= rows && target_row_bytes >= row_b,
+                         "FusedStridedCopyParams: destination shape must contain source shape");
         src[num_copies]            = src_ptr;
         dst[num_copies]            = dst_ptr;
         num_rows[num_copies]       = rows;
         row_bytes[num_copies]      = row_b;
+        dst_num_rows[num_copies]   = target_rows;
+        dst_row_bytes[num_copies]  = target_row_bytes;
         src_row_stride[num_copies] = src_stride;
         dst_row_stride[num_copies] = dst_stride;
         ++num_copies;

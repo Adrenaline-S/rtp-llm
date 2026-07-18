@@ -432,6 +432,54 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayerCountsOnlyTransferableSparseGroups) {
     EXPECT_EQ(*computed_buffer->expectedBufferCount(), 2u);
 }
 
+TEST_F(P2PConnectorWorkerTest, WriteByLayerCp2AndCp4CoverEveryLogicalCacheKey) {
+    for (const int cp_size : {2, 4}) {
+        const int                 logical_blocks = cp_size * 2 + 1;
+        std::map<CacheKeyType, int> key_owner;
+
+        for (int cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
+            P2PConnectorWorkerConfig config = worker_config_;
+            config.layer_all_num            = 1;
+            config.tp_size                  = cp_size;
+            config.tp_rank                  = cp_rank;
+            config.cp_size                  = cp_size;
+            config.cp_rank                  = cp_rank;
+            config.kv_cache_sharded         = true;
+            auto worker = std::make_unique<P2PConnectorWorkerPrefill>(
+                config, mock_layer_block_converter_, nullptr, mock_sender_);
+            ASSERT_TRUE(worker->init(10 * 1000));
+
+            auto resource = std::make_shared<KVCacheResource>();
+            resource->initGroups(makeTestCacheTopology(/*group_num=*/1, /*layer_num=*/1, {{0}}));
+            for (int logical_idx = 0; logical_idx < logical_blocks; ++logical_idx) {
+                resource->cacheKeys().push_back(9000 + logical_idx);
+            }
+            for (int logical_idx = cp_rank; logical_idx < logical_blocks; logical_idx += cp_size) {
+                resource->mutableBlockIds(0).add({100 + logical_idx / cp_size});
+            }
+
+            const int64_t request_id = cp_size * 100 + cp_rank;
+            ASSERT_TRUE(worker->writeByLayer(/*layer_id=*/0, resource, request_id, std::nullopt));
+            worker->store_wait_context_checker_->checkOnce();
+            auto computed = worker->getComputedBuffersStore()->getBuffer(request_id);
+            ASSERT_NE(computed, nullptr);
+            auto buffer_result = computed->getBuffers({0});
+            EXPECT_EQ(buffer_result.first, 1);
+            const auto& buffers = buffer_result.second;
+            ASSERT_EQ(buffers.size(), 1u);
+            for (const auto& [cache_key, block_id] : buffers[0]->blockIdMap()) {
+                EXPECT_TRUE(key_owner.emplace(cache_key, cp_rank).second) << "duplicate key=" << cache_key;
+                EXPECT_EQ(block_id, 100 + static_cast<int>((cache_key - 9000) / cp_size));
+            }
+        }
+
+        ASSERT_EQ(key_owner.size(), static_cast<size_t>(logical_blocks));
+        for (int logical_idx = 0; logical_idx < logical_blocks; ++logical_idx) {
+            EXPECT_EQ(key_owner.at(9000 + logical_idx), logical_idx % cp_size);
+        }
+    }
+}
+
 // ==================== sendKVCache 测试 (Prefill 端) ====================
 
 TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithReturnBefore) {

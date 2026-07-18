@@ -1,4 +1,6 @@
+import ast
 import unittest
+from pathlib import Path
 
 import torch
 
@@ -25,6 +27,26 @@ class _RoutingCache:
 
 
 class PyModelInputsCompatTest(unittest.TestCase):
+    def _stub_public_members(self, class_name: str) -> set[str]:
+        stub_path = (
+            Path(__file__).parents[2] / "ops/librtp_compute_ops/__init__.pyi"
+        )
+        module = ast.parse(stub_path.read_text(encoding="utf-8"))
+        class_node = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        )
+
+        members: set[str] = set()
+        for node in class_node.body:
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                members.add(node.target.id)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if not node.name.startswith("__"):
+                    members.add(node.name)
+        return members
+
     def _attn_inputs(self, is_prefill: bool, input_length: int) -> PyAttentionInputs:
         attn_inputs = PyAttentionInputs()
         attn_inputs.is_prefill = is_prefill
@@ -123,6 +145,16 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(20, selected.kv_cache_kernel_block_id.item())
         self.assertFalse(hasattr(selected, "kv_cache_kernel_block_id_by_group"))
         self.assertFalse(hasattr(selected, "kv_cache_layer_to_group"))
+
+    def test_cache_binding_stub_members_exist_at_runtime(self) -> None:
+        for bound_type in (KVCache, LayerKVCache, PyAttentionInputs):
+            with self.subTest(class_name=bound_type.__name__):
+                for member in self._stub_public_members(bound_type.__name__):
+                    self.assertTrue(
+                        hasattr(bound_type, member),
+                        f"{bound_type.__name__}.{member} is declared in the stub "
+                        "but missing from the runtime binding",
+                    )
 
     def test_single_group_adapter_returns_native_layer_cache(self) -> None:
         tensors = [torch.zeros((2, 2, 1, 8, 4), dtype=torch.float16)]

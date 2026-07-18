@@ -12,6 +12,7 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_attention_inputs_for_tag,
 )
 from rtp_llm.models_py.modules import AttnImplFactory
+from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -99,7 +100,7 @@ class GptModelBase(nn.Module):
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
-    ) -> Any:
+    ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()

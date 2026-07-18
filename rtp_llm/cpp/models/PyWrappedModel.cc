@@ -223,14 +223,18 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 3,
                             "physical kv_cache_block_id must be 3-D for tagged inputs");
 
+    auto kernel_block_id_device = tensorHoldHostAndToCuda(inputs.kv_cache_kernel_block_id);
+    auto physical_block_id_device = inputs.kv_cache_block_id.defined() ?
+                                        tensorHoldHostAndToCuda(inputs.kv_cache_block_id) :
+                                        torch::Tensor();
     torch_ext::AttentionInputsByTag by_tag;
     for (size_t group_id = 0; group_id < group_count; ++group_id) {
         auto group_inputs                            = py_attn_inputs;
         group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[group_id];
-        group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
+        group_inputs.kv_cache_kernel_block_id_device = kernel_block_id_device[group_id];
         if (inputs.kv_cache_block_id.defined()) {
             group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
-            group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
+            group_inputs.kv_cache_block_id_device = physical_block_id_device[group_id];
         }
         const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));
         (void)it;

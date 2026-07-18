@@ -61,6 +61,10 @@ public:
     };
 
 private:
+    struct CacheLoadBlockPlanEntry {
+        size_t block_pos;
+        size_t cache_key_index;
+    };
     struct MTPModuleLoadPlan {
         size_t                  module_index;
         const EngineInitParams* engine_init_params;
@@ -85,6 +89,20 @@ private:
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
     static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static std::vector<CacheLoadBlockPlanEntry> makeCpPeerLoadPlan(const CacheConfig& config,
+                                                                  size_t             gid,
+                                                                  size_t             block_num,
+                                                                  size_t             cache_key_count,
+                                                                  int64_t            reuse_block_size,
+                                                                  bool               use_hybrid,
+                                                                  int                prefill_cp_size,
+                                                                  int                peer_count,
+                                                                  int                peer_idx);
+    static std::vector<BlockInfo> sliceCpDestinationForPeer(const CacheConfig&     config,
+                                                            size_t                 gid,
+                                                            std::vector<BlockInfo> parts,
+                                                            int                    prefill_cp_size,
+                                                            int                    peer_idx);
     static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);

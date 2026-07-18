@@ -189,6 +189,16 @@ py_library(
     ],
 )
 
+filegroup(
+    name = "librtp_compute_ops_pyi",
+    srcs = ["ops/librtp_compute_ops/__init__.pyi"],
+)
+
+filegroup(
+    name = "libth_transformer_config_pyi",
+    srcs = ["ops/libth_transformer_config.pyi"],
+)
+
 py_library(
     name = "pipeline",
     srcs = glob([

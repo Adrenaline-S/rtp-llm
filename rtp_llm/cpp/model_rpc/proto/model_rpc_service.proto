@@ -299,22 +299,23 @@ message GenerateRequestPB {
 }
 
 // In the TP case, the decode master broadcasts to decode workers.
-// This request uses the tagged grouped-cache layout. Legacy field numbers are
-// intentionally reused because mixed-version KV-cache deployment is outside
-// the supported protocol contract documented above.
+// Legacy fields remain declared to prevent their wire numbers from being
+// reused. Same-build peers use only the tagged grouped-cache layout.
 message BroadcastLoadRequestPB {
     int64 request_id = 1;
     string request_key = 2;
     repeated string peer_addrs = 3;
     repeated int64 cache_keys = 4;
-    int64 block_num = 5;
-    int64 reuse_block_size = 6;
-    int64 timeout_ms = 7;
-    int64 dp_rank = 8;
-    int32 partition_count = 9;
-    int32 partition_id = 10;
-    int32 prefill_cp_size = 11;
-    repeated TaggedBlockIdsPB tagged_group_block_ids = 12;
+    repeated int32 block_ids = 5 [deprecated = true];
+    int64 block_num = 6;
+    int64 reuse_block_size = 7;
+    int64 timeout_ms = 8;
+    int64 dp_rank = 9;
+    int32 partition_count = 10;
+    int32 partition_id = 11;
+    repeated IntVector group_block_ids = 12 [deprecated = true];
+    int32 prefill_cp_size = 13;
+    repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
 
 }
 
@@ -636,14 +637,14 @@ message FunctionRequestPB {
 }
 
 message RemoteOperationRequestPB {
-    // group_tags intentionally replaces the legacy numeric group IDs at field
-    // 3. Remote/memory connector peers must follow the same-build KV-cache
-    // protocol contract documented above.
     RemoteOpType op = 1;
     string trace_id = 2;
-    repeated string group_tags = 3;
+    // Retained only to prevent wire-number reuse. Numeric group IDs are local
+    // topology indices and must never identify a cache group across peers.
+    repeated int32 group_ids = 3 [deprecated = true];
     repeated int32 block_ids = 4;
     repeated string uris = 5;
+    repeated string group_tags = 6;
 }
 
 message RemoteOperationResponsePB {

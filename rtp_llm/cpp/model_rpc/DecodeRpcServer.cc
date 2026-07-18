@@ -645,6 +645,96 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
     return ErrorInfo::OkStatus();
 }
 
+std::vector<BlockInfo> DecodeRpcServer::sliceCpDestinationForPeer(const CacheConfig&     config,
+                                                                 size_t                 gid,
+                                                                 std::vector<BlockInfo> parts,
+                                                                 int                    prefill_cp_size,
+                                                                 int                    peer_idx) {
+    if (prefill_cp_size <= 1 || peer_idx < 0 || peer_idx >= prefill_cp_size
+        || static_cast<int>(gid) >= config.groupNums()) {
+        return parts;
+    }
+    CPSlotMapper mapper(prefill_cp_size - 1,
+                        prefill_cp_size,
+                        static_cast<int>(config.seqSizePerBlockForGroup(gid)));
+    if (mapper.layoutForGroup(config, gid).slice == CpBlockSliceMode::NONE) {
+        return parts;
+    }
+    return mapper.sliceBlockForPeer(config, gid, std::move(parts), static_cast<size_t>(peer_idx));
+}
+
+std::vector<DecodeRpcServer::CacheLoadBlockPlanEntry>
+DecodeRpcServer::makeCpPeerLoadPlan(const CacheConfig& config,
+                                   size_t             gid,
+                                   size_t             block_num,
+                                   size_t             cache_key_count,
+                                   int64_t            reuse_block_size,
+                                   bool               use_hybrid,
+                                   int                prefill_cp_size,
+                                   int                peer_count,
+                                   int                peer_idx) {
+    std::vector<CacheLoadBlockPlanEntry> plan;
+    if (cache_key_count == 0 || static_cast<int>(gid) >= config.groupNums()) {
+        return plan;
+    }
+
+    const bool page_level_rr = prefill_cp_size > 1 && peer_count == prefill_cp_size;
+    const auto group_type    = use_hybrid ? config.typeForGroup(gid) : CacheGroupType::FULL;
+    bool       uses_cp_slice = false;
+    if (page_level_rr) {
+        CPSlotMapper mapper(prefill_cp_size - 1,
+                            prefill_cp_size,
+                            static_cast<int>(config.seqSizePerBlockForGroup(gid)));
+        uses_cp_slice = mapper.layoutForGroup(config, gid).slice != CpBlockSliceMode::NONE;
+    }
+    if (page_level_rr && group_type != CacheGroupType::FULL && !uses_cp_slice && peer_idx != 0) {
+        return plan;
+    }
+
+    const auto   policy = config.policyForGroup(gid);
+    const size_t tail_block_count =
+        policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
+    const bool compact_fixed = page_level_rr && uses_cp_slice
+                               && config.seqSizePerBlockForGroup(gid)
+                                      == config.seq_size_per_block * static_cast<size_t>(prefill_cp_size);
+    std::vector<size_t> block_positions;
+    if (!page_level_rr || !uses_cp_slice || compact_fixed) {
+        block_positions = blockPositionsForCacheTransfer(block_num,
+                                                         reuse_block_size,
+                                                         use_hybrid,
+                                                         tail_block_count > 0,
+                                                         tail_block_count,
+                                                         /*hybrid_full_from_begin=*/true);
+    } else if (block_num > 0) {
+        const size_t cp_size        = static_cast<size_t>(prefill_cp_size);
+        const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
+        const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(reuse_block_size, 0));
+        const size_t tail_count     = std::max<size_t>(1, tail_block_count);
+        const size_t start = use_hybrid ? (compact_blocks > tail_count ? compact_blocks - tail_count : 0) :
+                                          std::min(reuse_blocks, compact_blocks);
+        block_positions.reserve(compact_blocks - start);
+        for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
+            block_positions.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
+        }
+    }
+
+    for (size_t block_pos : block_positions) {
+        if (page_level_rr && group_type == CacheGroupType::FULL
+            && static_cast<int>(block_pos % static_cast<size_t>(prefill_cp_size)) != peer_idx) {
+            continue;
+        }
+        size_t cache_key_index = block_pos;
+        if (compact_fixed) {
+            cache_key_index = std::min((block_pos + 1) * static_cast<size_t>(prefill_cp_size) - 1,
+                                       cache_key_count - 1);
+        }
+        if (cache_key_index < cache_key_count) {
+            plan.push_back({block_pos, cache_key_index});
+        }
+    }
+    return plan;
+}
+
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
@@ -690,7 +780,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
         if (use_hybrid) {
-            const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
+            const auto& layer_group_ids = cfg.topology().layerGroupIdsSnapshot();
             RTP_LLM_CHECK_WITH_INFO(layer_id < layer_group_ids.size(),
                                     "hybrid cache layer %zu missing layer_to_group_ids, size=%zu",
                                     layer_id,
@@ -703,12 +793,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return layer_gids;
     };
-    auto groupType = [](const CacheConfig& cfg, bool use_hybrid, size_t gid) {
-        if (use_hybrid && static_cast<int>(gid) < cfg.groupNums()) {
-            return cfg.typeForGroup(gid);
-        }
-        return CacheGroupType::FULL;
-    };
     auto groupTag = [](const CacheConfig& cfg, size_t gid) -> std::string {
         RTP_LLM_CHECK_WITH_INFO(static_cast<int>(gid) < cfg.groupNums(),
                                 "cache group id out of range: gid=%zu group_num=%d",
@@ -716,103 +800,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 cfg.groupNums());
         return cfg.tagForGroup(gid);
     };
-    auto cpMapperForGroup = [&](const CacheConfig& cfg, size_t gid) {
-        return CPSlotMapper(load_context.prefill_cp_size - 1,
-                            load_context.prefill_cp_size,
-                            static_cast<int>(cfg.seqSizePerBlockForGroup(gid)));
-    };
-    auto groupUsesCpSlice = [&](const CacheConfig& cfg, size_t gid) {
-        if (load_context.prefill_cp_size <= 1 || static_cast<int>(gid) >= cfg.groupNums()) {
-            return false;
-        }
-        return cpMapperForGroup(cfg, gid).layoutForGroup(cfg, gid).slice != CpBlockSliceMode::NONE;
-    };
-    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx) {
-        if (!is_page_level_rr) {
-            return true;
-        }
-        if (group_type == CacheGroupType::FULL) {
-            return true;
-        }
-        // Some specs are CP-sliced inside one logical block on prefill, while
-        // decode still owns the full block. Pull every peer slice and place it
-        // into the destination offset declared by the spec.
-        return groupUsesCpSlice(cfg, gid) || peer_idx == 0;
-    };
-    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
-        if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
-            return true;
-        }
-        return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
-    };
-    auto sliceCpDestinationForPeer = [&](std::vector<BlockInfo> parts,
-                                         const CacheConfig&     cfg,
-                                         size_t                 gid,
-                                         int                    peer_idx) {
-        if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
-            return parts;
-        }
-        return cpMapperForGroup(cfg, gid).sliceBlockForPeer(cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
-    };
-    auto isCompactFixedBlockTable = [&](const CacheConfig& cfg, size_t gid) {
-        if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
-            return false;
-        }
-        const auto group_tokens = cfg.seqSizePerBlockForGroup(gid);
-        return group_tokens > 0
-               && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
-    };
-    auto blockPositionsForLoad =
-        [&](size_t block_num, const CacheConfig& cfg, bool cfg_use_hybrid, CacheGroupType group_type, size_t gid) {
-            const auto   policy = cfg.policyForGroup(gid);
-            const size_t tail_block_count =
-                policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
-            const bool transfer_tail_blocks = tail_block_count > 0;
-            if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
-                return blockPositionsForCacheTransfer(block_num,
-                                                      load_context.reuse_block_size,
-                                                      cfg_use_hybrid,
-                                                      transfer_tail_blocks,
-                                                      tail_block_count,
-                                                      /*hybrid_full_from_begin=*/true);
-            }
-            if (isCompactFixedBlockTable(cfg, gid)) {
-                return blockPositionsForCacheTransfer(block_num,
-                                                      load_context.reuse_block_size,
-                                                      cfg_use_hybrid,
-                                                      transfer_tail_blocks,
-                                                      tail_block_count,
-                                                      /*hybrid_full_from_begin=*/true);
-            }
-
-            std::vector<size_t> block_pos_list;
-            if (block_num == 0) {
-                return block_pos_list;
-            }
-            const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
-            const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
-            const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
-            const size_t tail_count     = std::max<size_t>(1, tail_block_count);
-            const size_t start = cfg_use_hybrid ? (compact_blocks > tail_count ? compact_blocks - tail_count : 0) :
-                                                  std::min(reuse_blocks, compact_blocks);
-            block_pos_list.reserve(compact_blocks - start);
-            for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
-                block_pos_list.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
-            }
-            return block_pos_list;
-        };
-    auto cacheKeyIndexForBlock =
-        [&](const CacheConfig& cfg, size_t gid, size_t block_pos, size_t cache_key_count, size_t& cache_key_index) {
-            if (cache_key_count == 0) {
-                return false;
-            }
-            cache_key_index = block_pos;
-            if (isCompactFixedBlockTable(cfg, gid)) {
-                cache_key_index = std::min((block_pos + 1) * static_cast<size_t>(load_context.prefill_cp_size) - 1,
-                                           cache_key_count - 1);
-            }
-            return cache_key_index < cache_key_count;
-        };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -841,27 +828,25 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto        block_num = block_ids.size();
                 size_t      model_id  = maga_init_params_.model_id;
 
-                CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
-                auto block_pos_list       = blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, gid);
-
-                if (!shouldLoadGroupFromPeer(cache_config, group_type, gid, i)) {
-                    continue;
-                }
-                for (size_t block_pos : block_pos_list) {
-                    if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
-                        continue;
-                    }
+                const auto block_plan = makeCpPeerLoadPlan(cache_config,
+                                                          gid,
+                                                          block_num,
+                                                          load_context.cache_keys.size(),
+                                                          load_context.reuse_block_size,
+                                                          use_hybrid,
+                                                          load_context.prefill_cp_size,
+                                                          peer_cnt,
+                                                          i);
+                for (const auto& plan_entry : block_plan) {
+                    const auto block_pos = plan_entry.block_pos;
                     auto block_id = block_ids[block_pos];
                     if (isNullBlockIdx(block_id)) {
                         continue;
                     }
-                    size_t cache_key_index = 0;
-                    if (!cacheKeyIndexForBlock(
-                            cache_config, gid, block_pos, load_context.cache_keys.size(), cache_key_index)) {
-                        continue;
-                    }
-                    auto cache_key =
-                        makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
+                    auto cache_key = makeCacheKey(model_id,
+                                                  std::to_string(load_context.cache_keys[plan_entry.cache_key_index]),
+                                                  layer_id,
+                                                  tag);
 
                     const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
                     const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
@@ -872,7 +857,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag, peer_cnt, i);
                     }
 
-                    parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, gid, i);
+                    parts = sliceCpDestinationForPeer(
+                        cache_config, gid, std::move(parts), load_context.prefill_cp_size, i);
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
@@ -975,31 +961,26 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto        block_num = block_ids.size();
                             size_t      model_id  = module_plan.cache_model_id;
 
-                            CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            auto           block_pos_list =
-                                blockPositionsForLoad(block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, gid);
-
-                            if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
-                                continue;
-                            }
-                            for (size_t block_pos : block_pos_list) {
-                                if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
-                                    continue;
-                                }
+                            const auto block_plan = makeCpPeerLoadPlan(mtp_cache_cfg,
+                                                                      gid,
+                                                                      block_num,
+                                                                      load_context.cache_keys.size(),
+                                                                      load_context.reuse_block_size,
+                                                                      mtp_use_hybrid,
+                                                                      load_context.prefill_cp_size,
+                                                                      peer_cnt,
+                                                                      i);
+                            for (const auto& plan_entry : block_plan) {
+                                const auto block_pos = plan_entry.block_pos;
                                 auto block_id = block_ids[block_pos];
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
-                                size_t cache_key_index = 0;
-                                if (!cacheKeyIndexForBlock(mtp_cache_cfg,
-                                                           gid,
-                                                           block_pos,
-                                                           load_context.cache_keys.size(),
-                                                           cache_key_index)) {
-                                    continue;
-                                }
                                 auto cache_key = makeCacheKey(
-                                    model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
+                                    model_id,
+                                    std::to_string(load_context.cache_keys[plan_entry.cache_key_index]),
+                                    layer_id,
+                                    tag);
                                 const bool mtp_use_mla = mtp_cache_cfg.use_mla;
                                 const bool mtp_use_kv_key_prefix =
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
@@ -1012,7 +993,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                         block_id, global_layer_id, tag, peer_cnt, i);
                                 }
 
-                                parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, gid, i);
+                                parts = sliceCpDestinationForPeer(
+                                    mtp_cache_cfg, gid, std::move(parts), load_context.prefill_cp_size, i);
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());
@@ -1031,7 +1013,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                       peer_addr.c_str(),
                                                       load_context.prefill_cp_size,
                                                       block_pos,
-                                                      cache_key_index,
+                                                      plan_entry.cache_key_index,
                                                       block_id,
                                                       block.addr,
                                                       block.size_bytes);

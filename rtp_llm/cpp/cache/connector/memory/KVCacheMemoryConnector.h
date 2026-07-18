@@ -114,6 +114,7 @@ private:
         std::vector<CopyInfoPerKey> copy_infos;
         CopyDirection               direction;
     };
+    struct CopyPlanReleaseState;
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&             cache_keys,
                                                    const LayerAttnBlockIds&         layer_attn_block_ids,

@@ -14,6 +14,7 @@ from rtp_llm.ops.compute_ops import (
 GROUP_TAGS = ["full", "aux"]
 HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
+MAX_CONTEXT_BATCH_SIZE = 2
 
 
 class TaggedBlockTableModel:
@@ -27,6 +28,37 @@ class TaggedBlockTableModel:
         full_id = attention_inputs["full"].kv_cache_kernel_block_id_device[0, 0]
         aux_id = attention_inputs["aux"].kv_cache_kernel_block_id_device[0, 0]
         signature = (full_id + 16 * aux_id).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class TaggedBlockTablePaddingModel(TaggedBlockTableModel):
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention_inputs = inputs.attention_inputs
+        full_ids = attention_inputs["full"].kv_cache_kernel_block_id_device[:, 0]
+        aux_ids = attention_inputs["aux"].kv_cache_kernel_block_id_device[:, 0]
+        signature = (full_ids.sum() + 16 * aux_ids.sum()).to(
+            inputs.input_hiddens.dtype
+        )
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class PrefillPaddingStateModel(TaggedBlockTableModel):
+    def __init__(self) -> None:
+        self.padding_offset_device = torch.empty(
+            MAX_CONTEXT_BATCH_SIZE * TOKENS_PER_BLOCK,
+            dtype=torch.int32,
+            device="cuda",
+        )
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention_inputs = inputs.attention_inputs["full"]
+        padding_offset_device = self.padding_offset_device[
+            : attention_inputs.padding_offset.numel()
+        ]
+        padding_offset_device.copy_(
+            attention_inputs.padding_offset, non_blocking=True
+        )
+        signature = padding_offset_device.sum().to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
@@ -101,7 +133,9 @@ def _build_decode_inputs(
 
 
 def _build_prefill_inputs(
-    tags: list[str], values: dict[str, int], seq_len: int = 4
+    tags: list[str],
+    values: dict[str, int],
+    seq_len: int = 4,
 ) -> PyModelInputs:
     inputs = PyModelInputs()
     inputs.input_ids = torch.arange(seq_len, dtype=torch.int32, device="cuda")
@@ -118,7 +152,7 @@ def _build_prefill_inputs(
         [0, seq_len], dtype=torch.int32, device="cuda"
     )
     attention_inputs.cu_kv_seqlens_device = attention_inputs.cu_seqlens_device.clone()
-    attention_inputs.padding_offset = torch.zeros(
+    attention_inputs.padding_offset = torch.arange(
         seq_len, dtype=torch.int32, device="cuda"
     )
     attention_inputs.context_total_kv_length = seq_len
@@ -183,11 +217,39 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             )
         )
 
+    def test_decode_smaller_replay_clears_tagged_block_table_padding(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedBlockTablePaddingModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+        )
+
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=2),
+            36,
+        )
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}, batch_size=1),
+            53,
+        )
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(GROUP_TAGS, {"full": 4, "aux": 2}, batch_size=2),
+            72,
+        )
+
     def test_prefill_tagged_capture_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
         runner.init_prefill(
             TaggedBlockTableModel(),
-            2,
+            MAX_CONTEXT_BATCH_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -205,6 +267,35 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             runner,
             _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
             52,
+        )
+
+    def test_prefill_smaller_replay_clears_padding_state_tail(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            PrefillPaddingStateModel(),
+            MAX_CONTEXT_BATCH_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+
+        self._assert_replay_signature(
+            runner,
+            _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=4),
+            6,
+        )
+        self._assert_replay_signature(
+            runner,
+            _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}, seq_len=2),
+            1,
+        )
+        self._assert_replay_signature(
+            runner,
+            _build_prefill_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, seq_len=4),
+            6,
         )
 
     def test_duplicate_capture_tag_is_rejected(self) -> None:

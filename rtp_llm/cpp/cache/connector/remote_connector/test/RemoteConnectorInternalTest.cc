@@ -299,6 +299,21 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecInfoMapAndGroups) {
               connector->group_policy_->spec_name_to_info_);
 }
 
+TEST_F(RemoteConnectorInternalTest, RejectsDeprecatedNumericGroupIdentity) {
+    auto connector = getFullLinearPolicyConnector();
+    ASSERT_TRUE(connector->group_policy_->init());
+
+    RemoteOperationRequestPB request;
+    request.set_op(RemoteOpType::REMOTE_OPERATION_READ);
+    request.set_trace_id("legacy-group-id");
+    request.GetReflection()->AddInt32(&request, request.GetDescriptor()->FindFieldByName("group_ids"), 0);
+    request.add_block_ids(1);
+    request.add_uris("remote://cache");
+
+    RemoteOperationResponsePB response;
+    EXPECT_ANY_THROW(connector->copyCache(request, response));
+}
+
 TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSizes) {
     auto       heterogeneous_config = cache_config_;
     const auto per_layer_bytes      = byte_size_per_block_ / layer_num_;

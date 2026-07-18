@@ -319,21 +319,15 @@ PrefixTreeMemoryBlockCache::popOldestEvictable(CacheBlockKind kind, CacheBacking
 std::vector<PrefixTreeMemoryBlockCache::CacheItem>
 PrefixTreeMemoryBlockCache::popOldestStateOrChainEvictable(CacheBackingType backing_type) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    std::vector<CacheKeyType>           leaf_keys;
-    const auto&                         state_lru = leaf_lru_[kindIndex(CacheBlockKind::STATE_SWA_KV)];
-    leaf_keys.reserve(state_lru.size());
-    for (const auto& evict_key : state_lru) {
-        leaf_keys.push_back(evict_key.cache_key);
-    }
-
-    for (const auto leaf_key : leaf_keys) {
-        auto item = popStateOnlyFromChainLocked(leaf_key, backing_type);
+    const auto& state_lru = leaf_lru_[kindIndex(CacheBlockKind::STATE_SWA_KV)];
+    for (auto it = state_lru.begin(); it != state_lru.end(); ++it) {
+        auto item = popStateOnlyFromChainLocked(it->cache_key, backing_type);
         if (item.has_value()) {
             return {*item};
         }
     }
-    for (const auto leaf_key : leaf_keys) {
-        auto items = popChainLocked(leaf_key, backing_type);
+    for (auto it = state_lru.begin(); it != state_lru.end(); ++it) {
+        auto items = popChainLocked(it->cache_key, backing_type);
         if (!items.empty()) {
             return items;
         }

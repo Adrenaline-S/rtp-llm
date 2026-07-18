@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -775,6 +776,100 @@ TEST(CPSlotMapperTest, CpCompactSwaKeepsPartialTailRows) {
         EXPECT_EQ(plan[0].offset_index, 4);
         EXPECT_EQ(plan[1].key_index, 10);
         EXPECT_EQ(plan[1].offset_index, 5);
+    }
+}
+
+TEST(CPSlotMapperTest, Cp2AndCp4AllRanksReconstructFullStateAndSwaBytes) {
+    constexpr size_t full_block_bytes = 32;
+
+    for (const int cp_size : {2, 4}) {
+        const size_t logical_blocks = static_cast<size_t>(cp_size * 2 + 1);
+        std::vector<uint8_t> full_source(logical_blocks * full_block_bytes);
+        for (size_t i = 0; i < full_source.size(); ++i) {
+            full_source[i] = static_cast<uint8_t>((i * 17 + cp_size) % 251);
+        }
+
+        std::vector<uint8_t> full_reconstructed(full_source.size(), 0);
+        std::vector<bool>    full_seen(logical_blocks, false);
+        const auto           full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        for (int rank = 0; rank < cp_size; ++rank) {
+            CPSlotMapper mapper(rank, cp_size, /*block_size=*/4);
+            const auto   plan = mapper.buildStorePlan(
+                full_policy, logical_blocks, /*reuse_block_size=*/0, /*use_hybrid=*/false);
+            const size_t local_blocks = (logical_blocks + static_cast<size_t>(cp_size) - 1)
+                                        / static_cast<size_t>(cp_size);
+            std::vector<uint8_t> local(local_blocks * full_block_bytes, 0);
+
+            for (const auto& item : plan) {
+                ASSERT_EQ(item.key_index % cp_size, rank);
+                ASSERT_EQ(item.offset_index, item.key_index / cp_size);
+                const size_t src_offset = static_cast<size_t>(item.key_index) * full_block_bytes;
+                const size_t local_offset = static_cast<size_t>(item.offset_index) * full_block_bytes;
+                std::copy_n(full_source.begin() + src_offset, full_block_bytes, local.begin() + local_offset);
+            }
+            for (const auto& item : plan) {
+                const size_t dst_offset = static_cast<size_t>(item.key_index) * full_block_bytes;
+                const size_t local_offset = static_cast<size_t>(item.offset_index) * full_block_bytes;
+                std::copy_n(local.begin() + local_offset,
+                            full_block_bytes,
+                            full_reconstructed.begin() + dst_offset);
+                full_seen[static_cast<size_t>(item.key_index)] = true;
+            }
+        }
+        EXPECT_EQ(full_seen, std::vector<bool>(logical_blocks, true));
+        EXPECT_EQ(full_reconstructed, full_source);
+
+        const std::vector<KVCacheSpecPtr> sliced_specs = {
+            buildFixedStateSpec("state", 4, 16, DataType::TYPE_UINT8),
+            buildFixedStateSpec("swa", 4, 17, DataType::TYPE_UINT8, 0, 64),
+        };
+        for (const auto& spec : sliced_specs) {
+            ASSERT_NE(spec, nullptr);
+            auto         config      = makeSingleStateCpConfig(*spec, cp_size);
+            const size_t block_bytes = spec->block_size_bytes();
+            ASSERT_EQ(block_bytes % static_cast<size_t>(cp_size), 0u);
+            EXPECT_EQ(config.policyForGroup(0).cp_slice,
+                      spec->tag == "state" ? CpBlockSliceMode::PAYLOAD_BYTES : CpBlockSliceMode::EQUAL_BYTES);
+
+            CPSlotMapper canonical_mapper(0, cp_size, static_cast<int>(config.seq_size_per_block));
+            const auto   canonical_plan = canonical_mapper.buildStorePlan(
+                config, /*gid=*/0, logical_blocks, /*reuse_block_size=*/0, /*use_hybrid=*/false);
+            ASSERT_EQ(canonical_plan.size(), 3u);
+            EXPECT_EQ(canonical_plan.back().key_index, static_cast<int>(logical_blocks - 1));
+
+            std::vector<uint8_t> source(canonical_plan.size() * block_bytes);
+            for (size_t i = 0; i < source.size(); ++i) {
+                source[i] = static_cast<uint8_t>((i * 29 + spec->tag.size() + cp_size) % 251);
+            }
+            std::vector<uint8_t> reconstructed(source.size(), 0);
+
+            for (int rank = 0; rank < cp_size; ++rank) {
+                CPSlotMapper mapper(rank, cp_size, static_cast<int>(config.seq_size_per_block));
+                const auto   plan = mapper.buildStorePlan(
+                    config, /*gid=*/0, logical_blocks, /*reuse_block_size=*/0, /*use_hybrid=*/false);
+                ASSERT_EQ(plan.size(), canonical_plan.size());
+                for (size_t block_idx = 0; block_idx < plan.size(); ++block_idx) {
+                    EXPECT_EQ(plan[block_idx].key_index, canonical_plan[block_idx].key_index);
+                    EXPECT_EQ(plan[block_idx].offset_index, canonical_plan[block_idx].offset_index);
+
+                    BlockInfo source_block;
+                    source_block.addr = source.data() + block_idx * block_bytes;
+                    source_block.size_bytes = block_bytes;
+                    const auto sliced = mapper.sliceBlockForPeer(
+                        config, /*gid=*/0, {source_block}, static_cast<size_t>(rank));
+                    ASSERT_EQ(sliced.size(), 1u);
+                    const auto slice_offset = static_cast<const uint8_t*>(sliced[0].addr)
+                                              - static_cast<const uint8_t*>(source_block.addr);
+                    ASSERT_GE(slice_offset, 0);
+                    ASSERT_LE(static_cast<size_t>(slice_offset) + sliced[0].size_bytes, block_bytes);
+                    std::copy_n(static_cast<const uint8_t*>(sliced[0].addr),
+                                sliced[0].size_bytes,
+                                reconstructed.begin() + block_idx * block_bytes
+                                    + static_cast<size_t>(slice_offset));
+                }
+            }
+            EXPECT_EQ(reconstructed, source) << "tag=" << spec->tag << " cp_size=" << cp_size;
+        }
     }
 }
 

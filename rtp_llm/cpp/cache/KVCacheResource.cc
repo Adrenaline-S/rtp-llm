@@ -392,7 +392,9 @@ void KVCacheResource::rebuildLinearBlockDependencies() {
 }
 
 void KVCacheResource::ensureLinearBlockDependencies() {
-    rebuildLinearBlockDependencies();
+    if (block_dependencies.size() != cache_keys.size()) {
+        rebuildLinearBlockDependencies();
+    }
 }
 
 size_t KVCacheResource::reuseBlockNum() const {

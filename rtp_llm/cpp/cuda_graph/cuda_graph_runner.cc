@@ -136,6 +136,21 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                                dst.stride(0) * dst.element_size());
     };
 
+    auto tryAddStridedD2DCopyAndClear = [&strided_d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
+        if (!src.defined() || src.numel() <= 0)
+            return;
+        RTP_LLM_CHECK_WITH_INFO(src.dim() == 2 && dst.dim() == 2,
+                                "tagged block table copy requires 2-D tensors");
+        strided_d2d_copies.add(src.data_ptr(),
+                               dst.data_ptr(),
+                               src.size(0),
+                               src.size(1) * src.element_size(),
+                               src.stride(0) * src.element_size(),
+                               dst.stride(0) * dst.element_size(),
+                               dst.size(0),
+                               dst.size(1) * dst.element_size());
+    };
+
     // H2H strided 2D copy via row-by-row memcpy (cannot use GPU kernel for host memory).
     // For 1D tensors, falls back to a contiguous memcpy.
     auto stridedCopyHost = [](const torch::Tensor& src, torch::Tensor& dst) {
@@ -240,10 +255,19 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            dst_inputs.kv_cache_kernel_block_id_device.fill_(0);
-            dst_inputs.kv_cache_kernel_block_id.fill_(0);
-            tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
-                                 dst_inputs.kv_cache_kernel_block_id_device);
+            auto& src_host = src_inputs.kv_cache_kernel_block_id;
+            auto& dst_host = dst_inputs.kv_cache_kernel_block_id;
+            RTP_LLM_CHECK_WITH_INFO(src_host.dim() == 2 && dst_host.dim() == 2 && src_host.size(0) <= dst_host.size(0)
+                                        && src_host.size(1) <= dst_host.size(1),
+                                    "tagged host block table source must fit capture destination");
+            if (src_host.size(1) < dst_host.size(1)) {
+                dst_host.slice(0, 0, src_host.size(0)).slice(1, src_host.size(1), dst_host.size(1)).fill_(0);
+            }
+            if (src_host.size(0) < dst_host.size(0)) {
+                dst_host.slice(0, src_host.size(0), dst_host.size(0)).fill_(0);
+            }
+            tryAddStridedD2DCopyAndClear(src_inputs.kv_cache_kernel_block_id_device,
+                                         dst_inputs.kv_cache_kernel_block_id_device);
         }
     }
 
@@ -284,6 +308,9 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         optimizedCopyAsync(inputs.attention_inputs.padding_offset,
                            py_model_inputs_.attention_inputs.padding_offset,
                            state.current_seq_len * sizeof(int));
+        py_model_inputs_.attention_inputs.padding_offset.slice(
+            0, state.current_seq_len, state.current_real_graph_seq_len)
+            .fill_(0);
 
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             auto* batch_size_ptr = py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params

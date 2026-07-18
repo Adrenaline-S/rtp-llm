@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <unordered_map>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -64,6 +65,10 @@ static size_t alignUp(size_t value, size_t alignment) {
     return ((value + alignment - 1) / alignment) * alignment;
 }
 
+constexpr size_t kMaxStagedCopyBatchBytes          = 64ULL * 1024 * 1024;
+constexpr size_t kMaxStagedCopyBatchTiles          = 64 * 1024;
+constexpr size_t kMaxCachedStagedScratchesPerDevice = 2;
+
 static bool isUsableBlockIdx(BlockIdxType block_idx) {
     return block_idx > 0 && !isNullBlockIdx(block_idx);
 }
@@ -95,6 +100,125 @@ static CacheBlockKind copyItemBlockKind(const MemoryOperationRequestPB::CopyItem
             return blockKindFromComplete(copyItemIsComplete(item));
     }
 }
+
+struct KVCacheMemoryConnector::CopyPlanReleaseState {
+    std::shared_ptr<BlockPool>                  block_pool;
+    std::shared_ptr<BlockPool>                  complete_pool;
+    std::shared_ptr<BlockPool>                  incomplete_pool;
+    std::shared_ptr<BlockPool>                  compressed_pool;
+    std::shared_ptr<BlockPool>                  state_swa_pool;
+    std::shared_ptr<MemoryDiskBlockCache>       block_cache;
+    std::shared_ptr<PrefixTreeMemoryBlockCache> prefix_block_cache;
+    DiskBlockPoolPtr                            complete_disk_pool;
+    DiskBlockPoolPtr                            incomplete_disk_pool;
+    bool                                        dual_pool{false};
+
+    std::shared_ptr<BlockPool> memoryPoolFor(CacheBlockKind kind) const {
+        if (kind == CacheBlockKind::COMPRESSED_KV) {
+            return compressed_pool;
+        }
+        if (kind == CacheBlockKind::STATE_SWA_KV) {
+            return state_swa_pool;
+        }
+        if (!dual_pool) {
+            return block_pool;
+        }
+        return kind == CacheBlockKind::COMPLETE ? complete_pool : incomplete_pool;
+    }
+
+    DiskBlockPoolPtr diskPoolFor(CacheBlockKind kind) const {
+        if (kind == CacheBlockKind::COMPRESSED_KV || kind == CacheBlockKind::COMPLETE) {
+            return complete_disk_pool;
+        }
+        if (kind == CacheBlockKind::STATE_SWA_KV || dual_pool) {
+            return incomplete_disk_pool;
+        }
+        return complete_disk_pool;
+    }
+
+    static void freeMemory(const std::shared_ptr<BlockPool>& pool, BlockIdxType block, bool cache_free) {
+        if (!pool || isNullBlockIdx(block)) {
+            return;
+        }
+        if (cache_free) {
+            pool->blockCacheFree(block);
+        } else {
+            pool->requestFree(block);
+        }
+    }
+
+    void releaseRequestBacking(const CopyInfoPerKey& copy_info, CacheBlockKind kind) const {
+        if (copy_info.backing_type == CacheBackingType::MEMORY) {
+            freeMemory(memoryPoolFor(kind), copy_info.mem_block, /*cache_free=*/false);
+        } else if (auto pool = diskPoolFor(kind)) {
+            pool->requestFree(copy_info.disk_slot);
+        }
+    }
+
+    void releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item) const {
+        if (item.backing_type == CacheBackingType::MEMORY) {
+            freeMemory(memoryPoolFor(item.kind), item.block_index, /*cache_free=*/true);
+        } else if (auto pool = diskPoolFor(item.kind)) {
+            pool->blockCacheFree(item.disk_slot);
+        }
+    }
+
+    void releasePrefixMergeSource(const CopyInfoPerKey& copy_info) const {
+        if (isNullBlockIdx(copy_info.src_mem_block) && copy_info.src_disk_slot < 0) {
+            return;
+        }
+        if (copy_info.src_backing_type == CacheBackingType::MEMORY) {
+            freeMemory(memoryPoolFor(copy_info.kind), copy_info.src_mem_block, /*cache_free=*/false);
+        } else if (auto pool = diskPoolFor(copy_info.kind)) {
+            pool->requestFree(copy_info.src_disk_slot);
+        }
+        if (!prefix_block_cache) {
+            return;
+        }
+        auto retired_item = prefix_block_cache->releaseInFlight(copy_info.cache_key,
+                                                                copy_info.kind,
+                                                                copy_info.src_backing_type,
+                                                                copy_info.src_mem_block,
+                                                                copy_info.src_disk_slot,
+                                                                copy_info.src_generation);
+        if (retired_item.has_value()) {
+            releasePrefixCacheBacking(*retired_item);
+        }
+    }
+
+    void release(CopyPlan& plan) const {
+        for (const auto& copy_info : plan.copy_infos) {
+            const bool typed = copy_info.kind == CacheBlockKind::COMPRESSED_KV
+                               || copy_info.kind == CacheBlockKind::STATE_SWA_KV;
+            if (!copy_info.request_released) {
+                releaseRequestBacking(copy_info, typed ? copy_info.kind : blockKindFromComplete(copy_info.is_complete));
+            }
+            if (plan.direction == CopyDirection::D2H && typed) {
+                releasePrefixMergeSource(copy_info);
+            }
+            if (plan.direction != CopyDirection::H2D) {
+                continue;
+            }
+            if (typed) {
+                if (!prefix_block_cache) {
+                    continue;
+                }
+                auto retired_item = prefix_block_cache->releaseInFlight(copy_info.cache_key,
+                                                                        copy_info.kind,
+                                                                        copy_info.backing_type,
+                                                                        copy_info.mem_block,
+                                                                        copy_info.disk_slot,
+                                                                        copy_info.generation);
+                if (retired_item.has_value()) {
+                    releasePrefixCacheBacking(*retired_item);
+                }
+            } else if (block_cache) {
+                block_cache->releaseInFlight(
+                    copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+            }
+        }
+    }
+};
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                                const KVCacheConfig&                     kv_cache_config,
@@ -1326,11 +1450,14 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             }
             if (success) {
                 const auto& dependencies = resource_copy->blockDependencies();
+                std::unordered_map<CacheKeyType, size_t> key_positions;
+                key_positions.reserve(resource_copy->cacheKeys().size());
+                for (size_t i = 0; i < resource_copy->cacheKeys().size(); ++i) {
+                    key_positions.emplace(resource_copy->cacheKeys()[i], i);
+                }
                 for (auto& copy_info : copy_plan->copy_infos) {
-                    const auto pos        = static_cast<size_t>(std::find(resource_copy->cacheKeys().begin(),
-                                                                   resource_copy->cacheKeys().end(),
-                                                                   copy_info.cache_key)
-                                                         - resource_copy->cacheKeys().begin());
+                    const auto pos_it     = key_positions.find(copy_info.cache_key);
+                    const auto pos        = pos_it == key_positions.end() ? dependencies.size() : pos_it->second;
                     const auto dependency = pos < dependencies.size() ?
                                                 dependencies[pos] :
                                                 BlockDependency{false, 0, static_cast<uint32_t>(pos)};
@@ -1632,37 +1759,18 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
     auto plan        = new CopyPlan();
     plan->copy_infos = copy_infos;
     plan->direction  = direction;
-    auto deleter     = [this](CopyPlan* plan) {
-        for (const auto& copy_info : plan->copy_infos) {
-            if (!copy_info.request_released) {
-                if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
-                    releasePrefixRequestBacking(copy_info);
-                } else {
-                    releaseRequestBacking(copy_info);
-                }
-            }
-            if (plan->direction == CopyDirection::D2H
-                && (copy_info.kind == CacheBlockKind::COMPRESSED_KV
-                    || copy_info.kind == CacheBlockKind::STATE_SWA_KV)) {
-                releasePrefixMergeSource(copy_info);
-            }
-            if (plan->direction == CopyDirection::H2D) {
-                if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
-                    auto retired_item = prefix_block_cache_->releaseInFlight(copy_info.cache_key,
-                                                                             copy_info.kind,
-                                                                             copy_info.backing_type,
-                                                                             copy_info.mem_block,
-                                                                             copy_info.disk_slot,
-                                                                             copy_info.generation);
-                    if (retired_item.has_value()) {
-                        releasePrefixCacheBacking(*retired_item);
-                    }
-                } else {
-                    block_cache_->releaseInFlight(
-                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
-                }
-            }
-        }
+    auto release_state = std::make_shared<CopyPlanReleaseState>(CopyPlanReleaseState{block_pool_,
+                                                                                     complete_pool_,
+                                                                                     incomplete_pool_,
+                                                                                     compressed_pool_,
+                                                                                     state_swa_pool_,
+                                                                                     block_cache_,
+                                                                                     prefix_block_cache_,
+                                                                                     complete_disk_pool_,
+                                                                                     incomplete_disk_pool_,
+                                                                                     isDualPool()});
+    auto deleter = [release_state = std::move(release_state)](CopyPlan* plan) {
+        release_state->release(*plan);
         delete plan;
     };
     return std::shared_ptr<CopyPlan>(plan, deleter);
@@ -2326,23 +2434,47 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const NormalizedCo
         direction == CopyDirection::H2D ? StagedMemoryCopyDirection::H2D : StagedMemoryCopyDirection::D2H;
     size_t logical_rows  = 0;
     size_t payload_bytes = 0;
+    std::unique_ptr<StagedMemoryCopyScratch> scratch;
+    auto finish = [&](bool success) {
+        recycleStagedCopyScratchForDevice(params.device_index, std::move(scratch));
+        return success;
+    };
+    auto execute_batch = [&]() {
+        if (params.tiles.empty()) {
+            return true;
+        }
+        if (!scratch) {
+            scratch = acquireStagedCopyScratchForDevice(params.device_index);
+        }
+        bool success = false;
+        try {
+            success = execStagedMemoryCopy(params, scratch.get());
+        } catch (...) {
+            finish(false);
+            throw;
+        }
+        params.host_bytes  = 0;
+        params.host_segments.clear();
+        params.tiles.clear();
+        return success;
+    };
 
     for (const auto& item : items) {
         const auto& gpu_blocks       = item.gpu_blocks;
         const bool  item_is_complete = item.is_complete;
 
         if (isNullBlockIdx(item.mem_block) || gpu_blocks.size() != slots.size()) {
-            return false;
+            return finish(false);
         }
 
         auto& pool_ref = isDualPool() ? (item_is_complete ? complete_pool_ : incomplete_pool_) : block_pool_;
         if (!pool_ref) {
-            return false;
+            return finish(false);
         }
         auto mem_buffers = pool_ref->convertIndexToBuffer(/*layer_id=*/0, item.mem_block);
         if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0
             || mem_buffers[0].is_cuda) {
-            return false;
+            return finish(false);
         }
         const auto& mem_buffer = mem_buffers[0];
         auto*       mem_addr   = static_cast<char*>(mem_buffer.addr);
@@ -2371,37 +2503,51 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const NormalizedCo
                 }
                 if (within_layer_off + gpu_buffer.size_bytes > layer_stride
                     || byte_off + within_layer_off + gpu_buffer.size_bytes > mem_buffer.size_bytes) {
-                    return false;
+                    return finish(false);
                 }
                 auto* host_addr = mem_addr + byte_off + within_layer_off;
                 if (!gpu_buffer.is_cuda) {
-                    return false;
+                    return finish(false);
                 }
                 if (params.device_index < 0) {
                     params.device_index = gpu_buffer.device_index;
                 } else if (params.device_index != gpu_buffer.device_index) {
-                    return false;
+                    return finish(false);
                 }
 
-                // The SM copy kernels vectorize with int4/int2. Keep every staged tile aligned so compact
-                // staging does not trade fewer memcpy calls for misaligned vector accesses.
                 constexpr size_t kStagedTileAlignment = 16;
-                const size_t     staging_offset       = alignUp(params.host_bytes, kStagedTileAlignment);
-                params.host_bytes                     = staging_offset;
-                appendStagedMemoryCopyHostSegment(
-                    host_addr, staging_offset, gpu_buffer.size_bytes, params.host_segments);
-                appendStagedMemoryCopyTile(gpu_buffer.addr, staging_offset, gpu_buffer.size_bytes, params.tiles);
-                params.host_bytes += gpu_buffer.size_bytes;
+                size_t           copied_bytes         = 0;
+                while (copied_bytes < gpu_buffer.size_bytes) {
+                    if (params.tiles.size() >= kMaxStagedCopyBatchTiles && !execute_batch()) {
+                        return finish(false);
+                    }
+                    size_t staging_offset = alignUp(params.host_bytes, kStagedTileAlignment);
+                    if (staging_offset >= kMaxStagedCopyBatchBytes) {
+                        if (!execute_batch()) {
+                            return finish(false);
+                        }
+                        staging_offset = 0;
+                    }
+                    const size_t chunk_bytes =
+                        std::min(gpu_buffer.size_bytes - copied_bytes, kMaxStagedCopyBatchBytes - staging_offset);
+                    appendStagedMemoryCopyHostSegment(
+                        host_addr + copied_bytes, staging_offset, chunk_bytes, params.host_segments);
+                    appendStagedMemoryCopyTile(static_cast<char*>(gpu_buffer.addr) + copied_bytes,
+                                               staging_offset,
+                                               chunk_bytes,
+                                               params.tiles);
+                    params.host_bytes = staging_offset + chunk_bytes;
+                    copied_bytes += chunk_bytes;
+                    if (params.host_bytes == kMaxStagedCopyBatchBytes && !execute_batch()) {
+                        return finish(false);
+                    }
+                }
                 ++logical_rows;
                 payload_bytes += gpu_buffer.size_bytes;
                 within_layer_off += gpu_buffer.size_bytes;
             }
             byte_off += layer_stride;
         }
-    }
-
-    if (params.tiles.empty()) {
-        return true;
     }
 
     RTP_LLM_LOG_DEBUG("cuda staged memory copy, direction=%s, rows=%zu, tiles=%zu, bytes=%zu, span=%zu, device=%d",
@@ -2412,15 +2558,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const NormalizedCo
                       params.host_bytes,
                       params.device_index);
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_staged");
-    auto scratch = acquireStagedCopyScratchForDevice(params.device_index);
-    try {
-        const bool success = execStagedMemoryCopy(params, scratch.get());
-        recycleStagedCopyScratchForDevice(params.device_index, std::move(scratch));
-        return success;
-    } catch (...) {
-        recycleStagedCopyScratchForDevice(params.device_index, std::move(scratch));
-        throw;
-    }
+    return finish(execute_batch());
 }
 
 std::unique_ptr<StagedMemoryCopyScratch> KVCacheMemoryConnector::acquireStagedCopyScratchForDevice(int device_index) {
@@ -2439,8 +2577,18 @@ void KVCacheMemoryConnector::recycleStagedCopyScratchForDevice(int              
     if (!scratch) {
         return;
     }
-    std::lock_guard<std::mutex> lock(staged_copy_scratch_mutex_);
-    staged_copy_scratch_by_device_[device_index].push_back(std::move(scratch));
+    const bool oversized = scratch->host_capacity > kMaxStagedCopyBatchBytes
+                           || scratch->device_capacity > kMaxStagedCopyBatchBytes
+                           || scratch->meta_capacity > kMaxStagedCopyBatchTiles;
+    if (!oversized) {
+        std::lock_guard<std::mutex> lock(staged_copy_scratch_mutex_);
+        auto&                       scratches = staged_copy_scratch_by_device_[device_index];
+        if (scratches.size() < kMaxCachedStagedScratchesPerDevice) {
+            scratches.push_back(std::move(scratch));
+            return;
+        }
+    }
+    releaseStagedMemoryCopyScratch(*scratch);
 }
 
 bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
