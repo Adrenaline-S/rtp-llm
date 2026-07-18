@@ -21,6 +21,10 @@ RTP_LLM_WEAK bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, Sta
 
 RTP_LLM_WEAK void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch&) {}
 
+RTP_LLM_WEAK bool supportsStagedMemoryCopy() {
+    return false;
+}
+
 #undef RTP_LLM_WEAK
 
 }  // namespace rtp_llm

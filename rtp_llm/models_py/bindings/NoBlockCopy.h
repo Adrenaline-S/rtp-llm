@@ -90,6 +90,7 @@ RTP_LLM_NO_BLOCK_COPY_API bool execBatchedMemoryCopy(const BatchedMemoryCopyPara
 RTP_LLM_NO_BLOCK_COPY_API bool execStagedMemoryCopy(const StagedMemoryCopyParams& params,
                                                     StagedMemoryCopyScratch*      scratch = nullptr);
 RTP_LLM_NO_BLOCK_COPY_API void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch);
+RTP_LLM_NO_BLOCK_COPY_API bool supportsStagedMemoryCopy();
 
 // Warmup split-KV copy kernels. No-op on non-CUDA / PPU devices.
 // Must be called after cudaSetDevice + setCurrentCUDAStream.

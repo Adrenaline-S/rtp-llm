@@ -43,6 +43,7 @@ public:
     bool init();
 
     const CacheConfig& cacheConfig() const;
+    int                cacheKeyCpSize() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
     // 显存管理和缓存分配

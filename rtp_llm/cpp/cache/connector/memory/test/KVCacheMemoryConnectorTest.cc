@@ -544,6 +544,20 @@ private:
     }
 };
 
+TEST_F(KVCacheMemoryConnectorTest, DecodeTp2MetricsUsePrefillCp4BlockWidth) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.role_type                            = RoleType::DECODE;
+    parallelism_config.tp_size                              = 2;
+    parallelism_config.prefill_cp_config.method             = CPRotateMethod::PREFILL_CP;
+    parallelism_config.prefill_cp_config.kv_cache_sharded   = true;
+    parallelism_config.prefill_cp_config.prefill_cp_size    = 4;
+
+    KVCacheMemoryConnector connector(
+        cache_config_, kv_cache_config_, parallelism_config, allocator_, server_addrs_);
+    EXPECT_EQ(connector.cpSizeForMetrics(), 4);
+    EXPECT_EQ(connector.cacheKeyTokensPerBlockForMetrics(), static_cast<int>(cache_config_.seq_size_per_block) * 4);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     // 构造空的 worker 地址，BroadcastManager::init() 会失败；业务代码使用 RTP_LLM_CHECK，
     // 因此这里期望抛出 std::runtime_error。

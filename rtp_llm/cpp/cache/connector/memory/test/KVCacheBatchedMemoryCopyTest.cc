@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 
 namespace rtp_llm {
@@ -30,6 +31,10 @@ void execBatchCopy(const BatchCopyParams&) {}
 }  // namespace rtp_llm
 
 namespace rtp_llm::test {
+
+TEST(StagedMemoryCopyCapabilityTest, CudaBackendReportsSupport) {
+    EXPECT_TRUE(supportsStagedMemoryCopy());
+}
 namespace {
 
 BlockDependency rootDep(uint32_t ordinal = 0) {

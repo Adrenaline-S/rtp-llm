@@ -199,6 +199,10 @@ void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch) {
     scratch.device_index    = -1;
 }
 
+bool supportsStagedMemoryCopy() {
+    return true;
+}
+
 void execNoBlockCopy(const MultiCopyParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.multi_src.size() == params.multi_dst.size(),
                             "multi_src.size(%zu) != multi_dst.size(%zu)",

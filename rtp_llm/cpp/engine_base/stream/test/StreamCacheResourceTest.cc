@@ -72,8 +72,13 @@ protected:
     void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
-                                        RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
+                                        RoleType                role_type,
+                                        const ParallelismConfig& parallelism_config = ParallelismConfig{}) {
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          parallelism_config);
         ASSERT_TRUE(cache_manager_->init());
         ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
         ResourceContext resource_context;
@@ -330,11 +335,18 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
 }
 
 TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWidth) {
-    prepareResource(/*reuse_cache=*/true);
+    ParallelismConfig parallelism_config;
+    parallelism_config.role_type                            = RoleType::DECODE;
+    parallelism_config.prefill_cp_config.method             = CPRotateMethod::PREFILL_CP;
+    parallelism_config.prefill_cp_config.kv_cache_sharded   = true;
+    parallelism_config.prefill_cp_config.prefill_cp_size    = 4;
+    prepareResourceWithCacheConfig(init_config(),
+                                   /*input_tokens=*/{1, 2, 3, 4, 5, 6},
+                                   /*reuse_cache=*/true,
+                                   RoleType::DECODE,
+                                   parallelism_config);
     auto& resource = stream_->streamCacheResource();
-
-    cache_manager_->cp_slot_mapper_ =
-        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, resource.seqSizePerBlock());
+    EXPECT_EQ(cache_manager_->cpSlotMapper(), nullptr);
 
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
@@ -346,7 +358,7 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
 
     resource.updateReuseLengthsFromContext(read_context);
 
-    const int canonical_block_tokens = resource.seqSizePerBlock() * 2;
+    const int canonical_block_tokens = resource.seqSizePerBlock() * 4;
     EXPECT_EQ(resource.reuseBlockTokens(), canonical_block_tokens);
     EXPECT_EQ(stream_->initialReuseLength(), 3 * canonical_block_tokens);
     EXPECT_EQ(stream_->reuseLength(), 3 * canonical_block_tokens);

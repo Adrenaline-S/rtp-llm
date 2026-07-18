@@ -128,21 +128,7 @@ protected:
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.parallelism_config",
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
-        const auto& parallelism_config = *ctx.parallelism_config;
-        if (!parallelism_config.prefill_cp_config.kv_cache_sharded) {
-            return 1;
-        }
-        if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
-            return static_cast<uint32_t>(parallelism_config.tp_size);
-        }
-        if (parallelism_config.role_type == RoleType::DECODE
-            && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-            RTP_LLM_CHECK_WITH_INFO(
-                parallelism_config.prefill_cp_config.prefill_cp_size > 1,
-                "fixed/SWA CP sharding decode requires explicit prefill_cp_size when PREFILL_CP and kv_cache_sharded are enabled");
-            return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
-        }
-        return 1;
+        return static_cast<uint32_t>(ctx.parallelism_config->kvCacheKeyCpSize());
     }
 
     static bool isPrefillCpSliced(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {

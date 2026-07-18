@@ -176,8 +176,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         allocateAndSync();
     }
 
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+    if (parallelism_config_.localKvCacheShardingEnabled()) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
                                                          static_cast<int>(config_.seq_size_per_block));
@@ -255,6 +254,10 @@ bool KVCacheManager::init() {
 
 const CacheConfig& KVCacheManager::cacheConfig() const {
     return config_;
+}
+
+int KVCacheManager::cacheKeyCpSize() const {
+    return static_cast<int>(parallelism_config_.kvCacheKeyCpSize());
 }
 
 const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {

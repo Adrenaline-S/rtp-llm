@@ -8,7 +8,7 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import CPRotateMethod, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -67,6 +67,46 @@ class GenerateConfigTest(TestCase):
 
         self.assertEqual(engine_config.pd_sep_config.role_type, RoleType.PREFILL)
         self.assertEqual(engine_config.parallelism_config.role_type, RoleType.PREFILL)
+
+    def test_engine_config_accepts_valid_prefill_cache_sharding(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.role_config.role_type = RoleType.PREFILL
+        pc = py_env_configs.parallelism_config
+        pc.tp_size = 4
+        pc.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        pc.prefill_cp_config.kv_cache_sharded = True
+
+        engine_config = EngineConfig.create(py_env_configs)
+
+        self.assertTrue(
+            engine_config.parallelism_config.local_kv_cache_sharding_enabled()
+        )
+        self.assertEqual(engine_config.parallelism_config.kv_cache_key_cp_size(), 4)
+
+    def test_engine_config_rejects_invalid_cache_sharding(self):
+        cases = [
+            (RoleType.PDFUSION, CPRotateMethod.ALL_GATHER, 4, 0),
+            (RoleType.PREFILL, CPRotateMethod.PREFILL_CP, 4, 0),
+            (RoleType.PREFILL, CPRotateMethod.ALL_GATHER, 1, 0),
+            (RoleType.DECODE, CPRotateMethod.ALL_GATHER, 2, 4),
+            (RoleType.DECODE, CPRotateMethod.PREFILL_CP, 2, 1),
+        ]
+        for role, method, tp_size, prefill_cp_size in cases:
+            with self.subTest(
+                role=role,
+                method=method,
+                tp_size=tp_size,
+                prefill_cp_size=prefill_cp_size,
+            ):
+                py_env_configs = PyEnvConfigs()
+                py_env_configs.role_config.role_type = role
+                pc = py_env_configs.parallelism_config
+                pc.tp_size = tp_size
+                pc.prefill_cp_config.method = method
+                pc.prefill_cp_config.kv_cache_sharded = True
+                pc.prefill_cp_config.prefill_cp_size = prefill_cp_size
+                with self.assertRaises(ValueError):
+                    EngineConfig.create(py_env_configs)
 
     def test_set_parallelism_config_propagates_prefill_cp_cache_fields(self):
         py_env_configs = PyEnvConfigs()

@@ -96,11 +96,7 @@ public:
     // KVCacheResource reuse counters follow the canonical cache-key namespace.
     // Under CP sharding one canonical block spans cp_size physical blocks.
     int reuseBlockTokens() const {
-        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
-        if (mapper && mapper->isSharded()) {
-            return mapper->virtualBlockSize();
-        }
-        return seqSizePerBlock();
+        return seqSizePerBlock() * resource_context_.cache_manager->cacheKeyCpSize();
     }
 
     void setNeedReleaseResource(bool need_release_resource) {

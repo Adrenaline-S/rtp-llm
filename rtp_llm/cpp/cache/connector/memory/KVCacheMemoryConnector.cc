@@ -165,6 +165,10 @@ bool KVCacheMemoryConnector::init() {
                                 || kv_cache_config_.memory_cache_disk_sync_timeout_ms > 0,
                             "init failed, disk sync timeout is invalid, sync timeout: %ld ms",
                             kv_cache_config_.memory_cache_disk_sync_timeout_ms);
+    const bool typed_opaque_layout =
+        cache_config_.use_typed_cache_regions && cache_config_.use_opaque_kv_cache_store;
+    RTP_LLM_CHECK_WITH_INFO(!typed_opaque_layout || supportsStagedMemoryCopy(),
+                            "typed opaque memory cache requires CUDA staged-copy support");
 
     checkLayerBlockStrideBytes();
 
@@ -3637,18 +3641,7 @@ void KVCacheMemoryConnector::reportDiskWriteMetrics(bool    success,
 }
 
 int KVCacheMemoryConnector::cpSizeForMetrics() const {
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (!cp_cfg.kv_cache_sharded) {
-        return 1;
-    }
-    if (parallelism_config_.tp_size > 1) {
-        return static_cast<int>(parallelism_config_.tp_size);
-    }
-    if (parallelism_config_.role_type == RoleType::DECODE && cp_cfg.is_prefill_enabled()
-        && cp_cfg.prefill_cp_size > 1) {
-        return static_cast<int>(cp_cfg.prefill_cp_size);
-    }
-    return 1;
+    return static_cast<int>(parallelism_config_.kvCacheKeyCpSize());
 }
 
 int KVCacheMemoryConnector::cacheKeyTokensPerBlockForMetrics() const {

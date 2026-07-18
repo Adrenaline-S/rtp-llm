@@ -401,6 +401,42 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     EXPECT_EQ(ctx, nullptr);
 }
 
+TEST_F(KVCacheConnectorCoordinatorTest, DecodeTp2UsesPrefillCp4CanonicalKeys) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.role_type                            = RoleType::DECODE;
+    parallelism_config.tp_size                              = 2;
+    parallelism_config.prefill_cp_config.method             = CPRotateMethod::PREFILL_CP;
+    parallelism_config.prefill_cp_config.kv_cache_sharded   = true;
+    parallelism_config.prefill_cp_config.prefill_cp_size    = 4;
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(cache_config_,
+                                                                     KVCacheConfig{},
+                                                                     RuntimeConfig{},
+                                                                     parallelism_config,
+                                                                     SpeculativeExecutionConfig{},
+                                                                     allocator_);
+    EXPECT_EQ(coordinator->cpSize(), 4);
+
+    KVCacheResource resource;
+    resource.initGroups(cache_config_.topologyPtr());
+    resource.cacheKeys() = CacheKeysType{0, 1, 2, 3, 4, 5, 6, 7};
+    resource.mutableBlockIds(0).assign({1, 2, 3, 4, 5, 6, 7, 8});
+    resource.setLastBlockAligned(true);
+
+    auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
+    ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
+    std::shared_ptr<Meta> null_meta;
+    ON_CALL(*rw_ctx, meta()).WillByDefault(testing::ReturnRef(null_meta));
+
+    EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::Eq(CacheKeysType{3, 7}), true))
+        .WillOnce(testing::Invoke([](const KVCacheResource& projected, const CacheKeysType&, bool) {
+            EXPECT_EQ(projected.cacheKeys(), (CacheKeysType{3, 7}));
+            EXPECT_EQ(projected.blocks(0), (BlockIndicesType{4, 8}));
+            return std::shared_ptr<KVCacheResource>{};
+        }));
+    EXPECT_EQ(coordinator->asyncRead(rw_ctx), nullptr);
+}
+
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts) {
     // Use fixture allocator_/exec_ctx_ so allocator has a valid BlockPool; otherwise coordinator's
     // logging path (freeBlocksNum/availableBlocksNum) can dereference a null block_pool_ and crash/hang.

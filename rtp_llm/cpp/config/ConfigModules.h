@@ -78,6 +78,24 @@ struct ParallelismConfig {
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
 
+    bool localKvCacheShardingEnabled() const {
+        return role_type == RoleType::PREFILL && prefill_cp_config.is_enabled()
+               && prefill_cp_config.kv_cache_sharded && tp_size > 1;
+    }
+    int64_t kvCacheKeyCpSize() const {
+        if (!prefill_cp_config.kv_cache_sharded) {
+            return 1;
+        }
+        if (role_type == RoleType::PREFILL) {
+            return tp_size > 1 ? tp_size : 1;
+        }
+        if (role_type == RoleType::DECODE && prefill_cp_config.is_prefill_enabled()) {
+            return prefill_cp_config.prefill_cp_size > 1 ? prefill_cp_config.prefill_cp_size : 1;
+        }
+        return 1;
+    }
+    void validateKvCacheSharding() const;
+
     int64_t get_attn_tp_size() const {
         return prefill_cp_config.is_enabled() ? 1 : tp_size;
     }

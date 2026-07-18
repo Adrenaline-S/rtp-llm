@@ -234,6 +234,7 @@ class EngineConfig:
         # Keep it aligned with the PD role so prefill CP builds rank-local
         # STATE/SWA layouts while decode builds the corresponding full layout.
         parallelism_config.role_type = pd_sep_config.role_type
+        parallelism_config.validate_kv_cache_sharding()
 
         if nccl_comm_config is None:
             nccl_comm_config = NcclCommConfig(
