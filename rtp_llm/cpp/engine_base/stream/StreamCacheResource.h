@@ -6,6 +6,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
 namespace rtp_llm {
 
@@ -43,8 +44,9 @@ public:
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
-    int curBlocksNum() const;
-    int mallocFailedTimes() const;
+    int  curBlocksNum() const;
+    int  mallocFailedTimes() const;
+    bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
@@ -79,7 +81,7 @@ public:
     }
 
     // get block copy mapping of last kv cache update
-    const std::vector<BlockIdPair>& getKVBlockUpdateMapping() const {
+    const std::vector<TaggedBlockIdPair>& getKVBlockUpdateMapping() const {
         return block_update_mapping_;
     }
 
@@ -89,6 +91,12 @@ public:
 
     int seqSizePerBlock() const {
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+    }
+
+    // KVCacheResource reuse counters follow the canonical cache-key namespace.
+    // Under CP sharding one canonical block spans cp_size physical blocks.
+    int reuseBlockTokens() const {
+        return seqSizePerBlock() * resource_context_.cache_manager->cacheKeyCpSize();
     }
 
     void setNeedReleaseResource(bool need_release_resource) {
@@ -130,10 +138,10 @@ private:
     void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:
-    GenerateStream*          stream_;
-    BatchKVCacheResourcePtr  batch_kv_cache_resource_;
-    ResourceContext          resource_context_;
-    std::vector<BlockIdPair> block_update_mapping_;
+    GenerateStream*                stream_;
+    BatchKVCacheResourcePtr        batch_kv_cache_resource_;
+    ResourceContext                resource_context_;
+    std::vector<TaggedBlockIdPair> block_update_mapping_;
 
     bool                          need_release_resource_ = true;
     bool                          last_block_aligned_    = false;

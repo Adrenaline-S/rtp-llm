@@ -72,8 +72,13 @@ protected:
     void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
-                                        RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
+                                        RoleType                role_type,
+                                        const ParallelismConfig& parallelism_config = ParallelismConfig{}) {
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          parallelism_config);
         ASSERT_TRUE(cache_manager_->init());
         ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
         ResourceContext resource_context;
@@ -99,7 +104,7 @@ protected:
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i, 0).size(), inner_size);
         }
     };
 
@@ -114,6 +119,27 @@ protected:
     GenerateStreamPtr               stream_;
     std::shared_ptr<KVCacheManager> cache_manager_;
 };
+
+TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = torch::tensor(std::vector<int32_t>{1, 2, 3}, torch::kInt32);
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    stream_ =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_EQ(resource.kvCache().groupNums(), 1);
+    EXPECT_EQ(resource.kvCache().cacheResource().soleGroupTagForLayer(0), "__warmup__");
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+
+    stream_->fakeInitKVBlock(2);
+    EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
+}
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     prepareResource();
@@ -306,6 +332,38 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->localReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWidth) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.role_type                            = RoleType::DECODE;
+    parallelism_config.prefill_cp_config.method             = CPRotateMethod::PREFILL_CP;
+    parallelism_config.prefill_cp_config.kv_cache_sharded   = true;
+    parallelism_config.prefill_cp_config.prefill_cp_size    = 4;
+    prepareResourceWithCacheConfig(init_config(),
+                                   /*input_tokens=*/{1, 2, 3, 4, 5, 6},
+                                   /*reuse_cache=*/true,
+                                   RoleType::DECODE,
+                                   parallelism_config);
+    auto& resource = stream_->streamCacheResource();
+    EXPECT_EQ(cache_manager_->cpSlotMapper(), nullptr);
+
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(2);
+    kv_resource->setMemoryReuseBlockNum(1);
+    std::shared_ptr<Meta> meta;
+    auto                  read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+
+    resource.updateReuseLengthsFromContext(read_context);
+
+    const int canonical_block_tokens = resource.seqSizePerBlock() * 4;
+    EXPECT_EQ(resource.reuseBlockTokens(), canonical_block_tokens);
+    EXPECT_EQ(stream_->initialReuseLength(), 3 * canonical_block_tokens);
+    EXPECT_EQ(stream_->reuseLength(), 3 * canonical_block_tokens);
+    EXPECT_EQ(stream_->localReuseLength(), 3 * canonical_block_tokens);
+    EXPECT_EQ(stream_->memoryReuseLength(), canonical_block_tokens);
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {

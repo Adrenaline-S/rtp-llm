@@ -33,7 +33,8 @@ public:
                            int64_t                          timeout_ms,
                            int                              partition_count,
                            int                              partition_id,
-                           grpc::ServerContext*             server_context):
+                           grpc::ServerContext*             server_context,
+                           int32_t                          prefill_cp_size = 1):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -43,7 +44,8 @@ public:
             timeout_ms(timeout_ms),
             partition_count(partition_count),
             partition_id(partition_id),
-            server_context(server_context) {}
+            server_context(server_context),
+            prefill_cp_size(prefill_cp_size) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
@@ -55,9 +57,14 @@ public:
         int                              partition_id;
 
         grpc::ServerContext* server_context;
+        int32_t              prefill_cp_size;
     };
 
 private:
+    struct CacheLoadBlockPlanEntry {
+        size_t block_pos;
+        size_t cache_key_index;
+    };
     struct MTPModuleLoadPlan {
         size_t                  module_index;
         const EngineInitParams* engine_init_params;
@@ -81,6 +88,22 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
+    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static std::vector<CacheLoadBlockPlanEntry> makeCpPeerLoadPlan(const CacheConfig& config,
+                                                                  size_t             gid,
+                                                                  size_t             block_num,
+                                                                  size_t             cache_key_count,
+                                                                  int64_t            reuse_block_size,
+                                                                  bool               use_hybrid,
+                                                                  int                prefill_cp_size,
+                                                                  int                peer_count,
+                                                                  int                peer_idx);
+    static std::vector<BlockInfo> sliceCpDestinationForPeer(const CacheConfig&     config,
+                                                            size_t                 gid,
+                                                            std::vector<BlockInfo> parts,
+                                                            int                    prefill_cp_size,
+                                                            int                    peer_idx);
+    static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);

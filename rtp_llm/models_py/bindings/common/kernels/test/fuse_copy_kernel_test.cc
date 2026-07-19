@@ -426,6 +426,46 @@ TEST_F(FusedStridedCopyTest, CompactToStrided) {
     cudaFree(d_dst);
 }
 
+TEST_F(FusedStridedCopyTest, CopyAndZeroDestinationTail) {
+    constexpr size_t SRC_ROWS      = 2;
+    constexpr size_t DST_ROWS      = 4;
+    constexpr size_t SRC_ROW_BYTES = 8;
+    constexpr size_t DST_ROW_BYTES = 16;
+
+    std::vector<uint8_t> host_src(SRC_ROWS * SRC_ROW_BYTES);
+    for (size_t i = 0; i < host_src.size(); ++i) {
+        host_src[i] = static_cast<uint8_t>(i + 1);
+    }
+    std::vector<uint8_t> host_dst(DST_ROWS * DST_ROW_BYTES, 0xAB);
+
+    uint8_t* d_src = deviceAlloc(host_src);
+    uint8_t* d_dst = deviceAlloc(host_dst);
+
+    rtp_llm::FusedStridedCopyParams params;
+    params.add(d_src,
+               d_dst,
+               SRC_ROWS,
+               SRC_ROW_BYTES,
+               SRC_ROW_BYTES,
+               DST_ROW_BYTES,
+               DST_ROWS,
+               DST_ROW_BYTES);
+    rtp_llm::invokeFusedStridedCopy(params, stream_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+
+    const auto result = deviceToHost(d_dst, DST_ROWS * DST_ROW_BYTES);
+    for (size_t row = 0; row < DST_ROWS; ++row) {
+        for (size_t col = 0; col < DST_ROW_BYTES; ++col) {
+            const auto expected =
+                row < SRC_ROWS && col < SRC_ROW_BYTES ? host_src[row * SRC_ROW_BYTES + col] : 0;
+            ASSERT_EQ(result[row * DST_ROW_BYTES + col], expected) << "row " << row << " col " << col;
+        }
+    }
+
+    cudaFree(d_src);
+    cudaFree(d_dst);
+}
+
 // Multiple strided copies in one launch.
 TEST_F(FusedStridedCopyTest, MultipleStridedCopies) {
     struct CopySpec {

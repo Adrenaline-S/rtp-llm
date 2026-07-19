@@ -14,6 +14,20 @@ void execNoBlockCopy(const MultiCopyParams& params) {
     }
 }
 
+bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
+    return params.tiles.empty();
+}
+
+bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch*) {
+    return params.tiles.empty();
+}
+
+void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch&) {}
+
+bool supportsStagedMemoryCopy() {
+    return false;
+}
+
 void warmupNoBlockCopy() {}
 
 }  // namespace rtp_llm

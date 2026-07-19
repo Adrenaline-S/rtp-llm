@@ -60,21 +60,23 @@ __global__ void fusedStridedCopyKernel(FusedStridedCopyParams params) {
     if (copy_idx >= params.num_copies)
         return;
 
-    const size_t nrows      = params.num_rows[copy_idx];
-    const size_t rbytes     = params.row_bytes[copy_idx];
-    const size_t src_stride = params.src_row_stride[copy_idx];
-    const size_t dst_stride = params.dst_row_stride[copy_idx];
-    const char*  src        = reinterpret_cast<const char*>(params.src[copy_idx]);
-    char*        dst        = reinterpret_cast<char*>(params.dst[copy_idx]);
+    const size_t src_nrows      = params.num_rows[copy_idx];
+    const size_t src_row_bytes  = params.row_bytes[copy_idx];
+    const size_t dst_nrows      = params.dst_num_rows[copy_idx];
+    const size_t dst_row_bytes  = params.dst_row_bytes[copy_idx];
+    const size_t src_stride     = params.src_row_stride[copy_idx];
+    const size_t dst_stride     = params.dst_row_stride[copy_idx];
+    const char*  src            = reinterpret_cast<const char*>(params.src[copy_idx]);
+    char*        dst            = reinterpret_cast<char*>(params.dst[copy_idx]);
 
-    const size_t total      = nrows * rbytes;
+    const size_t total      = dst_nrows * dst_row_bytes;
     const size_t global_tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const size_t stride     = static_cast<size_t>(gridDim.x) * blockDim.x;
 
     for (size_t idx = global_tid; idx < total; idx += stride) {
-        const size_t row            = idx / rbytes;
-        const size_t col            = idx % rbytes;
-        dst[row * dst_stride + col] = src[row * src_stride + col];
+        const size_t row = idx / dst_row_bytes;
+        const size_t col = idx % dst_row_bytes;
+        dst[row * dst_stride + col] = row < src_nrows && col < src_row_bytes ? src[row * src_stride + col] : 0;
     }
 }
 
