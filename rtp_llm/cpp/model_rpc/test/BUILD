@@ -81,6 +81,15 @@ cc_test(
 )
 
 cc_test(
+    name = "batch_generate_validation_test",
+    srcs = ["BatchGenerateValidationTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "decode_rpc_server_test",
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,

@@ -548,7 +548,11 @@ grpc::Status PrefillRpcServer::BatchGenerateCall(grpc::ServerContext*        ser
                                                  BatchGenerateOutputsPB*     response) {
     RTP_LLM_PROFILE_SCOPE("rpc.prefill_batch_generate_call");
     c10::InferenceMode inference_guard(true);
-    const int          batch_size = request->inputs_size();
+    auto               validation_status = validateBatchGenerateRequest(*request);
+    if (!validation_status.ok()) {
+        return validation_status;
+    }
+    const int batch_size = request->inputs_size();
     if (batch_size == 0) {
         return grpc::Status::OK;
     }

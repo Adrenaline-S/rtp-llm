@@ -153,6 +153,16 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
     return ErrorInfo::OkStatus();
 }
 
+grpc::Status LocalRpcServer::validateBatchGenerateRequest(const BatchGenerateInputPB& request) {
+    for (int i = 0; i < request.inputs_size(); ++i) {
+        if (request.inputs(i).generate_config().is_streaming()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "streaming batch generation is not supported, input index: " + std::to_string(i));
+        }
+    }
+    return grpc::Status::OK;
+}
+
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
@@ -191,8 +201,12 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                                BatchGenerateOutputsPB*     response) {
     RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
     c10::InferenceMode inference_guard(true);
-    AtomicGuard        request_guard(onflight_requests_);
-    const int          batch_size = request->inputs_size();
+    auto               validation_status = validateBatchGenerateRequest(*request);
+    if (!validation_status.ok()) {
+        return validation_status;
+    }
+    AtomicGuard request_guard(onflight_requests_);
+    const int   batch_size = request->inputs_size();
     RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
 
     if (batch_size == 0) {
