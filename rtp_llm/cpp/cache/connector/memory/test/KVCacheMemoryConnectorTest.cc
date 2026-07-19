@@ -2,7 +2,9 @@
 
 #include <csignal>
 #include <chrono>
+#include <cstdlib>
 #include <execinfo.h>
+#include <filesystem>
 #include <thread>
 #include <unistd.h>
 
@@ -59,6 +61,30 @@ struct CrashHandlerInstaller {
 };
 
 static CrashHandlerInstaller g_crash_handler_installer;
+
+class ScopedTempDir {
+public:
+    ScopedTempDir() {
+        char tmpl[] = "/tmp/rtp_memory_connector_test_XXXXXX";
+        auto path   = ::mkdtemp(tmpl);
+        EXPECT_NE(path, nullptr);
+        if (path != nullptr) {
+            path_ = path;
+        }
+    }
+    ~ScopedTempDir() {
+        if (!path_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(path_, ec);
+        }
+    }
+    const std::string& path() const {
+        return path_;
+    }
+
+private:
+    std::string path_;
+};
 
 }  // namespace
 
@@ -913,6 +939,144 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
     auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto ctx       = connector_->asyncRead(res, meta, match_ctx, /*start_read_block_index=*/0, /*read_block_num=*/1);
     EXPECT_EQ(ctx, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_MissingMemoryPoolReleasesInFlight) {
+    const CacheKeysType cache_keys{20101};
+    const size_t        mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    auto block_indices = putItemsToCache(cache_keys, mem_size);
+    ASSERT_EQ(block_indices.size(), 1u);
+    auto resource = makeCacheResource(cache_keys, {{1}, {2}, {3}, {4}});
+
+    auto saved_pool = connector_->block_pool_;
+    ASSERT_NE(saved_pool, nullptr);
+    connector_->block_pool_.reset();
+    auto plan               = connector_->buildCopyPlanForRead(cache_keys, resource->layerBlocks(), 0, 1);
+    connector_->block_pool_ = saved_pool;
+
+    EXPECT_EQ(plan, nullptr);
+    auto evicted = connector_->block_cache_->popOldestEvictable();
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, cache_keys[0]);
+    connector_->releaseCacheBacking(*evicted);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_InvalidDiskSlotReleasesInFlight) {
+    ScopedTempDir temp_dir;
+    ASSERT_FALSE(temp_dir.path().empty());
+    const size_t mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+
+    DiskBlockPoolConfig disk_config;
+    disk_config.work_dir         = temp_dir.path();
+    disk_config.disk_size_bytes  = 2 * DiskBlockPool::alignUp(mem_size, 4096);
+    disk_config.block_size_bytes = mem_size;
+    disk_config.pool_kind        = CacheBlockKind::COMPLETE;
+    auto disk_pool               = std::make_shared<DiskBlockPool>(std::move(disk_config));
+    ASSERT_TRUE(disk_pool->init());
+    connector_->complete_disk_pool_ = disk_pool;
+
+    const CacheKeysType             cache_keys{20102};
+    const int32_t                   invalid_slot = static_cast<int32_t>(disk_pool->totalSlots() + 1);
+    MemoryDiskBlockCache::CacheItem item;
+    item.cache_key    = cache_keys[0];
+    item.backing_type = CacheBackingType::DISK;
+    item.block_index  = NULL_BLOCK_IDX;
+    item.disk_slot    = invalid_slot;
+    item.block_size   = mem_size;
+    item.is_complete  = true;
+    ASSERT_TRUE(connector_->block_cache_->putCommitted(item).first);
+
+    auto resource = makeCacheResource(cache_keys, {{1}, {2}, {3}, {4}});
+    auto plan =
+        connector_->buildCopyPlanForRead(cache_keys, resource->layerGroupBlocks(), connector_->layerTagSlots(), 0, 1);
+
+    EXPECT_EQ(plan, nullptr);
+    auto evicted = connector_->block_cache_->popOldestEvictable();
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, cache_keys[0]);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_ExceptionReleasesMemoryBackingLease) {
+    const CacheKeysType cache_keys{20103};
+    const size_t        mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    auto         pool          = ensureBlockPool(mem_size);
+    const size_t free_before   = pool->freeBlocksNum();
+    auto         block_indices = putItemsToCache(cache_keys, mem_size);
+    ASSERT_EQ(block_indices.size(), 1u);
+
+    const LayerBlockIds missing_layer_blocks;
+    EXPECT_ANY_THROW((void)connector_->buildCopyPlanForRead(cache_keys, missing_layer_blocks, 0, 1));
+
+    auto evicted = connector_->block_cache_->popOldestEvictable();
+    ASSERT_TRUE(evicted.has_value());
+    connector_->releaseCacheBacking(*evicted);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_ExceptionReleasesDiskBackingLease) {
+    ScopedTempDir temp_dir;
+    ASSERT_FALSE(temp_dir.path().empty());
+    const size_t mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+
+    DiskBlockPoolConfig disk_config;
+    disk_config.work_dir         = temp_dir.path();
+    disk_config.disk_size_bytes  = 2 * DiskBlockPool::alignUp(mem_size, 4096);
+    disk_config.block_size_bytes = mem_size;
+    disk_config.pool_kind        = CacheBlockKind::COMPLETE;
+    auto disk_pool               = std::make_shared<DiskBlockPool>(std::move(disk_config));
+    ASSERT_TRUE(disk_pool->init());
+    connector_->complete_disk_pool_ = disk_pool;
+
+    const size_t free_before = disk_pool->freeSlots();
+    auto         slot        = disk_pool->malloc();
+    ASSERT_TRUE(slot.has_value());
+    disk_pool->blockCacheReference(*slot);
+    disk_pool->requestFree(*slot);
+
+    const CacheKeysType             cache_keys{20105};
+    MemoryDiskBlockCache::CacheItem item;
+    item.cache_key    = cache_keys[0];
+    item.backing_type = CacheBackingType::DISK;
+    item.block_index  = NULL_BLOCK_IDX;
+    item.disk_slot    = *slot;
+    item.block_size   = mem_size;
+    item.is_complete  = true;
+    ASSERT_TRUE(connector_->block_cache_->putCommitted(item).first);
+
+    const LayerAttnBlockIds missing_layer_blocks;
+    EXPECT_ANY_THROW(
+        (void)connector_->buildCopyPlanForRead(cache_keys, missing_layer_blocks, connector_->layerTagSlots(), 0, 1));
+
+    auto evicted = connector_->block_cache_->popOldestEvictable();
+    ASSERT_TRUE(evicted.has_value());
+    disk_pool->blockCacheFree(*slot);
+    EXPECT_EQ(disk_pool->freeSlots(), free_before);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForRead_LeaseTransfersToCopyPlanLifetime) {
+    const CacheKeysType cache_keys{20104};
+    const size_t        mem_size = memoryCacheBlockBytes();
+    ASSERT_GT(mem_size, 0u);
+    auto         pool          = ensureBlockPool(mem_size);
+    const size_t free_before   = pool->freeBlocksNum();
+    auto         block_indices = putItemsToCache(cache_keys, mem_size);
+    ASSERT_EQ(block_indices.size(), 1u);
+    auto resource = makeCacheResource(cache_keys, {{1}, {2}, {3}, {4}});
+
+    auto plan =
+        connector_->buildCopyPlanForRead(cache_keys, resource->layerGroupBlocks(), connector_->layerTagSlots(), 0, 1);
+    ASSERT_NE(plan, nullptr);
+    EXPECT_FALSE(connector_->block_cache_->popOldestEvictable().has_value());
+
+    plan.reset();
+    auto evicted = connector_->block_cache_->popOldestEvictable();
+    ASSERT_TRUE(evicted.has_value());
+    connector_->releaseCacheBacking(*evicted);
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatchedPrefix) {

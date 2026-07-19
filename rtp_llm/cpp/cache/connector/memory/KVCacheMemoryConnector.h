@@ -114,6 +114,26 @@ private:
         std::vector<CopyInfoPerKey> copy_infos;
         CopyDirection               direction;
     };
+    class ReadBackingLease {
+    public:
+        ReadBackingLease(KVCacheMemoryConnector*                  connector,
+                         CacheKeyType                             cache_key,
+                         const MemoryDiskBlockCache::MatchResult& match_result);
+        ~ReadBackingLease();
+
+        ReadBackingLease(const ReadBackingLease&)            = delete;
+        ReadBackingLease& operator=(const ReadBackingLease&) = delete;
+
+        CopyInfoPerKey& copyInfo();
+        void            markRequestReferenced();
+        void            transferTo(std::vector<CopyInfoPerKey>& copy_infos);
+
+    private:
+        KVCacheMemoryConnector* connector_{nullptr};
+        CopyInfoPerKey          copy_info_;
+        bool                    request_referenced_{false};
+        bool                    transferred_{false};
+    };
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&             cache_keys,
                                                    const LayerAttnBlockIds&         layer_attn_block_ids,
@@ -124,6 +144,9 @@ private:
                                                    const LayerBlockIds& layer_block_ids,
                                                    int                  start_index,
                                                    int                  read_num);
+
+    std::unique_ptr<ReadBackingLease> acquireReadBacking(CacheKeyType cache_key);
+
     std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType&             cache_keys,
                                                     const LayerAttnBlockIds&         layer_attn_block_ids,
                                                     const std::vector<LayerTagSlot>& slots,

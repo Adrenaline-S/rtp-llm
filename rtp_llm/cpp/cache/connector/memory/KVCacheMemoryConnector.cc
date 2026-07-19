@@ -1049,52 +1049,21 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&             ca
     bool                        success = true;
 
     for (int i = start_index; i < start_index + read_num; ++i) {
-        const auto cache_key    = cache_keys.at(i);
-        const auto match_result = block_cache_->matchAndMarkInFlight(static_cast<CacheKeyType>(cache_key));
-        if (match_result.backing_type == CacheBackingType::MEMORY && isNullBlockIdx(match_result.matched_index)) {
-            RTP_LLM_LOG_WARNING("build copy plan for read failed, cache key not found, cache key: %ld", cache_key);
+        const auto cache_key = cache_keys.at(i);
+        auto       lease     = acquireReadBacking(cache_key);
+        if (!lease) {
             success = false;
             break;
-        }
-        if (match_result.backing_type == CacheBackingType::DISK && match_result.disk_slot < 0) {
-            RTP_LLM_LOG_WARNING("build copy plan for read failed, invalid disk slot, cache key: %ld", cache_key);
-            success = false;
-            break;
-        }
-        // 每次都加引用的原因是为了确保match到的block不会被释放(避免在写时malloc如果cache满弹出该block)
-        if (match_result.backing_type == CacheBackingType::MEMORY) {
-            auto source_pool = memoryPoolFor(blockKindFromComplete(match_result.is_complete));
-            if (!source_pool) {
-                RTP_LLM_LOG_WARNING("build copy plan for read failed, missing memory pool, cache key: %ld", cache_key);
-                success = false;
-                break;
-            }
-            referenceBlocksInPool(source_pool, {match_result.matched_index}, /*cache_ref=*/false);
-        } else {
-            auto disk_pool = diskPoolFor(blockKindFromComplete(match_result.is_complete));
-            if (!disk_pool || !disk_pool->validSlot(match_result.disk_slot)) {
-                RTP_LLM_LOG_WARNING(
-                    "build copy plan for read failed, missing disk pool or invalid slot, cache key: %ld", cache_key);
-                success = false;
-                break;
-            }
-            disk_pool->requestReference(match_result.disk_slot);
         }
 
-        CopyInfoPerKey copy_info;
-        copy_info.cache_key    = cache_key;
-        copy_info.kind         = blockKindFromComplete(match_result.is_complete);
-        copy_info.backing_type = match_result.backing_type;
-        copy_info.mem_block    = match_result.matched_index;
-        copy_info.disk_slot    = match_result.disk_slot;
+        auto& copy_info = lease->copyInfo();
         copy_info.gpu_blocks.reserve(slots.size());
         for (const auto& slot : slots) {
             const auto layer = static_cast<size_t>(slot.layer_id);
             const auto attn  = static_cast<size_t>(slot.group_id);
             copy_info.gpu_blocks.push_back(layer_attn_block_ids.at(layer).at(attn)->blocks().at(i));
         }
-        copy_info.is_complete = match_result.is_complete;
-        copy_infos.emplace_back(std::move(copy_info));
+        lease->transferTo(copy_infos);
     }
 
     // 在match时已经保证了最后一个key是complete, 这里再校验下
@@ -1115,49 +1084,19 @@ std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildC
     bool                        success = true;
 
     for (int i = start_index; i < start_index + read_num; ++i) {
-        const auto cache_key    = cache_keys.at(i);
-        const auto match_result = block_cache_->matchAndMarkInFlight(static_cast<CacheKeyType>(cache_key));
-        if (match_result.backing_type == CacheBackingType::MEMORY && isNullBlockIdx(match_result.matched_index)) {
-            RTP_LLM_LOG_WARNING("build copy plan for read failed, cache key not found, cache key: %ld", cache_key);
+        const auto cache_key = cache_keys.at(i);
+        auto       lease     = acquireReadBacking(cache_key);
+        if (!lease) {
             success = false;
             break;
-        }
-        if (match_result.backing_type == CacheBackingType::DISK && match_result.disk_slot < 0) {
-            RTP_LLM_LOG_WARNING("build copy plan for read failed, invalid disk slot, cache key: %ld", cache_key);
-            success = false;
-            break;
-        }
-        if (match_result.backing_type == CacheBackingType::MEMORY) {
-            auto source_pool = memoryPoolFor(blockKindFromComplete(match_result.is_complete));
-            if (!source_pool) {
-                RTP_LLM_LOG_WARNING("build copy plan for read failed, missing memory pool, cache key: %ld", cache_key);
-                success = false;
-                break;
-            }
-            referenceBlocksInPool(source_pool, {match_result.matched_index}, /*cache_ref=*/false);
-        } else {
-            auto disk_pool = diskPoolFor(blockKindFromComplete(match_result.is_complete));
-            if (!disk_pool || !disk_pool->validSlot(match_result.disk_slot)) {
-                RTP_LLM_LOG_WARNING(
-                    "build copy plan for read failed, missing disk pool or invalid slot, cache key: %ld", cache_key);
-                success = false;
-                break;
-            }
-            disk_pool->requestReference(match_result.disk_slot);
         }
 
-        CopyInfoPerKey copy_info;
-        copy_info.cache_key    = cache_key;
-        copy_info.kind         = blockKindFromComplete(match_result.is_complete);
-        copy_info.backing_type = match_result.backing_type;
-        copy_info.mem_block    = match_result.matched_index;
-        copy_info.disk_slot    = match_result.disk_slot;
+        auto& copy_info = lease->copyInfo();
         copy_info.gpu_blocks.reserve(cache_config_.layer_all_num);
         for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
             copy_info.gpu_blocks.push_back(layer_block_ids.at(layer)->blocks().at(i));
         }
-        copy_info.is_complete = match_result.is_complete;
-        copy_infos.emplace_back(std::move(copy_info));
+        lease->transferTo(copy_infos);
     }
 
     if (success && !copy_infos.empty() && !copy_infos.back().is_complete) {
@@ -1168,6 +1107,76 @@ std::shared_ptr<KVCacheMemoryConnector::CopyPlan> KVCacheMemoryConnector::buildC
 
     auto plan = createCopyPlan(copy_infos, CopyDirection::H2D);
     return success ? plan : nullptr;
+}
+
+KVCacheMemoryConnector::ReadBackingLease::ReadBackingLease(KVCacheMemoryConnector*                  connector,
+                                                           CacheKeyType                             cache_key,
+                                                           const MemoryDiskBlockCache::MatchResult& match_result):
+    connector_(connector) {
+    copy_info_.cache_key    = cache_key;
+    copy_info_.kind         = blockKindFromComplete(match_result.is_complete);
+    copy_info_.backing_type = match_result.backing_type;
+    copy_info_.mem_block    = match_result.matched_index;
+    copy_info_.disk_slot    = match_result.disk_slot;
+    copy_info_.is_complete  = match_result.is_complete;
+}
+
+KVCacheMemoryConnector::ReadBackingLease::~ReadBackingLease() {
+    if (transferred_) {
+        return;
+    }
+    if (request_referenced_) {
+        connector_->releaseRequestBacking(copy_info_);
+    }
+    connector_->block_cache_->releaseInFlight(
+        copy_info_.cache_key, copy_info_.backing_type, copy_info_.mem_block, copy_info_.disk_slot);
+}
+
+KVCacheMemoryConnector::CopyInfoPerKey& KVCacheMemoryConnector::ReadBackingLease::copyInfo() {
+    return copy_info_;
+}
+
+void KVCacheMemoryConnector::ReadBackingLease::markRequestReferenced() {
+    request_referenced_ = true;
+}
+
+void KVCacheMemoryConnector::ReadBackingLease::transferTo(std::vector<CopyInfoPerKey>& copy_infos) {
+    copy_infos.emplace_back(copy_info_);
+    transferred_ = true;
+}
+
+std::unique_ptr<KVCacheMemoryConnector::ReadBackingLease>
+KVCacheMemoryConnector::acquireReadBacking(CacheKeyType cache_key) {
+    const auto match_result = block_cache_->matchAndMarkInFlight(cache_key);
+    if (match_result.backing_type == CacheBackingType::MEMORY && isNullBlockIdx(match_result.matched_index)) {
+        RTP_LLM_LOG_WARNING("build copy plan for read failed, cache key not found, cache key: %ld", cache_key);
+        return nullptr;
+    }
+    if (match_result.backing_type == CacheBackingType::DISK && match_result.disk_slot < 0) {
+        RTP_LLM_LOG_WARNING("build copy plan for read failed, invalid disk slot, cache key: %ld", cache_key);
+        return nullptr;
+    }
+
+    auto lease = std::make_unique<ReadBackingLease>(this, cache_key, match_result);
+    // Keep the matched backing alive until the read CopyPlan is destroyed.
+    if (match_result.backing_type == CacheBackingType::MEMORY) {
+        auto source_pool = memoryPoolFor(blockKindFromComplete(match_result.is_complete));
+        if (!source_pool) {
+            RTP_LLM_LOG_WARNING("build copy plan for read failed, missing memory pool, cache key: %ld", cache_key);
+            return nullptr;
+        }
+        referenceBlocksInPool(source_pool, {match_result.matched_index}, /*cache_ref=*/false);
+    } else {
+        auto disk_pool = diskPoolFor(blockKindFromComplete(match_result.is_complete));
+        if (!disk_pool || !disk_pool->validSlot(match_result.disk_slot)) {
+            RTP_LLM_LOG_WARNING("build copy plan for read failed, missing disk pool or invalid slot, cache key: %ld",
+                                cache_key);
+            return nullptr;
+        }
+        disk_pool->requestReference(match_result.disk_slot);
+    }
+    lease->markRequestReferenced();
+    return lease;
 }
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
