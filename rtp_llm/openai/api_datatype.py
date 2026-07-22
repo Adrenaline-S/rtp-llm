@@ -249,15 +249,6 @@ class ChatCompletionRequest(BaseModel):
             return self.extra_configs.chat_template_kwargs
         return self.chat_template_kwargs
 
-    def enable_thinking_requested(self):
-        if self.enable_thinking is True:
-            return True
-        chat_template_kwargs = self.get_chat_template_kwargs()
-        return (
-            chat_template_kwargs is not None
-            and chat_template_kwargs.get("enable_thinking") is True
-        )
-
     def get_enable_thinking(self, default: Optional[bool] = None) -> Optional[bool]:
         chat_template_kwargs = self.get_chat_template_kwargs()
         if (
@@ -270,22 +261,34 @@ class ChatCompletionRequest(BaseModel):
             return enable_thinking
         raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
 
+    def enable_thinking_requested(self):
+        if self.enable_thinking is True:
+            return True
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        return chat_template_kwargs is not None and (
+            chat_template_kwargs.get("enable_thinking") is True
+            or chat_template_kwargs.get("thinking_mode") == "thinking"
+        )
+
     def disable_thinking(self):
-        if self.thinking_budget == 0:
-            return True
-        if (
-            self.extra_configs is not None
-            and self.extra_configs.max_thinking_tokens == 0
-        ):
-            return True
+        # Explicit mode switches are hard disables. Budget sources use the
+        # same later-wins order as OpenaiEndpoint: thinking_budget overrides
+        # an explicitly supplied extra_configs.max_thinking_tokens.
         if self.enable_thinking is False:
             return True
         chat_template_kwargs = self.get_chat_template_kwargs()
-        if (
-            chat_template_kwargs is not None
-            and chat_template_kwargs.get("enable_thinking", True) is False
+        if chat_template_kwargs is not None and (
+            chat_template_kwargs.get("enable_thinking", True) is False
+            or chat_template_kwargs.get("thinking_mode") == "chat"
         ):
             return True
+        if self.thinking_budget is not None:
+            return self.thinking_budget == 0
+        if (
+            self.extra_configs is not None
+            and "max_thinking_tokens" in self.extra_configs.model_fields_set
+        ):
+            return self.extra_configs.max_thinking_tokens == 0
         return False
 
 
