@@ -65,6 +65,16 @@ cc_library(
     alwayslink = 1,
 )
 
+cc_library(
+    name = "no_block_copy_fallback",
+    srcs = ["NoBlockCopyFallback.cc"],
+    copts = copts(),
+    deps = [
+        ":no_block_copy_hdr",
+    ],
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
 
 cc_library(
     name = "dummy_register",

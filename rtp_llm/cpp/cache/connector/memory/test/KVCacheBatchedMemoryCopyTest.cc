@@ -82,6 +82,89 @@ TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
     EXPECT_ANY_THROW(KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(item, slots));
 }
 
+ModelConfig makeDsv4ProModelConfig() {
+    ModelConfig mc;
+    mc.num_layers                                                = 61;
+    mc.hidden_size                                               = 7168;
+    mc.attn_config.head_num                                      = 128;
+    mc.attn_config.kv_head_num                                   = 1;
+    mc.attn_config.size_per_head                                 = 512;
+    mc.attn_config.rope_head_dim                                 = 64;
+    mc.attn_config.sliding_window                                = 128;
+    mc.attn_config.indexer_head_dim                              = 128;
+    mc.attn_config.indexer_head_num                              = 64;
+    mc.attn_config.indexer_topk                                  = 1024;
+    mc.attn_config.o_groups                                      = 16;
+    mc.attn_config.o_lora_rank                                   = 1024;
+    mc.attn_config.tokens_per_block                              = 128;
+    mc.attn_config.kv_cache_dtype                      = KvCacheDataType::FP8;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
+
+    std::vector<int> ratios;
+    ratios.push_back(128);
+    ratios.push_back(128);
+    for (int i = 2; i < mc.num_layers; ++i) {
+        ratios.push_back((i % 2 == 0) ? 4 : 128);
+    }
+    setDsv4KvCacheSpecs(mc, ratios);
+    return mc;
+}
+
+ModelConfig makeDsv4FlashModelConfig() {
+    ModelConfig mc;
+    mc.num_layers                                                = 43;
+    mc.hidden_size                                               = 4096;
+    mc.attn_config.head_num                                      = 64;
+    mc.attn_config.kv_head_num                                   = 1;
+    mc.attn_config.size_per_head                                 = 512;
+    mc.attn_config.rope_head_dim                                 = 64;
+    mc.attn_config.sliding_window                                = 128;
+    mc.attn_config.indexer_head_dim                              = 128;
+    mc.attn_config.indexer_head_num                              = 64;
+    mc.attn_config.indexer_topk                                  = 512;
+    mc.attn_config.o_groups                                      = 8;
+    mc.attn_config.o_lora_rank                                   = 1024;
+    mc.attn_config.tokens_per_block                              = 128;
+    mc.attn_config.kv_cache_dtype                      = KvCacheDataType::FP8;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
+
+    std::vector<int> ratios = {0, 0};
+    for (int i = 2; i < mc.num_layers; ++i) {
+        ratios.push_back((i % 2 == 0) ? 4 : 128);
+    }
+    setDsv4KvCacheSpecs(mc, ratios);
+    return mc;
+}
+
+CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
+    auto              mc = use_flash ? makeDsv4FlashModelConfig() : makeDsv4ProModelConfig();
+    ParallelismConfig pc;
+    return CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+}
+
+CacheConfig makeTinyTypedHybridPoolConfig() {
+    CacheConfig config;
+    config.layer_num          = 2;
+    config.seq_size_per_block = 4;
+
+    auto make_group = [&](const std::string& tag, uint32_t size_per_head) {
+        KVCacheSpecPtr spec  = makeResolvedMhaSpec(rtp_llm::DataType::TYPE_FP16,
+                                                  /*local_head_num_kv=*/1,
+                                                  size_per_head,
+                                                  static_cast<uint32_t>(config.seq_size_per_block),
+                                                  tag);
+        auto           group = makeTestGroupForConfig(config, std::move(spec), {0, 1}, CacheGroupType::FULL, tag);
+        group.policy.explicit_block_num = 16;
+        return group;
+    };
+
+    std::vector<GroupTopology> groups;
+    groups.push_back(make_group("csa_kv", /*size_per_head=*/4));
+    groups.push_back(make_group("swa_kv", /*size_per_head=*/8));
+    setTestTopology(config, std::move(groups));
+    return config;
+}
+
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     CacheConfig        config;
     constexpr auto     dtype                    = rtp_llm::DataType::TYPE_UINT8;
@@ -186,6 +269,20 @@ CacheConfig makeCanonicalCompositeMemoryCopyConfig() {
     return config;
 }
 
+char copyTag(size_t index) {
+    return static_cast<char>(33 + (index % 90));
+}
+
+size_t sumBlockInfosBytes(const std::vector<BlockInfo>& infos) {
+    size_t total = 0;
+    for (const auto& b : infos) {
+        if (b.addr && b.size_bytes > 0) {
+            total += b.size_bytes;
+        }
+    }
+    return total;
+}
+
 void initResourceGroupsForConfig(KVCacheResource& resource, const CacheConfig& config) {
     resource.initGroups(config.topologyPtr());
 }
@@ -212,6 +309,23 @@ void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char
     } else {
         memset(addr, c, byte_len);
     }
+}
+
+void enqueueBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) {
+    ASSERT_NE(b.addr, nullptr);
+    ASSERT_LE(byte_offset + byte_len, b.size_bytes);
+    auto* addr = static_cast<char*>(b.addr) + byte_offset;
+    if (b.is_cuda) {
+        const auto rc = cudaMemset(addr, c, byte_len);
+        ASSERT_EQ(rc, cudaSuccess) << cudaGetErrorString(rc);
+    } else {
+        memset(addr, c, byte_len);
+    }
+}
+
+void synchronizeCudaDevice() {
+    const auto sync_rc = cudaDeviceSynchronize();
+    ASSERT_EQ(sync_rc, cudaSuccess) << cudaGetErrorString(sync_rc);
 }
 
 void verifyBlockBytesEq(const BlockInfo& b, size_t byte_offset, size_t byte_len, char expected) {
@@ -244,11 +358,79 @@ void setBlockInfosContent(const std::vector<BlockInfo>& infos, char c) {
     }
 }
 
+void enqueueBlockInfosContent(const std::vector<BlockInfo>& infos, char c) {
+    for (const auto& b : infos) {
+        if (b.addr && b.size_bytes > 0) {
+            enqueueBlockBytes(b, /*byte_offset=*/0, b.size_bytes, c);
+        }
+    }
+}
+
 void verifyBlockInfosContent(const std::vector<BlockInfo>& infos, char c) {
     for (const auto& b : infos) {
         if (b.addr && b.size_bytes > 0) {
             verifyBlockBytesEq(b, /*byte_offset=*/0, b.size_bytes, c);
         }
+    }
+}
+
+struct BlockBytesExpectation {
+    BlockInfo block;
+    char      expected{0};
+};
+
+struct CudaHostDeleter {
+    void operator()(void* ptr) const {
+        if (ptr != nullptr) {
+            cudaFreeHost(ptr);
+        }
+    }
+};
+
+void verifyBlockBytesEqBatch(const std::vector<BlockBytesExpectation>& expectations) {
+    size_t total_bytes = 0;
+    for (const auto& expectation : expectations) {
+        ASSERT_NE(expectation.block.addr, nullptr);
+        total_bytes += expectation.block.size_bytes;
+    }
+    ASSERT_GT(total_bytes, 0u);
+
+    void*      raw_data = nullptr;
+    const auto alloc_rc = cudaMallocHost(&raw_data, total_bytes);
+    ASSERT_EQ(alloc_rc, cudaSuccess) << cudaGetErrorString(alloc_rc);
+    std::unique_ptr<void, CudaHostDeleter> data(raw_data);
+
+    size_t offset   = 0;
+    bool   has_cuda = false;
+    for (const auto& expectation : expectations) {
+        const auto& block = expectation.block;
+        auto*       dst   = static_cast<char*>(data.get()) + offset;
+        if (block.is_cuda) {
+            const auto copy_rc = cudaMemcpyAsync(dst, block.addr, block.size_bytes, cudaMemcpyDeviceToHost);
+            ASSERT_EQ(copy_rc, cudaSuccess) << cudaGetErrorString(copy_rc);
+            has_cuda = true;
+        } else {
+            memcpy(dst, block.addr, block.size_bytes);
+        }
+        offset += block.size_bytes;
+    }
+    if (has_cuda) {
+        const auto sync_rc = cudaStreamSynchronize(nullptr);
+        ASSERT_EQ(sync_rc, cudaSuccess) << cudaGetErrorString(sync_rc);
+    }
+
+    offset = 0;
+    for (const auto& expectation : expectations) {
+        const auto* actual   = static_cast<const unsigned char*>(data.get()) + offset;
+        size_t      mismatch = 0;
+        for (; mismatch < expectation.block.size_bytes; ++mismatch) {
+            if (actual[mismatch] != static_cast<unsigned char>(expectation.expected)) {
+                break;
+            }
+        }
+        ASSERT_EQ(mismatch, expectation.block.size_bytes)
+            << "mismatch at aggregate byte offset " << offset + mismatch << " expect '" << expectation.expected << "'";
+        offset += expectation.block.size_bytes;
     }
 }
 
@@ -583,6 +765,183 @@ TEST(KVCacheBatchedMemoryCopyTest, CanonicalCompositeDiskRoundTripUsesSlotSumBlo
         verifyBlockInfosContent(allocator->convertIndexToBuffer(slots[i].layer_id, slots[i].tag, gpu_blocks[i]),
                                 static_cast<char>('a' + i));
     }
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityUsesTypedOpaqueLayout) {
+    KVCacheConfig            kv_config;
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+
+    auto non_dsv4_config    = makeTinyTypedHybridPoolConfig();
+    auto non_dsv4_connector = std::make_shared<KVCacheMemoryConnector>(
+        non_dsv4_config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), server_addrs);
+    const auto non_dsv4_slots = non_dsv4_connector->layerGroupSlots();
+    ASSERT_TRUE(non_dsv4_connector->hasTypedLayerGroupSlots(non_dsv4_slots));
+    EXPECT_FALSE(non_dsv4_connector->supportsTypedPrefixCacheLayout(non_dsv4_slots));
+
+    auto non_sparse_config      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    non_sparse_config.is_sparse = false;
+    auto non_sparse_connector   = std::make_shared<KVCacheMemoryConnector>(
+        non_sparse_config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), server_addrs);
+    EXPECT_TRUE(non_sparse_connector->supportsTypedPrefixCacheLayout(non_sparse_connector->layerGroupSlots()));
+
+    auto wrong_schema_config    = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    auto wrong_schema_connector = std::make_shared<KVCacheMemoryConnector>(
+        wrong_schema_config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), server_addrs);
+    EXPECT_TRUE(wrong_schema_connector->supportsTypedPrefixCacheLayout(wrong_schema_connector->layerGroupSlots()));
+
+    auto flash_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    auto flash_connector = std::make_shared<KVCacheMemoryConnector>(
+        flash_config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), server_addrs);
+    EXPECT_EQ(flash_config.layer_num, 43u);
+    EXPECT_TRUE(flash_connector->supportsTypedPrefixCacheLayout(flash_connector->layerGroupSlots()));
+
+    auto pro_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/false);
+    auto pro_connector = std::make_shared<KVCacheMemoryConnector>(
+        pro_config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), server_addrs);
+    EXPECT_EQ(pro_config.layer_num, 61u);
+    EXPECT_TRUE(pro_connector->supportsTypedPrefixCacheLayout(pro_connector->layerGroupSlots()));
+}
+
+void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_groups) {
+    const auto set_device_rc = cudaSetDevice(0);
+    ASSERT_EQ(set_device_rc, cudaSuccess) << cudaGetErrorString(set_device_rc);
+
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb            = 64;
+    kv_config.memory_cache_sync_timeout_ms    = 1000;
+    kv_config.enable_prefix_tree_memory_cache = false;
+
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(config, /*payload_gap_bytes=*/8, host_groups);
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    ASSERT_TRUE(connector->init());
+    auto memory_pool = connector->isDualPool() ? connector->complete_pool_ : connector->block_pool_;
+    ASSERT_NE(memory_pool, nullptr);
+
+    const auto slots = connector->layerGroupSlots();
+    ASSERT_TRUE(connector->hasTypedLayerGroupSlots(slots));
+    ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
+    ASSERT_GT(slots.size(), config.layer_all_num);
+
+    auto mem_blocks = memory_pool->malloc(2);
+    ASSERT_EQ(mem_blocks.size(), 2u);
+    const std::vector<BlockIdxType> request_mem_blocks{static_cast<BlockIdxType>(mem_blocks[1]),
+                                                       static_cast<BlockIdxType>(mem_blocks[0])};
+
+    std::vector<std::vector<BlockIdxType>> gpu_block_sets(request_mem_blocks.size(),
+                                                          std::vector<BlockIdxType>(slots.size(), NULL_BLOCK_IDX));
+    BlockIdxType                           next_gpu_block = 1;
+    for (auto& gpu_blocks : gpu_block_sets) {
+        for (auto& gpu_block : gpu_blocks) {
+            gpu_block = next_gpu_block++;
+        }
+    }
+    ASSERT_LT(next_gpu_block, static_cast<BlockIdxType>(config.blockNum()));
+    ASSERT_EQ(gpu_block_sets.size(), request_mem_blocks.size());
+    MemoryOperationRequestPB request;
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        ASSERT_EQ(gpu_block_sets[block_idx].size(), slots.size());
+        auto* item = request.add_copy_items();
+        item->set_mem_block(request_mem_blocks[block_idx]);
+        item->set_cache_block_kind(MemoryOperationRequestPB::COMPLETE_KV);
+        item->set_is_complete(true);
+        addTaggedGpuBlocks(*item, slots, gpu_block_sets[block_idx]);
+    }
+
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        ASSERT_EQ(mem_bufs.size(), 1u);
+        const auto& mem_buffer = mem_bufs[0];
+        ASSERT_NE(mem_buffer.addr, nullptr);
+        enqueueBlockBytes(mem_buffer, /*byte_offset=*/0, mem_buffer.size_bytes, '#');
+
+        size_t byte_off = 0;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& slot = slots[i];
+            const char  tag  = copyTag(block_idx * slots.size() + i);
+            const auto  gpu_bufs =
+                allocator->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block_sets[block_idx][i]);
+            ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
+            ASSERT_LE(sumBlockInfosBytes(gpu_bufs), slot.stride_bytes);
+            enqueueBlockInfosContent(gpu_bufs, tag);
+            enqueueBlockBytes(mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), 0);
+            byte_off += slot.stride_bytes;
+        }
+    }
+    synchronizeCudaDevice();
+
+    request.set_copy_direction(MemoryOperationRequestPB::D2H);
+    MemoryOperationResponsePB d2h_response;
+    ASSERT_TRUE(connector->copyCache(request, d2h_response));
+    ASSERT_TRUE(d2h_response.success());
+
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        ASSERT_EQ(mem_bufs.size(), 1u);
+        const auto& mem_buffer = mem_bufs[0];
+
+        size_t byte_off = 0;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& slot = slots[i];
+            const auto  gpu_bufs =
+                allocator->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block_sets[block_idx][i]);
+            verifyBlockBytesEq(
+                mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), copyTag(block_idx * slots.size() + i));
+            if (slot.stride_bytes > sumBlockInfosBytes(gpu_bufs)) {
+                verifyBlockBytesEq(mem_buffer,
+                                   byte_off + sumBlockInfosBytes(gpu_bufs),
+                                   slot.stride_bytes - sumBlockInfosBytes(gpu_bufs),
+                                   '#');
+            }
+            byte_off += slot.stride_bytes;
+        }
+    }
+
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        ASSERT_EQ(mem_bufs.size(), 1u);
+        const auto& mem_buffer = mem_bufs[0];
+
+        size_t byte_off = 0;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& slot = slots[i];
+            const char  tag  = copyTag(1000 + block_idx * slots.size() + i);
+            const auto  gpu_bufs =
+                allocator->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block_sets[block_idx][i]);
+            enqueueBlockInfosContent(gpu_bufs, 0);
+            enqueueBlockBytes(mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), tag);
+            byte_off += slot.stride_bytes;
+        }
+    }
+    synchronizeCudaDevice();
+
+    request.set_copy_direction(MemoryOperationRequestPB::H2D);
+    MemoryOperationResponsePB h2d_response;
+    ASSERT_TRUE(connector->copyCache(request, h2d_response));
+    ASSERT_TRUE(h2d_response.success());
+
+    std::vector<BlockBytesExpectation> gpu_expectations;
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& slot = slots[i];
+            const auto  gpu_bufs =
+                allocator->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block_sets[block_idx][i]);
+            for (const auto& gpu_buf : gpu_bufs) {
+                if (gpu_buf.addr != nullptr && gpu_buf.size_bytes > 0) {
+                    gpu_expectations.push_back(
+                        BlockBytesExpectation{gpu_buf, copyTag(1000 + block_idx * slots.size() + i)});
+                }
+            }
+        }
+    }
+    verifyBlockBytesEqBatch(gpu_expectations);
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
+    runDsv4TypedStagedCopyRoundTrip({});
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
