@@ -191,31 +191,20 @@ TEST_F(CacheStoreAsyncWriterTest, InitWhileRunningThrows) {
 
 TEST_F(CacheStoreAsyncWriterTest, InitWaitCycle) {
     CacheStoreAsyncWriter writer;
-    std::vector<int>      order;
-    std::mutex            order_mutex;
+    std::atomic<int>      completed{0};
 
     writer.init();
-    writer.submit([&]() {
-        std::lock_guard<std::mutex> lock(order_mutex);
-        order.push_back(1);
-    });
-    writer.submit([&]() {
-        std::lock_guard<std::mutex> lock(order_mutex);
-        order.push_back(2);
-    });
+    writer.submit([&]() { completed.fetch_add(1); });
+    writer.submit([&]() { completed.fetch_add(1); });
     writer.waitAllDone();
 
-    ASSERT_EQ(2u, order.size());
+    ASSERT_EQ(2, completed.load());
 
     writer.init();
-    writer.submit([&]() {
-        std::lock_guard<std::mutex> lock(order_mutex);
-        order.push_back(3);
-    });
+    writer.submit([&]() { completed.fetch_add(1); });
     writer.waitAllDone();
 
-    ASSERT_EQ(3u, order.size());
-    ASSERT_EQ(3, order.back());
+    ASSERT_EQ(3, completed.load());
 }
 
 TEST_F(CacheStoreAsyncWriterTest, AsyncExecution) {

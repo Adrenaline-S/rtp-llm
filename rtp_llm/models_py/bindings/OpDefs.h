@@ -82,6 +82,16 @@ public:
         return grouped_layout_.topology().layers().size();
     }
 
+    std::vector<std::string> groupTags() const {
+        std::vector<std::string> tags;
+        const auto&              groups = grouped_layout_.topology().groups();
+        tags.reserve(groups.size());
+        for (const auto& group : groups) {
+            tags.push_back(group.tag);
+        }
+        return tags;
+    }
+
     int getSeqSizePerBlock(const std::string& tag) const {
         return static_cast<int>(physicalSeqSize(grouped_layout_.topology().group(tag)));
     }

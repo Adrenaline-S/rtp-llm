@@ -41,6 +41,7 @@ struct GraphParams {
     std::vector<int> decode_capture_batch_sizes;
     // Per-group block-table capacities used to allocate fixed capture buffers.
     std::map<std::string, CacheBlockTableCapacity> kv_cache_block_table_capacities;
+    int64_t                                        hc_mult = 1;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from

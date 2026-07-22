@@ -301,9 +301,29 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         spec->tag              = desc.tag;
         spec->entry_dtype_     = desc.entry_dtype;
         const uint32_t entries = entryCount(desc, ctx, seq_size_per_block, kernel_seq_size_per_block);
-        const size_t   payload = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
-        const size_t   stride  = blockStrideBytes(desc, payload, entries);
-        spec->setLayout(desc.entry_elems, entries, payload, stride);
+        // Layer views split each physical block into kernel_pages equal rows
+        // (see makeLayerCache), so every kernel page must start on its own
+        // stride-aligned boundary. Align the per-page payload and scale it
+        // back up instead of aligning the packed whole-block payload.
+        uint32_t kernel_pages = 1;
+        if (desc.block_stride_bytes_override == 0 && kernel_seq_size_per_block > 0
+            && seq_size_per_block > kernel_seq_size_per_block) {
+            RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % kernel_seq_size_per_block == 0,
+                                    "COMPRESSED_KV tag=%s physical block %u must be a multiple of kernel block %u",
+                                    desc.tag.c_str(),
+                                    seq_size_per_block,
+                                    kernel_seq_size_per_block);
+            kernel_pages = seq_size_per_block / kernel_seq_size_per_block;
+            RTP_LLM_CHECK_WITH_INFO(entries % kernel_pages == 0,
+                                    "COMPRESSED_KV tag=%s entries=%u must split evenly across %u kernel pages",
+                                    desc.tag.c_str(),
+                                    entries,
+                                    kernel_pages);
+        }
+        const uint32_t page_entries = entries / kernel_pages;
+        const size_t   page_payload = payloadBytes(desc.entry_elems, page_entries, desc.entry_dtype);
+        const size_t   page_stride  = blockStrideBytes(desc, page_payload, page_entries);
+        spec->setLayout(desc.entry_elems, entries, page_payload * kernel_pages, page_stride * kernel_pages);
         return spec;
     }
 

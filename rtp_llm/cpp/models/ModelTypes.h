@@ -51,6 +51,7 @@ struct GptModelInitParams {
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
+    int64_t            hc_mult = 1;
 };
 
 enum GptModelInputIndex : size_t {
@@ -76,6 +77,7 @@ enum GptModelInputIndex : size_t {
     mmHasExtraInput,    // number of extra-input tensors (model-specific, e.g. deepstack)
     mmExtraInputDtype,  // dtype of extra-input elements
     needAllLogits,
+    needAllHiddenStates,
     mtpHiddenStates,
     mtpHiddenStatesDtype,
     skipRun,
@@ -126,6 +128,12 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual torch::Tensor   getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
+    virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

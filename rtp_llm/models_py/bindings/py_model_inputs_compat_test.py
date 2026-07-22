@@ -12,6 +12,11 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_fmha_impl_for_tag,
 )
 from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
+from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, SWA_KV
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    require_kernel_block_table_tokens_per_block,
+    require_pool_tokens_per_block,
+)
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType
 from rtp_llm.ops.compute_ops import (
@@ -43,6 +48,16 @@ class _ConcreteRoutingCache:
         if layer_id != 0:
             raise RuntimeError(f"invalid layer {layer_id}")
         return self._caches
+
+
+class _TaggedBlockSizes:
+    group_tags = ["swa_kv", "csa_kv"]
+
+    def get_seq_size_per_block(self, tag: str) -> int:
+        return {"swa_kv": 512, "csa_kv": 256}[tag]
+
+    def get_kernel_seq_size_per_block(self, tag: str) -> int:
+        return {"swa_kv": 512, "csa_kv": 128}[tag]
 
 
 class PyModelInputsCompatTest(unittest.TestCase):
@@ -279,6 +294,12 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(20, selected.kv_cache_kernel_block_id.item())
         self.assertFalse(hasattr(selected, "kv_cache_kernel_block_id_by_group"))
         self.assertFalse(hasattr(selected, "kv_cache_layer_to_group"))
+
+    def test_dsv4_pool_block_size_uses_tagged_read_only_api(self) -> None:
+        cache = _TaggedBlockSizes()
+        self.assertEqual(512, require_pool_tokens_per_block(cache, region=SWA_KV))
+        self.assertEqual(128, require_pool_tokens_per_block(cache, region=CSA_KV))
+        self.assertEqual(128, require_kernel_block_table_tokens_per_block(cache))
 
     def test_single_group_adapter_returns_native_layer_cache(self) -> None:
         tensors = [torch.zeros((2, 2, 1, 8, 4), dtype=torch.float16)]

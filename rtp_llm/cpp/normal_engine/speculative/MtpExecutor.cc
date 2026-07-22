@@ -141,6 +141,29 @@ void MtpExecutor::releaseModelBuffers() {
     }
 }
 
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
+                                                       ModelBase&      source,
+                                                       bool            request_actual_rows) {
+    if (!model_input.combo_tokens.defined() || model_input.combo_tokens.numel() == 0) {
+        return;
+    }
+    const auto rows   = request_actual_rows ? -1 : model_input.combo_tokens.numel();
+    auto       pre_hc = source.getMtpTargetHiddenStates(rows);
+    if (pre_hc.defined() && pre_hc.numel() > 0) {
+        model_input.last_hidden_states = pre_hc;
+    }
+}
+
+void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source) {
+    if (!model_output.all_hidden_states.defined() || model_output.all_hidden_states.size(0) == 0) {
+        return;
+    }
+    auto pre_hc = source.getMtpTargetHiddenStates(model_output.all_hidden_states.size(0));
+    if (pre_hc.defined() && pre_hc.numel() > 0) {
+        model_output.all_hidden_states = pre_hc;
+    }
+}
+
 void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const {
     bool force = tp_rank_ == 0 && enable_detail_log_;
     if (force) {
@@ -216,8 +239,10 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
-    auto sp_buffer = makeFakeSPOutputBuffer(
-        model_config.data_type, model_config.hidden_size, model_config.vocab_size, max_new_tokens);
+    auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
+                                            model_config.hidden_size * model_config.hc_mult,
+                                            model_config.vocab_size,
+                                            max_new_tokens);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -256,7 +281,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                             "unset TREE_DECODE_CONFIG or disable MTP");
 
     data_type_          = params.model_config_.data_type;
-    hidden_size_        = params.model_config_.hidden_size;
+    hidden_size_        = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_       = propose_params->gen_num_per_circle;
     vocab_size_         = params.model_config_.vocab_size;
     propose_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
@@ -329,7 +354,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.attn_config.tokens_per_block,
          params.model_config_.attn_config.kernel_tokens_per_block,
          cache_manager,
-         std::nullopt});
+         std::nullopt,
+         params.model_config_.hc_mult});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -375,7 +401,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 cache_manager,
-                                std::make_optional(0)});
+                                std::make_optional(0),
+                                mtp_params->model_config_.hc_mult});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));
@@ -447,6 +474,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   sampler_output;
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
+    const bool      cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    torch::Tensor   draft_last_hidden_states;
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -477,6 +506,25 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // release model input before forward
     releaseModelBuffers();
 
+    // CP input handling replaces combo_tokens with the rank-local chunk and
+    // rewrites input_lengths in place. The MTP shift below operates on the
+    // original request-major sequence, so preserve both tensors before the
+    // target forward and restore them after target sampling. input_lengths
+    // must be cloned because the CP processor mutates its storage in place.
+    torch::Tensor saved_combo_tokens;
+    torch::Tensor saved_input_lengths;
+    if (cp_enabled) {
+        auto snapshotInput = [](const torch::Tensor& tensor) {
+            auto snapshot = tensor.clone();
+            if (snapshot.device().is_cpu() && !snapshot.is_pinned()) {
+                snapshot = snapshot.pin_memory();
+            }
+            return snapshot;
+        };
+        saved_combo_tokens  = snapshotInput(model_input.combo_tokens);
+        saved_input_lengths = snapshotInput(model_input.input_lengths);
+    }
+
     // target model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
@@ -501,6 +549,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             sampler_output = std::move(sampler_->forward(sampler_input));
+            if (cp_enabled) {
+                model_input.combo_tokens  = saved_combo_tokens;
+                model_input.input_lengths = saved_input_lengths;
+            }
             batch_stream_processor_->updatePrefillPostDraftModelInput(
                 stream_groups, model_input, model_output, sampler_output);
         }
@@ -509,10 +561,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+        if (cp_enabled) {
+            model_input.last_hidden_states = torch::Tensor();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
         applyCacheLayoutToModelInput(model_input, mtp_cache_cfg);
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
         draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
     }
 
@@ -520,6 +576,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         cudaSyncAndCheck();
         releaseModelBuffers();
         return absl::OkStatus();
+    }
+
+    if (cp_enabled) {
+        draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(stream_groups.totalSamplerBatchSizeOut());
+        RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0,
+                                "CP MTP draft last-hidden buffer must contain per-request rows");
+    } else {
+        maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
     }
 
     // draft model sample
@@ -551,7 +615,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         auto result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
-                                                     {std::move(draft_model_output), std::move(draft_sampler_output)});
+                                                     {std::move(draft_model_output), std::move(draft_sampler_output)},
+                                                     draft_last_hidden_states);
         RTP_LLM_LOG_DEBUG("dispatch done");
 
         releaseModelBuffers();
@@ -726,6 +791,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             model_input.prefix_lengths.size(0),
             model_input.sequence_lengths.size(0));
         model_output = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
+        // DSV4 exposes the target pre-HC hidden states through a side buffer.
+        // Publish the complete dense [batch, propose_step + 1] rows before
+        // rejection compacts accepted rows.  Slicing only the first N rows
+        // after compaction selects rejected rows from earlier batch entries
+        // when accept lengths differ.
+        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_);
         RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
         model_input.is_target_verify = false;
     }
@@ -806,9 +877,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // model_input.combo_position_ids, so the draft prefill CUDA graph does not need to copy it.
             draft_prefill_model_output = std::move(
                 forwardModel(sp_prefill_draft_model_.get(), model_input, ModelInputsModelRole::DRAFT_PREFILL));
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
         } else {
             draft_prefill_model_output =
                 std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT_PREFILL));
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
         }
     }
 
@@ -993,6 +1066,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
         draft_decode_model_output =
             std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
+        maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample

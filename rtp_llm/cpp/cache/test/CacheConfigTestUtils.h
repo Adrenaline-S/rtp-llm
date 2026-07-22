@@ -411,8 +411,10 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
     swa_desc.kernel_seq_size_per_block.reset();
     swa_desc.entry_elems = static_cast<uint32_t>(model_config.attn_config.size_per_head)
                            * static_cast<uint32_t>(model_config.attn_config.kv_head_num) * 2;
-    swa_desc.explicit_entry_count = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    swa_desc.entry_dtype          = DataType::TYPE_FP16;
+    swa_desc.explicit_entry_count =
+        static_cast<uint32_t>(model_config.attn_config.sliding_window > 0 ? model_config.attn_config.sliding_window :
+                                                                            model_config.attn_config.tokens_per_block);
+    swa_desc.entry_dtype = DataType::TYPE_FP16;
 
     KVCacheSpecDesc linear_desc;
     linear_desc.tag        = "linear";

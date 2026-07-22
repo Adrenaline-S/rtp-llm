@@ -62,6 +62,18 @@ public:
         callback(load_success, load_error);
     }
 
+    void load(const std::shared_ptr<rtp_llm::RequestBlockBuffer>&,
+              rtp_llm::CacheStoreLoadDoneCallback callback,
+              const std::string&,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int,
+              const std::shared_ptr<rtp_llm::LoadCopyFence>&) override {
+        callback(load_success, load_error);
+    }
+
     std::shared_ptr<rtp_llm::LoadContext> loadBuffers(const std::vector<std::shared_ptr<rtp_llm::RequestBlockBuffer>>&,
                                                       const std::string&,
                                                       uint32_t,
@@ -703,6 +715,51 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadO
     EXPECT_EQ(it->second.len, layer_view_stride);
     EXPECT_LE(reinterpret_cast<uintptr_t>(it->second.addr) + it->second.len,
               reinterpret_cast<uintptr_t>(physical_kv.data_ptr()) + physical_kv.nbytes());
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreFullGroupKeepsPhysicalTokensPerBlock) {
+    constexpr size_t physical_tokens_per_block = 256;
+    constexpr size_t kernel_tokens_per_block   = 128;
+    constexpr size_t physical_block_stride     = 64;
+    constexpr size_t physical_block_num        = 2;
+
+    auto cache_store = std::make_shared<MockCacheStore>();
+    auto inputs      = makePyCacheStoreInputs(physical_tokens_per_block, physical_block_num);
+    auto config      = makeCacheConfig(physical_tokens_per_block,
+                                  physical_block_stride,
+                                  /*physical_scale_stride=*/0,
+                                  physical_block_num,
+                                  "full",
+                                  /*layer_id=*/0,
+                                  defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  /*add_dummy_group=*/false,
+                                  /*mla_cache=*/true);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base =
+        torch::zeros({static_cast<int64_t>(physical_block_num), static_cast<int64_t>(physical_block_stride)},
+                     torch::kUInt8);
+    // DSV4 FULL attention exposes kernel-sized pages to the layer while the
+    // allocator/cache-store contract remains physical-block-sized.
+    layer_cache.seq_size_per_block = kernel_tokens_per_block;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "full";
+
+    // Mirrors the failing GPQA shape: with physical=256 and CP=2, 237
+    // tokens map to one rank-local row.  Treating the kernel page (128) as a
+    // physical block incorrectly maps the same request to two rows.
+    inputs.input_lengths_host   = torch::tensor({237}, torch::kInt32);
+    inputs.prefix_lengths_host  = torch::tensor({0}, torch::kInt32);
+    inputs.host_kv_cache_offset = torch::tensor({{0, 1}}, torch::kInt32);
+
+    ASSERT_NO_THROW(runtimeWriteCacheStore(
+        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/2, nullptr));
+
+    ASSERT_EQ(cache_store->records.size(), 1u);
+    const auto& record = cache_store->records.front();
+    ASSERT_EQ(record.blocks.size(), 1u);
+    const auto key = "kv_" + cacheKeyAt(inputs, 0, layer_cache.layer_id, layer_cache.tag);
+    EXPECT_NE(record.blocks.find(key), record.blocks.end());
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {

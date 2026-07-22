@@ -1075,7 +1075,10 @@ TEST(GenericOpaqueCacheSpecTest, KVSpecFromPoolSpec) {
         "hca_kv", kDsv4Fp8KvEntryBytes, 2, DataType::TYPE_UINT8, 1, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES);
     ASSERT_NE(hca_spec, nullptr);
     EXPECT_EQ(hca_spec->block_size(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
-    EXPECT_EQ(hca_spec->block_size_bytes(), 74880u);
+    // 64 kernel pages per physical block; every page payload (2 * 584 = 1168)
+    // is individually aligned to 576 (-> 1728) so kernel-granular layer rows
+    // land on page boundaries: 64 * 1728 = 110592.
+    EXPECT_EQ(hca_spec->block_size_bytes(), 110592u);
 }
 
 TEST(GenericOpaqueCacheSpecTest, CompressedKVSpecReportsGenericKindsAndLayout) {
