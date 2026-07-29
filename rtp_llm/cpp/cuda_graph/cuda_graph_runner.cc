@@ -462,14 +462,15 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
-    if (kv_cache_group_tags_.size() > 1) {
-        if (inputs.attention_inputs_by_tag.size() != kv_cache_group_tags_.size()) {
+    if (kv_cache_groups_.size() > 1) {
+        if (inputs.attention_inputs_by_tag.size() != kv_cache_groups_.size()) {
             RTP_LLM_LOG_WARNING("Tagged kv cache size mismatch: inputs=%zu, captured=%zu, fallback to normal run.",
                                 inputs.attention_inputs_by_tag.size(),
-                                kv_cache_group_tags_.size());
+                                kv_cache_groups_.size());
             return false;
         }
-        for (const auto& tag : kv_cache_group_tags_) {
+        for (const auto& [tag, type] : kv_cache_groups_) {
+            (void)type;
             if (inputs.attention_inputs_by_tag.find(tag) == inputs.attention_inputs_by_tag.end()) {
                 RTP_LLM_LOG_WARNING("Tagged kv cache is missing tag=%s, fallback to normal run.", tag.c_str());
                 return false;
@@ -604,20 +605,17 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.decode_cu_seqlens = torch::arange(0, max_bs_ + 1, 1, options_cpu_int32_).pin_memory();
 
     inputs.attention_inputs_by_tag.clear();
-    if (kv_cache_group_tags_.size() > 1) {
-        for (size_t group_id = 0; group_id < kv_cache_group_tags_.size(); ++group_id) {
+    if (kv_cache_groups_.size() > 1) {
+        for (const auto& [tag, type] : kv_cache_groups_) {
+            (void)type;
             auto tagged_inputs = inputs.attention_inputs;
-            if (group_id > 0) {
-                tagged_inputs.kv_cache_kernel_block_id_device =
-                    torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
-                tagged_inputs.kv_cache_kernel_block_id =
-                    torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
-            }
-            const auto [it, inserted] =
-                inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_id], std::move(tagged_inputs));
+            tagged_inputs.kv_cache_kernel_block_id_device =
+                torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+            tagged_inputs.kv_cache_kernel_block_id =
+                torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+            const auto [it, inserted] = inputs.attention_inputs_by_tag.emplace(tag, std::move(tagged_inputs));
             (void)it;
-            RTP_LLM_CHECK_WITH_INFO(
-                inserted, "duplicate CUDA graph KV cache tag=%s", kv_cache_group_tags_[group_id].c_str());
+            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate CUDA graph KV cache tag=%s", tag.c_str());
         }
     }
 }

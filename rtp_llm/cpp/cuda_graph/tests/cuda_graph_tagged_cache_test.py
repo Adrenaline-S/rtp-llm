@@ -96,6 +96,7 @@ def _build_decode_inputs(
     attention_inputs.kv_cache_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id_device
     )
+    inputs.attention_inputs = attention_inputs
     inputs.attention_inputs = _tag_attention_inputs(attention_inputs, tags, values)
     return inputs
 
@@ -131,6 +132,7 @@ def _build_prefill_inputs(
     attention_inputs.kv_cache_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id_device
     )
+    inputs.attention_inputs = attention_inputs
     inputs.attention_inputs = _tag_attention_inputs(attention_inputs, tags, values)
     return inputs
 
