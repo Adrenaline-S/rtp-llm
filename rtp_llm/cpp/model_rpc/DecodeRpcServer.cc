@@ -388,9 +388,10 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     auto*             generate_stream = decode_context.getStream().get();
-    auto&             cache_keys      = generate_stream->cacheKeys(0);
+    const auto&       cache_key_tag   = generate_stream->singleCacheKeyTag();
+    const auto&       cache_keys      = generate_stream->cacheKeys(0, cache_key_tag);
     TaggedBlockIdsMap block_ids_by_tag;
-    for (const auto& group : generate_stream->kvCachePtr()->groupBlocks(0)) {
+    for (const auto& group : generate_stream->kvCachePtr()->groupResources(0)) {
         block_ids_by_tag.emplace(group.tag, group.block_ids);
     }
 
@@ -746,9 +747,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (!is_page_level_rr || !groupUsesCpSlice(cfg, tag) || load_context.prefill_cp_size <= 1) {
             return false;
         }
-        const auto group_tokens = cfg.seqSizePerBlockForGroup(tag);
-        return group_tokens > 0
-               && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
+        const auto group_tokens      = cfg.seqSizePerBlockForGroup(tag);
+        size_t     full_group_tokens = 0;
+        for (const auto& group : cfg.topology().groups()) {
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                full_group_tokens = group.seq_size_per_block;
+                break;
+            }
+        }
+        return group_tokens > 0 && full_group_tokens > 0
+               && group_tokens == full_group_tokens * static_cast<size_t>(load_context.prefill_cp_size);
     };
     auto blockPositionsForLoad = [&](size_t             block_num,
                                      const CacheConfig& cfg,

@@ -31,13 +31,24 @@ class TaggedBlockTableModel:
 
 
 def _tag_attention_inputs(
-    common: PyAttentionInputs, tags: list[str], values: dict[str, int]
+    common: PyAttentionInputs,
+    tags: list[str],
+    values: dict[str, int],
+    widths: dict[str, int] | None = None,
 ) -> dict[str, PyAttentionInputs]:
     tagged = {}
     for tag in tags:
         tag_inputs = copy.copy(common)
-        host_blocks = torch.full_like(
-            common.kv_cache_kernel_block_id, values[tag], device="cpu"
+        width = (
+            widths[tag]
+            if widths is not None
+            else common.kv_cache_kernel_block_id.size(1)
+        )
+        host_blocks = torch.full(
+            (common.kv_cache_kernel_block_id.size(0), width),
+            values[tag],
+            dtype=common.kv_cache_kernel_block_id.dtype,
+            device="cpu",
         )
         device_blocks = host_blocks.cuda()
         tag_inputs.kv_cache_kernel_block_id = host_blocks
@@ -53,6 +64,7 @@ def _build_decode_inputs(
     values: dict[str, int],
     batch_size: int = 2,
     is_target_verify: bool = False,
+    widths: dict[str, int] | None = None,
 ) -> PyModelInputs:
     inputs = PyModelInputs()
     inputs.input_ids = torch.arange(batch_size, dtype=torch.int32, device="cuda")
@@ -97,7 +109,9 @@ def _build_decode_inputs(
         attention_inputs.kv_cache_kernel_block_id_device
     )
     inputs.attention_inputs = attention_inputs
-    inputs.attention_inputs = _tag_attention_inputs(attention_inputs, tags, values)
+    inputs.attention_inputs = _tag_attention_inputs(
+        attention_inputs, tags, values, widths
+    )
     return inputs
 
 
@@ -207,6 +221,39 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             runner,
             _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
             52,
+        )
+
+    def test_decode_heterogeneous_group_widths_are_captured_per_tag(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedBlockTableModel(),
+            HIDDEN_SIZE,
+            16,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+            False,
+            {"full": (16, 1), "aux": (4, 4)},
+        )
+
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(
+                GROUP_TAGS,
+                {"full": 3, "aux": 2},
+                widths={"full": 8, "aux": 2},
+            ),
+            35,
+        )
+        self.assertFalse(
+            runner.canRun(
+                _build_decode_inputs(
+                    GROUP_TAGS,
+                    {"full": 3, "aux": 2},
+                    widths={"full": 17, "aux": 2},
+                )
+            )
         )
 
     def test_duplicate_capture_tag_is_rejected(self) -> None:

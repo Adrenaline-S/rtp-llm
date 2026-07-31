@@ -21,9 +21,13 @@ namespace rtp_llm {
 
 struct TaggedBlockTable {
     std::string    tag;
-    CacheGroupType type = CacheGroupType::FULL;
-    torch::Tensor  block_ids;         // [batch, width]
-    torch::Tensor  kernel_block_ids;  // [batch, kernel_width]
+    CacheGroupType type                      = CacheGroupType::FULL;
+    size_t         seq_size_per_block        = 1;
+    size_t         kernel_seq_size_per_block = 1;
+    size_t         kv_block_stride_bytes     = 0;
+    size_t         kv_scale_stride_bytes     = 0;
+    torch::Tensor  block_ids;         // [batch, physical width]
+    torch::Tensor  kernel_block_ids;  // [batch, expanded kernel width]
 };
 
 using BlockTablesByTag = std::map<std::string, TaggedBlockTable>;
@@ -76,9 +80,9 @@ struct GptModelInputs {
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
-    size_t kv_block_stride_bytes;
-    size_t kv_scale_stride_bytes;
-    size_t seq_size_per_block;
+    size_t kv_block_stride_bytes     = 0;
+    size_t kv_scale_stride_bytes     = 0;
+    size_t seq_size_per_block        = 0;
     size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
     bool   pd_separation             = false;
     bool   decode_entrance           = false;

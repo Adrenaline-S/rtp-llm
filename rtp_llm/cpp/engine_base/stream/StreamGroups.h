@@ -48,7 +48,8 @@ public:
             max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
             if (stream->hasCacheKeys()) {
                 for (int32_t batch_id = 0; batch_id < cur_batch_size; ++batch_id) {
-                    max_cache_keys_num_ = std::max(max_cache_keys_num_, stream->cacheKeys(batch_id).size());
+                    max_cache_keys_num_ =
+                        std::max(max_cache_keys_num_, stream->cacheKeys(batch_id, stream->singleCacheKeyTag()).size());
                 }
             }
             max_seq_len_ = std::max(max_seq_len_, (size_t)stream->seqLength());

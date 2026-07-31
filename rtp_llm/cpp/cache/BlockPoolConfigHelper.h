@@ -16,16 +16,12 @@ public:
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec tag=%s is null", group.tag.c_str());
 
         BlockPoolConfig config;
-        config.pool_name            = group.tag;
-        config.block_num            = group.block_num;
-        const bool has_group_blocks = config.block_num != cache_config.block_num;
-        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s block_num=%d (has_group_blocks=%d, "
-                         "groupNums=%d, global_block_num=%d)",
+        config.pool_name = group.tag;
+        config.block_num = group.block_num;
+        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s block_num=%d groupNums=%d",
                          config.pool_name.c_str(),
                          config.block_num,
-                         has_group_blocks,
-                         cache_config.groupNums(),
-                         cache_config.block_num);
+                         cache_config.groupNums());
 
         size_t   current_offset = 0;
         uint32_t layout_layers  = 0;
@@ -33,14 +29,13 @@ public:
             if (layer_num == 0) {
                 return;
             }
-            CacheConfig resolved_config  = source_config;
-            resolved_config.block_num    = config.block_num;
             auto layout                  = createMemoryLayoutConfig(false,
                                                    layer_num,
+                                                   config.block_num,
                                                    source_group.kv_block_stride_bytes,
                                                    source_group.kv_scale_stride_bytes,
                                                    source_group.spec,
-                                                   resolved_config,
+                                                   source_config,
                                                    source_group.local_kv_head_num,
                                                    source_group.seq_size_per_block,
                                                    source_config.kernelBlocksPerKvBlockForGroup(source_group.tag));
@@ -106,6 +101,7 @@ public:
 private:
     static MemoryLayoutConfig createMemoryLayoutConfig(bool                               enable_hybrid_attention,
                                                        uint32_t                           layer_num,
+                                                       uint32_t                           block_num,
                                                        size_t                             kv_block_stride_bytes,
                                                        size_t                             kv_scale_stride_bytes,
                                                        std::shared_ptr<const KVCacheSpec> spec,
@@ -115,7 +111,7 @@ private:
                                                        size_t                             kernel_blocks_per_kv_block) {
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
-        cfg.block_num             = cache_config.block_num;
+        cfg.block_num             = block_num;
         cfg.kv_block_stride_bytes = kv_block_stride_bytes;
         cfg.k_block_stride_bytes  = spec->k_block_size_bytes();
         cfg.v_block_stride_bytes  = spec->v_block_size_bytes();

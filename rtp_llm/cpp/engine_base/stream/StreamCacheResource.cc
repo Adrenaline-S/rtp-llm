@@ -297,8 +297,12 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
+            const bool tiered_multi_group =
+                enableTieredMemoryCache() && resource_context_.cache_manager->cacheConfig().groupNums() > 1;
+            // A resource rebuilt from a tiered device eviction does not retain the original request prefix.
+            // Publish the complete multi-group manifest while the request resource is still available.
             storeCacheAsync(batch_kv_cache_resource_,
-                            reuseCache() && enableMemoryCache() && !enableTieredMemoryCache(),
+                            reuseCache() && enableMemoryCache() && (!enableTieredMemoryCache() || tiered_multi_group),
                             reuseCache() && enableRemoteCache());
             // only evict when succeeds
             if (enableTieredMemoryCache()) {
@@ -456,21 +460,21 @@ bool StreamCacheResource::loadCacheDone() {
         const int max_retry    = resource_context_.load_cache_retry_times;
         if (read_context && read_context->fusedMatchContext()) {
             // 检查是否有匹配到的块
-            size_t matched_blocks = 0;
+            size_t matched_tokens = 0;
             for (const auto& match_ctx : read_context->fusedMatchContext()->contexts()) {
                 auto async_match_ctx = std::dynamic_pointer_cast<AsyncMatchContext>(match_ctx);
                 if (async_match_ctx) {
-                    matched_blocks = std::max(matched_blocks, async_match_ctx->matchedBlockCount());
+                    matched_tokens = std::max(matched_tokens, async_match_ctx->matchedTokenCount());
                 }
             }
             // 如果匹配到了块（matched_blocks > 0），说明是传输失败，需要重试，否则是匹配失败，不重试
-            if (matched_blocks > 0) {
+            if (matched_tokens > 0) {
                 should_retry = true;
                 // 即使传输失败，也更新已匹配到的 reuse lengths
                 updateReuseLengthsFromContext(read_context);
                 RTP_LLM_LOG_WARNING(
-                    "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
-                    matched_blocks,
+                    "load cache failed (matched %zu tokens but transfer failed), retry count: %d/%d, stream: [%ld]",
+                    matched_tokens,
                     load_cache_retry_count_,
                     max_retry,
                     stream_->streamId());
@@ -537,11 +541,11 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
 }
 
 bool StreamCacheResource::hasCacheKeys() const {
-    return batch_kv_cache_resource_->hasCacheKeys();
+    return batch_kv_cache_resource_->hasAnyCacheKeys();
 }
 
-const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
-    return batch_kv_cache_resource_->cacheKeys(batch_id);
+const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id, std::string_view tag) const {
+    return batch_kv_cache_resource_->cacheKeys(batch_id, tag);
 }
 
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
@@ -554,6 +558,27 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
+}
+
+void StreamCacheResource::fakeInitKVBlockForTokens(size_t token_capacity, size_t reserve_blocks) {
+    fake_inited_ = true;
+    batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
+    const auto topology = resource_context_.cache_manager ?
+                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
+                              warmupCacheTopology();
+    batch_kv_cache_resource_->initGroups(topology);
+
+    token_capacity = std::max<size_t>(1, token_capacity);
+    for (int batch_id = 0; batch_id < batch_kv_cache_resource_->batchSize(); ++batch_id) {
+        for (const auto& group : topology->groups()) {
+            RTP_LLM_CHECK_WITH_INFO(
+                group.seq_size_per_block > 0, "fake cache init tag=%s has zero physical token span", group.tag.c_str());
+            const size_t physical_blocks = token_capacity / group.seq_size_per_block
+                                           + (token_capacity % group.seq_size_per_block != 0 ? 1 : 0) + reserve_blocks;
+            batch_kv_cache_resource_->mutableBlockIds(batch_id, group.tag)
+                .resize(std::max<size_t>(1, physical_blocks), 0);
+        }
+    }
 }
 
 int StreamCacheResource::mallocFailedTimes() const {
@@ -634,19 +659,18 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int block_tokens     = reuseBlockTokens();
-    const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
-    const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
-    const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;
-    const int device_reuse_len = read_context->resource()->deviceReuseBlockNum() * block_tokens;
+    const int total_reuse_len  = static_cast<int>(read_context->resource()->reuseTokenNum());
+    const int memory_reuse_len = static_cast<int>(read_context->resource()->memoryReuseTokenNum());
+    const int remote_reuse_len = static_cast<int>(read_context->resource()->remoteReuseTokenNum());
+    const int device_reuse_len = static_cast<int>(read_context->resource()->deviceReuseTokenNum());
     RTP_LLM_LOG_DEBUG("CACHE_REUSE_BLOCK_CONVERSION stream_id=%ld block_tokens=%d total_blocks=%zu device_blocks=%zu "
                       "memory_blocks=%zu remote_blocks=%zu total_tokens=%d",
                       stream_->streamId(),
-                      block_tokens,
-                      read_context->resource()->reuseBlockNum(),
-                      read_context->resource()->deviceReuseBlockNum(),
-                      read_context->resource()->memoryReuseBlockNum(),
-                      read_context->resource()->remoteReuseBlockNum(),
+                      reuseBlockTokens(),
+                      total_reuse_len / reuseBlockTokens(),
+                      device_reuse_len / reuseBlockTokens(),
+                      memory_reuse_len / reuseBlockTokens(),
+                      remote_reuse_len / reuseBlockTokens(),
                       total_reuse_len);
     if (total_reuse_len > 0) {
         stream_->setInitialReuseLength(total_reuse_len);
@@ -692,7 +716,7 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
 
     const auto need_blocks      = static_cast<size_t>(min_free_blocks) - not_in_use_blocks;
     auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
-    if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
+    if (!evicted_resource || !evicted_resource->hasAnyCacheKeys()) {
         RTP_LLM_LOG_INFO(
             "tiered memory cache skip eviction, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
             stream_->streamId(),
@@ -708,7 +732,7 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
         not_in_use_blocks,
         min_free_blocks,
         need_blocks,
-        evicted_resource->cacheKeys(0).size());
+        evicted_resource->cacheResource(0).requestPrefix().keys().size());
     storeCacheAsync(evicted_resource, /*enable_memory_cache=*/true, /*enable_remote_cache=*/false);
     resource_context_.cache_manager->blockCacheFree(evicted_resource);
 }
@@ -737,9 +761,12 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
 }
 
 void StreamCacheResource::holdKVCacheForPDSep() {
-    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
-    const auto& cache_keys = resource.cacheKeys();
-    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
+    auto&          resource = batch_kv_cache_resource_->cacheResource(0);
+    CacheKeysByTag cache_keys_by_tag;
+    for (const auto& entry : resource.groupResources()) {
+        cache_keys_by_tag.emplace(entry.tag, entry.cache_keys);
+    }
+    auto ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys_by_tag, /*is_connector=*/true);
     if (ref) {
         pd_kvcache_ref_ = std::move(ref);
     }

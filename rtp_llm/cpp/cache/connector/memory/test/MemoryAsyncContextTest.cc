@@ -9,6 +9,7 @@
 #include "grpcpp/alarm.h"
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/RequestPrefixManifestStore.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm::test {
@@ -48,6 +49,35 @@ protected:
         return result;
     }
 };
+
+TEST(RequestPrefixManifestStoreTest, EvictAllHidesPinnedEntriesUntilReadersReleaseThem) {
+    auto                  store = std::make_shared<RequestPrefixManifestStore>();
+    RequestPrefixManifest manifest;
+    manifest.key = RequestPrefixManifestKey{/*prefix_hash=*/11, /*token_end=*/4};
+    manifest.native_items.push_back(NativeCacheItemRef{
+        "full", /*native_cache_key=*/17, /*physical_ordinal=*/0, NativeCacheItemKind::FULL_INTERVAL});
+    ASSERT_TRUE(store->publish(std::move(manifest)));
+
+    const std::vector<RequestPrefixKey> keys{11};
+    RequestPrefixMatchView              view(keys,
+                                /*match_span_tokens=*/4,
+                                /*token_extent=*/5,
+                                /*match_limit_tokens=*/4,
+                                /*write_limit_tokens=*/4,
+                                /*reuse_tokens=*/0);
+    auto                                pinned = store->match(view, /*start_token=*/0);
+    ASSERT_NE(pinned, nullptr);
+    EXPECT_EQ(store->pinCount({11, 4}), 1u);
+
+    EXPECT_EQ(store->evictAllUnpinned(), 1u);
+    EXPECT_EQ(store->visibleSize(), 0u);
+    EXPECT_EQ(store->match(view, /*start_token=*/0), nullptr);
+    ASSERT_EQ(pinned->manifests().size(), 1u);
+    EXPECT_EQ(pinned->manifests().front().native_items.front().native_cache_key, 17);
+
+    pinned.reset();
+    EXPECT_EQ(store->pinCount({11, 4}), 0u);
+}
 
 TEST_F(MemoryAsyncContextTest, success_ReturnFalse_WhenBroadcastResultNotSuccess) {
     auto worker0            = std::make_shared<MemoryWorkerCtxT>();

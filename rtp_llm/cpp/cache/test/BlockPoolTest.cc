@@ -126,10 +126,10 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup("full")[0], 0);
 
     RuntimeConfig runtime_config;
-    cache_cfg.finalizeBlockNums(/*global_block_num=*/3, runtime_config);
-    EXPECT_EQ(cache_cfg.block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 3u);
+    applyUniformTestBlockCount(cache_cfg, 3);
+    EXPECT_EQ(cache_cfg.blockNumForGroup("full"), 3u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->blockNumForGroup("full"), 3u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->blockNumForGroup("full"), 3u);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, "full");
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
@@ -217,18 +217,15 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 
 // Allocation Test
 
-TEST_F(BlockPoolTest, GroupPoolIgnoresStaleTopLevelBlockNumProjection) {
+TEST_F(BlockPoolTest, GroupPoolUsesCanonicalGroupBlockNum) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
     ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 4u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 4u);
-
-    // The group is canonical; mutating the compatibility projection alone must
-    // not resize its pool.
-    cache_cfg.block_num = 3;
+    ASSERT_EQ(cache_cfg.blockNumForGroup("full"), 4u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->blockNumForGroup("full"), 4u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->blockNumForGroup("full"), 4u);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, "full");
     ASSERT_EQ(pool_cfg.block_num, 4u);

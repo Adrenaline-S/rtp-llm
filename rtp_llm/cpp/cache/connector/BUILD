@@ -3,18 +3,15 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "connector",
-    srcs = glob([
-        "*.cc",
-    ]),
-    hdrs = glob([
-        "*.h",
-    ]),
+    srcs = glob(["*.cc"], exclude = ["RequestPrefixManifestStore.cc"]),
+    hdrs = glob(["*.h"], exclude = ["RequestPrefixManifestStore.h"]),
     copts = copts() + select({
         "//conditions:default": [],
         "//:using_remote_kv_cache": ["-DUSE_REMOTE_KV_CACHE=1"],
     }),
     visibility = ["//visibility:public"],
     deps = [
+        ":request_prefix_manifest_store",
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
@@ -31,6 +28,19 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+cc_library(
+    name = "request_prefix_manifest_store",
+    srcs = ["RequestPrefixManifestStore.cc"],
+    hdrs = ["RequestPrefixManifestStore.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/cache:request_prefix_resource",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:hash_util",
+    ],
 )
 
 cc_library(

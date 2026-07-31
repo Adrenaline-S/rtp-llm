@@ -139,6 +139,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     initFullCacheConfig(cache_config, model_config.num_layers);
+    resource_context.cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
     RuntimeConfig runtime_config;
 
     auto query                                   = make_shared<GenerateInput>();
@@ -153,8 +154,8 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     resource.initGroups(cache_config.topologyPtr());
     resource.setBatchBlocks(0, "default", {1, 2});
     resource.setBatchBlocks(1, "default", {3, 4});
-    resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
-    resource.setBatchCacheKeys(1, CacheKeysType{201, 202, 203, 204, 205});
+    resource.setBatchCacheKeys(0, "default", CacheKeysType{101, 102, 103});
+    resource.setBatchCacheKeys(1, "default", CacheKeysType{201, 202, 203, 204, 205});
     stream->setKVCache(resource);
     stream->generate_status_->status = StreamState::RUNNING;
 
@@ -232,8 +233,10 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     initFullCacheConfig(cache_config, model_config.num_layers);
-    cache_config.kv_block_stride_bytes = 4096;
-    cache_config.kv_scale_stride_bytes = 256;
+    auto groups                     = cache_config.topology().groups();
+    groups[0].kv_block_stride_bytes = 4096;
+    groups[0].kv_scale_stride_bytes = 256;
+    test::setTestTopology(cache_config, std::move(groups));
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -318,8 +321,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(kv_cache_block_id, toVec<int>(default_table.block_ids));
         EXPECT_EQ(default_table.tag, "default");
         EXPECT_EQ(default_table.type, CacheGroupType::FULL);
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
+        EXPECT_EQ(default_table.kv_block_stride_bytes, cache_config.kvBlockStrideBytesForGroup("default"));
+        EXPECT_EQ(default_table.kv_scale_stride_bytes, cache_config.kvScaleStrideBytesForGroup("default"));
     }
     {
         MMModelConfig mm_model_config;

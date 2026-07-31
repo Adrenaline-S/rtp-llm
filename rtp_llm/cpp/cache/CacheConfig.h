@@ -183,12 +183,12 @@ public:
     std::shared_ptr<CacheConfig>
     mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
-    uint32_t explicitIndependentBlocks(std::string_view tag) const {
-        return policyForGroup(tag).explicit_block_num;
+    uint32_t fixedBlocks(std::string_view tag) const {
+        return policyForGroup(tag).fixed_block_num;
     }
 
-    bool usesExplicitIndependentBlocks(std::string_view tag) const {
-        return explicitIndependentBlocks(tag) > 0;
+    bool usesFixedBlocks(std::string_view tag) const {
+        return policyForGroup(tag).fixed_block_num > 0;
     }
 
     CacheGroupPolicy policyForGroup(std::string_view tag) const {
@@ -197,9 +197,11 @@ public:
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
-    std::string debugString(size_t indent = 0) const;
+    void               setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
+    void               applyTokenCapacity(uint64_t capacity_tokens);
+    uint64_t           tokenCapacity() const;
+    const std::string& singleReusableGroupTag() const;
+    std::string        debugString(size_t indent = 0) const;
 };
 
 }  // namespace rtp_llm

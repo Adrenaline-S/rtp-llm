@@ -278,9 +278,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         cache_store_inputs.request_id                = inputs.request_id;
         cache_store_inputs.request_pd_separation     = inputs.request_pd_separation;
         cache_store_inputs.cache_keys                = transVectorToString(cache_keys_vec);
-        cache_store_inputs.tokens_per_block          = inputs.seq_size_per_block;
-        cache_store_inputs.kv_block_stride_bytes     = inputs.kv_block_stride_bytes;
-        cache_store_inputs.kv_scale_stride_bytes     = inputs.kv_scale_stride_bytes;
         cache_store_inputs.pd_separation             = inputs.pd_separation;
         cache_store_inputs.model_id                  = model_id_;
         cache_store_inputs.decode_entrance           = inputs.decode_entrance;
@@ -310,6 +307,12 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             // group stride. Keep transfer length separate from address stride.
             cache_store_inputs.kv_block_transfer_bytes_by_tag.emplace(group.tag, group.kv_block_stride_bytes);
             cache_store_inputs.kv_scale_transfer_bytes_by_tag.emplace(group.tag, group.kv_scale_stride_bytes);
+        }
+        if (topology.hasSingleGlobalGroup()) {
+            const auto& group                        = topology.groups().front();
+            cache_store_inputs.tokens_per_block      = group.seq_size_per_block;
+            cache_store_inputs.kv_block_stride_bytes = group.kv_block_stride_bytes;
+            cache_store_inputs.kv_scale_stride_bytes = group.kv_scale_stride_bytes;
         }
         params = cache_store_inputs;
     }
