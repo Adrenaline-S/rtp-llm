@@ -1094,13 +1094,18 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
 
     size_t expected_logical_capacity = std::numeric_limits<size_t>::max();
     for (const auto& group : cache_config.topology().groups()) {
-        const auto pool           = hybrid_allocator->blockPool(group.tag);
-        expected_logical_capacity = std::min(
-            expected_logical_capacity, pool->totalBlocksNum() * static_cast<size_t>(group.seq_size_per_block * 2));
+        if (group.policy.fixed_block_num > 0) {
+            continue;
+        }
+        const auto pool   = hybrid_allocator->blockPool(group.tag);
+        const auto mapper = cp_slot_mappers.at(group.tag);
+        expected_logical_capacity =
+            std::min(expected_logical_capacity,
+                     pool->totalBlocksNum() * mapper->logicalSeqSizePerBlock(cache_config, group.tag));
     }
 
     EXPECT_EQ(kv_cache_manager->maxAvailableTokensNum(), expected_logical_capacity);
-    EXPECT_GT(kv_cache_manager->maxAvailableTokensNum(), physical_capacity);
+    EXPECT_GE(kv_cache_manager->maxAvailableTokensNum(), physical_capacity);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailable) {
@@ -1315,7 +1320,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     reuse_malloc.enable_device_cache = true;
     auto reuse_result                = manager->malloc(reuse_malloc);
     ASSERT_TRUE(reuse_result.success);
-    EXPECT_EQ(reuse_result.reuse_len, 2 * spb);
+    EXPECT_EQ(reuse_result.reuse_len, spb);
 
     for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
         if (!manager_config.policyForGroup(tag).enable_prefix_reuse) {
@@ -1323,7 +1328,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
         }
         const auto& blocks = reuse_res->blocks(0, tag);
         ASSERT_EQ(blocks.size(), 3u) << "reuse tag " << tag;
-        EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "reuse tag " << tag << " skipped reused prefix";
+        EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "reuse tag " << tag << " retained reusable boundary";
         EXPECT_FALSE(isNullBlockIdx(blocks[1])) << "reuse tag " << tag << " tail block 1";
         EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "reuse tag " << tag << " tail block 2";
     }

@@ -390,6 +390,9 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks) c
     size_t min_tokens = std::numeric_limits<size_t>::max();
     bool   saw_group  = false;
     for (const auto& [tag, group] : kv_cache_groups_) {
+        if (config_.group(tag).policy.fixed_block_num > 0) {
+            continue;
+        }
         const auto& pool = group->blockPool();
         if (!pool) {
             continue;

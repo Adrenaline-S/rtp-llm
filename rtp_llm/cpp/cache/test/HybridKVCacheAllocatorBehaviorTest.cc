@@ -1451,7 +1451,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
                                                      /*target_batch_size=*/2),
               0);
 
-    // Forking one more sequence copies the tail of both non-empty groups.
+    // The aligned tail remains shared when one more sequence is forked.
     EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
                                                      /*seq_len=*/12,
                                                      /*common_seq_len=*/8,
@@ -1459,7 +1459,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
                                                      /*reserve_step=*/0,
                                                      /*enable_reuse_cache=*/false,
                                                      /*target_batch_size=*/3),
-              2);
+              0);
 
     // Four more tokens add one block in each group for each current batch.
     EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
@@ -1471,8 +1471,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
                                                      /*target_batch_size=*/2),
               4);
 
-    // One future block in each group is charged at the requested target width,
-    // plus both group tails copied for the new sequence.
+    // One future block in each group is charged at the requested target width;
+    // the currently aligned tails remain shared.
     EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
                                                      /*seq_len=*/12,
                                                      /*common_seq_len=*/8,
@@ -1480,7 +1480,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
                                                      /*reserve_step=*/0,
                                                      /*enable_reuse_cache=*/false,
                                                      /*target_batch_size=*/3),
-              8);
+              6);
 
     resource->setBatchBlocks(0, kLinearTag, {NULL_BLOCK_IDX, 10, 11, NULL_BLOCK_IDX});
     resource->setBatchBlocks(1, kLinearTag, {NULL_BLOCK_IDX, 10, 12, NULL_BLOCK_IDX});

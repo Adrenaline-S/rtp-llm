@@ -35,10 +35,7 @@ public:
     bool              use_mla       = false;
     bool              is_sparse     = false;
 
-    // Block configuration
-    uint32_t block_num                 = 0;
-    size_t   seq_size_per_block        = 1;
-    size_t   kernel_seq_size_per_block = 0;
+    int linear_step = 1;  // Runtime sparsification policy.
 
     size_t seqSizePerBlockForGroup(std::string_view tag) const {
         return group(tag).seq_size_per_block;
@@ -62,32 +59,6 @@ public:
             std::string(tag).c_str());
         return std::max<size_t>(1, group_seq / group_kernel);
     }
-
-    // Legacy scalar view: how many kernel blocks fit inside one global physical block.
-    size_t kernelBlocksPerKvBlock() const {
-        if (kernel_seq_size_per_block == 0) {
-            return 1;
-        }
-        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                seq_size_per_block,
-                                kernel_seq_size_per_block);
-        return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
-    }
-
-    // Block sizing information
-    // ---- Per-block sizes (all layers) ----
-    size_t kv_block_size_bytes = 0;
-    size_t kv_scale_size_bytes = 0;
-    size_t block_size_bytes    = 0;  // (kv + scales together)
-
-    // ---- Per-block strides (one layer) ----
-    size_t kv_block_stride_bytes = 0;
-    size_t kv_scale_stride_bytes = 0;
-
-    // Attention-specific configuration
-    int    linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    size_t explicitly_sized_pool_reserve_bytes = 0;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -157,17 +128,10 @@ public:
         return group(tag).kv_scale_stride_bytes;
     }
 
-    size_t blockSizeBytesForGroup(std::string_view tag) const {
-        return layerIdsForGroup(tag).size() * (kvBlockStrideBytesForGroup(tag) + kvScaleStrideBytesForGroup(tag));
-    }
+    size_t blockSizeBytesForGroup(std::string_view tag) const;
 
-    size_t layerBlockStrideBytes(int layer_id) const {
-        size_t stride = 0;
-        for (const auto& group : groupsForLayer(layer_id)) {
-            stride = std::max(stride, group.get().kv_block_stride_bytes + group.get().kv_scale_stride_bytes);
-        }
-        return stride;
-    }
+    const GroupBase& physicalGroupForLayer(int layer_id, std::string_view tag) const;
+    size_t           layerBlockStrideBytes(int layer_id) const;
 
     uint32_t localKvHeadNumForGroup(std::string_view tag) const {
         const auto& group_config = group(tag);

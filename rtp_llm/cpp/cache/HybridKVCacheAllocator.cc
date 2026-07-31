@@ -708,7 +708,22 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_
 }
 
 int HybridKVCacheAllocator::seqSizePerBlock() const {
-    return static_cast<int>(config_.seqSizePerBlockForGroup(config_.singleReusableGroupTag()));
+    uint64_t span               = 1;
+    bool     saw_reusable_group = false;
+    for (const auto& group : config_.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse) {
+            continue;
+        }
+        saw_reusable_group = true;
+        const uint64_t gcd = std::gcd(span, static_cast<uint64_t>(group.seq_size_per_block));
+        RTP_LLM_CHECK_WITH_INFO(span / gcd <= std::numeric_limits<uint64_t>::max() / group.seq_size_per_block,
+                                "reusable cache span LCM overflow");
+        span = span / gcd * group.seq_size_per_block;
+    }
+    RTP_LLM_CHECK_WITH_INFO(saw_reusable_group && span <= static_cast<uint64_t>(std::numeric_limits<int>::max()),
+                            "invalid reusable cache span %lu",
+                            span);
+    return static_cast<int>(span);
 }
 
 bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const {

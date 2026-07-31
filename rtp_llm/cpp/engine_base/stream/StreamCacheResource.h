@@ -95,8 +95,13 @@ public:
     }
 
     int seqSizePerBlock() const {
-        const auto& config = resource_context_.cache_manager->cacheConfig();
-        return static_cast<int>(config.seqSizePerBlockForGroup(config.singleReusableGroupTag()));
+        uint64_t boundary = 1;
+        for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+            if (group.policy.enable_prefix_reuse) {
+                boundary = std::lcm(boundary, static_cast<uint64_t>(group.seq_size_per_block));
+            }
+        }
+        return static_cast<int>(boundary);
     }
 
     // KVCacheResource reuse counters follow the canonical cache-key namespace.

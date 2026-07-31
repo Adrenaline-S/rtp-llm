@@ -137,9 +137,12 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::PREFILL;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
-    resource_context.cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+    CacheConfig                 cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                              /*block_num=*/8,
+                                                              /*tokens_per_block=*/2,
+                                                              DataType::TYPE_FP16);
+    resource_context.cache_manager           = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+    ASSERT_TRUE(resource_context.cache_manager->init());
     RuntimeConfig runtime_config;
 
     auto query                                   = make_shared<GenerateInput>();
@@ -152,11 +155,12 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);
     resource.initGroups(cache_config.topologyPtr());
-    resource.setBatchBlocks(0, "default", {1, 2});
-    resource.setBatchBlocks(1, "default", {3, 4});
+    resource.setBatchBlocks(0, "default", {0, 0});
+    resource.setBatchBlocks(1, "default", {0, 0});
     resource.setBatchCacheKeys(0, "default", CacheKeysType{101, 102, 103});
     resource.setBatchCacheKeys(1, "default", CacheKeysType{201, 202, 203, 204, 205});
     stream->setKVCache(resource);
+    stream->streamCacheResource().setNeedReleaseResource(false);
     stream->generate_status_->status = StreamState::RUNNING;
 
     StreamGroups stream_groups({stream});

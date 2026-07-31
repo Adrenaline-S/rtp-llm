@@ -90,7 +90,6 @@ uint64_t maxKVCacheTokenCapacityForBudget(size_t total_budget_bytes, const Cache
     };
     std::vector<LogicalGroup> logical_groups;
     uint64_t                  period             = 1;
-    uint64_t                  fixed_token_limit  = std::numeric_limits<uint64_t>::max();
     size_t                    fixed_budget_bytes = 0;
 
     for (const auto& group : config.topology().groups()) {
@@ -98,13 +97,6 @@ uint64_t maxKVCacheTokenCapacityForBudget(size_t total_budget_bytes, const Cache
             group.seq_size_per_block > 0, "kv cache tag=%s has zero physical seq_size_per_block", group.tag.c_str());
         const size_t block_bytes = config.blockSizeBytesForGroup(group.tag);
         if (group.policy.fixed_block_num > 0) {
-            RTP_LLM_CHECK_WITH_INFO(group.policy.fixed_block_num
-                                        <= std::numeric_limits<uint64_t>::max()
-                                               / static_cast<uint64_t>(group.seq_size_per_block),
-                                    "kv cache fixed token capacity overflow for tag=%s",
-                                    group.tag.c_str());
-            const uint64_t group_limit = static_cast<uint64_t>(group.policy.fixed_block_num) * group.seq_size_per_block;
-            fixed_token_limit          = std::min(fixed_token_limit, group_limit);
             if (group.policy.charge_to_paged_budget) {
                 fixed_budget_bytes =
                     checkedAdd(fixed_budget_bytes,
@@ -136,9 +128,7 @@ uint64_t maxKVCacheTokenCapacityForBudget(size_t total_budget_bytes, const Cache
 
     const size_t   available_budget = total_budget_bytes - fixed_budget_bytes;
     const uint64_t budget_periods   = available_budget / period_bytes;
-    const uint64_t fixed_periods =
-        fixed_token_limit == std::numeric_limits<uint64_t>::max() ? budget_periods : fixed_token_limit / period;
-    const uint64_t full_periods = std::min(budget_periods, fixed_periods);
+    const uint64_t full_periods     = budget_periods;
     RTP_LLM_CHECK_WITH_INFO(full_periods <= std::numeric_limits<uint64_t>::max() / period,
                             "kv cache token capacity overflow");
     const uint64_t base_tokens      = full_periods * period;
@@ -171,22 +161,12 @@ uint64_t maxKVCacheTokenCapacityForBudget(size_t total_budget_bytes, const Cache
     }
     std::sort(boundaries.begin(), boundaries.end());
     boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
-    if (fixed_token_limit != std::numeric_limits<uint64_t>::max() && fixed_token_limit >= base_tokens
-        && fixed_token_limit - base_tokens <= period) {
-        boundaries.push_back(fixed_token_limit - base_tokens);
-        std::sort(boundaries.begin(), boundaries.end());
-        boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
-    }
-
     uint64_t best = base_tokens;
     for (const uint64_t offset : boundaries) {
         RTP_LLM_CHECK_WITH_INFO(offset <= std::numeric_limits<uint64_t>::max() - base_tokens,
                                 "kv cache boundary token overflow");
-        const uint64_t candidate = base_tokens + offset;
-        if (candidate > fixed_token_limit) {
-            break;
-        }
-        size_t offset_bytes = 0;
+        const uint64_t candidate    = base_tokens + offset;
+        size_t         offset_bytes = 0;
         for (const auto& group : logical_groups) {
             const uint64_t blocks = offset / group.span + (offset % group.span != 0 ? 1 : 0);
             offset_bytes =

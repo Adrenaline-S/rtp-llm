@@ -246,7 +246,7 @@ TEST(CacheConfigCreatorTest, HeterogeneousPhysicalSpansAreOrderIndependent) {
     EXPECT_EQ(second_prefix.matchSpanTokens(), 12u);
 }
 
-TEST(CacheConfigCreatorTest, FixedGroupChargesBudgetAndCapsTokensOffLogicalBoundary) {
+TEST(CacheConfigCreatorTest, FixedGroupChargesBudgetWithoutCappingLogicalTokens) {
     auto                                              config = makeCapacityConfig({{"logical", 4}, {"fixed", 10}});
     std::unordered_map<std::string, CacheGroupPolicy> policies;
     for (const auto& group : config.topology().groups()) {
@@ -256,13 +256,20 @@ TEST(CacheConfigCreatorTest, FixedGroupChargesBudgetAndCapsTokensOffLogicalBound
     policies.at("fixed").charge_to_paged_budget = true;
     config.setGroupPolicies(policies);
 
-    const auto budget = capacityBytes(config, 30);
-    EXPECT_EQ(maxKVCacheTokenCapacityForBudget(budget, config), 30u);
-    config.applyTokenCapacity(30);
-    EXPECT_EQ(config.blockNumForGroup("logical"), 8u);
+    const auto budget = capacityBytes(config, 50);
+    EXPECT_EQ(maxKVCacheTokenCapacityForBudget(budget, config), 52u);
+    config.applyTokenCapacity(52);
+    EXPECT_EQ(config.blockNumForGroup("logical"), 13u);
     EXPECT_EQ(config.blockNumForGroup("fixed"), 3u);
+    EXPECT_EQ(config.tokenCapacity(), 52u);
     EXPECT_THROW(maxKVCacheTokenCapacityForBudget(3 * config.blockSizeBytesForGroup("fixed") - 1, config),
                  std::exception);
+}
+
+TEST(CacheConfigCreatorTest, CanonicalReusableTagSelectsFirstGroupForMultiGroupWire) {
+    auto config = makeCapacityConfig({{"full", 4}, {"swa", 6}});
+
+    EXPECT_EQ(config.singleReusableGroupTag(), "full");
 }
 
 TEST(CacheConfigCreatorTest, GroupBlockBytesFailFastBeforeStrideArithmeticWraps) {

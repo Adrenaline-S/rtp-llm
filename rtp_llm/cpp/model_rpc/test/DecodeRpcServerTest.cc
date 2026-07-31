@@ -26,10 +26,10 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             prefill_cp_size};
 }
 
-GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
+GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids, size_t physical_span = 8) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    spec->seq_size_per_block = physical_span;
 
     GroupBase group;
     group.tag                       = std::move(tag);
@@ -37,8 +37,8 @@ GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
     group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
     group.layer_ids                 = std::move(layer_ids);
     group.block_num                 = 8;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = 8;
+    group.seq_size_per_block        = physical_span;
+    group.kernel_seq_size_per_block = physical_span;
     return group;
 }
 

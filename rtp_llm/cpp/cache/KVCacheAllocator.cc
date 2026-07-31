@@ -125,7 +125,7 @@ int KVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr&
     // for every non-empty tagged group on each forked sequence.
     const int expanded_sequences = target_width - current_batch_size;
     int       copied_group_count = 0;
-    if (expanded_sequences > 0) {
+    if (expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0) {
         for (const auto& entry : batch_kv_cache_resource->cacheResource(0).groupResources()) {
             if (!entry.block_ids->blocks().empty()) {
                 ++copied_group_count;
@@ -344,6 +344,9 @@ size_t KVCacheAllocator::notInUseBlocksNum() const {
 size_t KVCacheAllocator::availableTokensNum() const {
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (const auto& group : config_.topology().groups()) {
+        if (group.policy.fixed_block_num > 0) {
+            continue;
+        }
         min_tokens = std::min(
             min_tokens, blockPool(group.tag)->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(group.tag));
     }
@@ -353,6 +356,9 @@ size_t KVCacheAllocator::availableTokensNum() const {
 size_t KVCacheAllocator::totalTokensNum() const {
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (const auto& group : config_.topology().groups()) {
+        if (group.policy.fixed_block_num > 0) {
+            continue;
+        }
         min_tokens =
             std::min(min_tokens, blockPool(group.tag)->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(group.tag));
     }

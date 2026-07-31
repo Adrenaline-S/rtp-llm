@@ -1243,7 +1243,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksIndependentOfMaxConcurre
     }
 }
 
-TEST(HybridPoolConfigCreatorTest, DSV4RejectsHcaStatePoolBelowRequestedTokenCapacity) {
+TEST(HybridPoolConfigCreatorTest, DSV4AllowsFixedHcaStatePoolBelowLogicalTokenCapacity) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
@@ -1253,7 +1253,9 @@ TEST(HybridPoolConfigCreatorTest, DSV4RejectsHcaStatePoolBelowRequestedTokenCapa
     runtime_config.max_generate_batch_size                      = 2;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
-    EXPECT_THROW(CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config), std::runtime_error);
+    auto config = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+    EXPECT_EQ(config.blockNumForGroup("hca_state"), 6u);
+    EXPECT_GT(config.tokenCapacity(), 6u * config.seqSizePerBlockForGroup("hca_state"));
 }
 
 TEST(CacheConfigTest, ModelSpecCloneKeepsExistingConfigStable) {
@@ -1526,9 +1528,9 @@ TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
     setDsv4ExplicitPoolBlocks(mc, "hca_state", large_hca_state_pool);
     auto config_without = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_without);
 
-    // A FIXED group also caps request token capacity. The smaller HCA_STATE pool
-    // therefore becomes the joint-capacity lower bound.
-    EXPECT_LT(config_with.tokenCapacity(), config_without.tokenCapacity());
+    // A FIXED group consumes its configured reservation but does not cap request
+    // token capacity. A larger reservation leaves less budget for logical pools.
+    EXPECT_GT(config_with.tokenCapacity(), config_without.tokenCapacity());
     EXPECT_EQ(config_with.blockNumForGroup("hca_state"), small_hca_state_pool);
     EXPECT_EQ(config_without.blockNumForGroup("hca_state"), large_hca_state_pool);
 }
@@ -1936,7 +1938,7 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     EXPECT_EQ(allocator->freeBlocksNum(), expected_total_blocks);
 }
 
-TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
+TEST_F(DSV4AllocatorTest, CpAllocationUsesEachGroupsDeclaredMapping) {
     constexpr uint32_t cp_size   = 4;
     auto               config    = makeDSV4CpAllocatorConfig(cp_size);
     auto               allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
@@ -1970,7 +1972,10 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     for (const auto& group : config.topology().groups()) {
-        EXPECT_EQ(batch_res->blocksNum(0, group.tag), 1u) << "tag=" << group.tag;
+        const CPSlotMapper mapper(0, static_cast<int>(cp_size), static_cast<int>(group.seq_size_per_block));
+        const auto         effective_len   = mapper.effectiveSeqLenForAlloc(config, group.tag, seq_len);
+        const auto         expected_blocks = static_cast<size_t>(effective_len) / group.seq_size_per_block;
+        EXPECT_EQ(batch_res->blocksNum(0, group.tag), expected_blocks) << "tag=" << group.tag;
     }
 
     FreeInfo free_info{batch_res};

@@ -18,6 +18,16 @@ std::vector<GroupBase> copyGroups(const CacheTopology& topology) {
     return {groups.begin(), groups.end()};
 }
 
+size_t checkedAddSize(size_t lhs, size_t rhs, const char* what) {
+    RTP_LLM_CHECK_WITH_INFO(lhs <= std::numeric_limits<size_t>::max() - rhs, "%s overflow", what);
+    return lhs + rhs;
+}
+
+size_t checkedMulSize(size_t lhs, size_t rhs, const char* what) {
+    RTP_LLM_CHECK_WITH_INFO(lhs == 0 || rhs <= std::numeric_limits<size_t>::max() / lhs, "%s overflow", what);
+    return lhs * rhs;
+}
+
 }  // namespace
 
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
@@ -112,6 +122,15 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         const auto& source_group = has_propose_group ? propose_config.group(tag) : target_group;
 
         if (has_propose_group) {
+            RTP_LLM_CHECK_WITH_INFO(source_group.seq_size_per_block == target_group.seq_size_per_block,
+                                    "CacheConfig::mergeMTPModule tag=%s physical span mismatch: main=%zu propose=%zu",
+                                    tag.c_str(),
+                                    target_group.seq_size_per_block,
+                                    source_group.seq_size_per_block);
+            RTP_LLM_CHECK_WITH_INFO(
+                samePolicy(source_group.policy, target_group.policy),
+                "CacheConfig::mergeMTPModule tag=%s policy mismatch between main and propose cache groups",
+                tag.c_str());
             RTP_LLM_CHECK_WITH_INFO(
                 source_group.layer_ids.size() == static_cast<size_t>(mtp_layer_num),
                 "CacheConfig::mergeMTPModule tag=%s must cover every module layer, got=%zu expected=%u",
@@ -195,6 +214,62 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     return sub_cfg;
 }
 
+size_t CacheConfig::blockSizeBytesForGroup(std::string_view tag) const {
+    const auto&  main_group = group(tag);
+    const size_t main_layers =
+        static_cast<size_t>(std::count_if(main_group.layer_ids.begin(), main_group.layer_ids.end(), [&](int layer_id) {
+            return layer_id >= 0 && static_cast<uint32_t>(layer_id) < layer_num;
+        }));
+    const auto layoutBytes = [&](const GroupBase& source_group, size_t layer_count) {
+        const size_t layer_stride =
+            checkedAddSize(source_group.kv_block_stride_bytes, source_group.kv_scale_stride_bytes, "group stride");
+        return checkedMulSize(layer_count, layer_stride, "group layout block bytes");
+    };
+
+    size_t bytes = layoutBytes(main_group, main_layers);
+    for (const auto& sub_config : mtp_sub_configs) {
+        if (!sub_config || !sub_config->topology().contains(tag)) {
+            continue;
+        }
+        const auto& sub_group = sub_config->group(tag);
+        bytes = checkedAddSize(bytes, layoutBytes(sub_group, sub_group.layer_ids.size()), "group combined block bytes");
+    }
+    return bytes;
+}
+
+const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, std::string_view tag) const {
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0, "invalid cache layer id=%d", layer_id);
+    if (static_cast<uint32_t>(layer_id) < layer_num) {
+        return groupForLayer(layer_id, tag);
+    }
+    size_t layer_begin = layer_num;
+    for (const auto& sub_config : mtp_sub_configs) {
+        if (!sub_config) {
+            continue;
+        }
+        const size_t layer_end = checkedAddSize(layer_begin, sub_config->layer_num, "MTP layer range");
+        if (static_cast<size_t>(layer_id) < layer_end) {
+            RTP_LLM_CHECK_WITH_INFO(sub_config->topology().contains(tag),
+                                    "MTP cache layer=%d has no group tag=%s",
+                                    layer_id,
+                                    std::string(tag).c_str());
+            return sub_config->groupForLayer(static_cast<int>(static_cast<size_t>(layer_id) - layer_begin), tag);
+        }
+        layer_begin = layer_end;
+    }
+    RTP_LLM_FAIL("cache layer=%d tag=%s is outside main/MTP layouts", layer_id, std::string(tag).c_str());
+}
+
+size_t CacheConfig::layerBlockStrideBytes(int layer_id) const {
+    size_t stride = 0;
+    for (const auto& tag : topology().layer(layer_id).group_tags) {
+        const auto& group = physicalGroupForLayer(layer_id, tag);
+        stride            = std::max(
+            stride, checkedAddSize(group.kv_block_stride_bytes, group.kv_scale_stride_bytes, "layer group stride"));
+    }
+    return stride;
+}
+
 void CacheConfig::applyTokenCapacity(uint64_t capacity_tokens) {
     RTP_LLM_CHECK_WITH_INFO(capacity_tokens > 0, "CacheConfig::applyTokenCapacity requires positive tokens");
     auto groups = copyGroups(topology());
@@ -205,14 +280,6 @@ void CacheConfig::applyTokenCapacity(uint64_t capacity_tokens) {
         uint64_t blocks = 0;
         if (group.policy.fixed_block_num > 0) {
             blocks = group.policy.fixed_block_num;
-            RTP_LLM_CHECK_WITH_INFO(blocks <= std::numeric_limits<uint64_t>::max() / group.seq_size_per_block,
-                                    "CacheConfig::applyTokenCapacity fixed pool tag=%s token capacity overflow",
-                                    group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(capacity_tokens <= blocks * group.seq_size_per_block,
-                                    "token capacity %lu exceeds fixed pool tag=%s capacity %lu",
-                                    capacity_tokens,
-                                    group.tag.c_str(),
-                                    blocks * group.seq_size_per_block);
         } else {
             blocks =
                 capacity_tokens / group.seq_size_per_block + (capacity_tokens % group.seq_size_per_block != 0 ? 1 : 0);
@@ -235,10 +302,13 @@ uint64_t CacheConfig::tokenCapacity() const {
     RTP_LLM_CHECK_WITH_INFO(groupNums() > 0, "CacheConfig::tokenCapacity requires topology");
     uint64_t capacity = std::numeric_limits<uint64_t>::max();
     for (const auto& group : topology().groups()) {
+        if (group.policy.fixed_block_num > 0) {
+            continue;
+        }
         capacity = std::min(capacity,
                             static_cast<uint64_t>(group.block_num) * static_cast<uint64_t>(group.seq_size_per_block));
     }
-    return capacity;
+    return capacity != std::numeric_limits<uint64_t>::max() ? capacity : 0;
 }
 
 const std::string& CacheConfig::singleReusableGroupTag() const {
@@ -247,9 +317,9 @@ const std::string& CacheConfig::singleReusableGroupTag() const {
         if (!group.policy.enable_prefix_reuse) {
             continue;
         }
-        RTP_LLM_CHECK_WITH_INFO(reusable_group == nullptr,
-                                "single-key cache protocol does not support multiple reusable groups");
-        reusable_group = &group;
+        if (reusable_group == nullptr) {
+            reusable_group = &group;
+        }
     }
     RTP_LLM_CHECK_WITH_INFO(reusable_group != nullptr, "CacheConfig has no reusable cache group");
     return reusable_group->tag;

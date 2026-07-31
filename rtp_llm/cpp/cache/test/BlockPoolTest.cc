@@ -235,6 +235,30 @@ TEST_F(BlockPoolTest, GroupPoolUsesCanonicalGroupBlockNum) {
     EXPECT_EQ(pool_cfg.memory_layouts[2].block_num, 4u);
 }
 
+TEST_F(BlockPoolTest, MTPGroupBudgetAndLayoutsUseModuleLocalScaleStride) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
+
+    size_t expected_block_bytes =
+        2 * (cache_cfg.group("full").kv_block_stride_bytes + cache_cfg.group("full").kv_scale_stride_bytes);
+    for (size_t module = 0; module < cache_cfg.mtp_sub_configs.size(); ++module) {
+        auto& sub_config = *cache_cfg.mtp_sub_configs[module];
+        auto  groups     = sub_config.topology().groups();
+        ASSERT_EQ(groups.size(), 1u);
+        groups[0].kv_block_stride_bytes += 16 * (module + 1);
+        groups[0].kv_scale_stride_bytes = 8 * (module + 1);
+        expected_block_bytes += groups[0].kv_block_stride_bytes + groups[0].kv_scale_stride_bytes;
+        sub_config.setTopology(std::move(groups), sub_config.topology().layers());
+    }
+
+    EXPECT_EQ(cache_cfg.blockSizeBytesForGroup("full"), expected_block_bytes);
+    const auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, "full");
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
+    EXPECT_EQ(pool_cfg.total_size_bytes, expected_block_bytes * pool_cfg.block_num);
+    EXPECT_EQ(cache_cfg.physicalGroupForLayer(/*first MTP global layer=*/2, "full").kv_scale_stride_bytes, 8u);
+    EXPECT_EQ(cache_cfg.physicalGroupForLayer(/*second MTP global layer=*/3, "full").kv_scale_stride_bytes, 16u);
+}
+
 TEST_F(BlockPoolTest, AllocSingleBlock) {
     auto config = createTestConfig();
     block_pool_ = std::make_shared<BlockPool>(config);

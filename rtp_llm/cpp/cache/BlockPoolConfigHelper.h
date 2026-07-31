@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 
 #include <algorithm>
+#include <limits>
 #include <string>
 
 namespace rtp_llm {
@@ -25,10 +26,19 @@ public:
 
         size_t   current_offset = 0;
         uint32_t layout_layers  = 0;
+        auto     checkedAdd     = [](size_t lhs, size_t rhs, const char* what) {
+            RTP_LLM_CHECK_WITH_INFO(lhs <= std::numeric_limits<size_t>::max() - rhs, "%s overflow", what);
+            return lhs + rhs;
+        };
         auto append_layout = [&](const CacheConfig& source_config, const GroupBase& source_group, uint32_t layer_num) {
             if (layer_num == 0) {
                 return;
             }
+            RTP_LLM_CHECK_WITH_INFO(source_group.block_num == config.block_num,
+                                    "shared cache tag=%s block count mismatch: pool=%u layout=%u",
+                                    source_group.tag.c_str(),
+                                    config.block_num,
+                                    source_group.block_num);
             auto layout                  = createMemoryLayoutConfig(false,
                                                    layer_num,
                                                    config.block_num,
@@ -40,9 +50,9 @@ public:
                                                    source_group.seq_size_per_block,
                                                    source_config.kernelBlocksPerKvBlockForGroup(source_group.tag));
             layout.kv_cache_offset_bytes = current_offset;
-            current_offset += layout.kv_block_pool_size_bytes;
+            current_offset = checkedAdd(current_offset, layout.kv_block_pool_size_bytes, "KV layout offset");
             layout.kv_scale_offset_bytes = current_offset;
-            current_offset += layout.kv_scale_pool_size_bytes;
+            current_offset = checkedAdd(current_offset, layout.kv_scale_pool_size_bytes, "scale layout offset");
             layout_layers += layer_num;
             config.memory_layouts.push_back(std::move(layout));
         };
@@ -86,10 +96,12 @@ public:
         layout_cfg.kv_block_stride_bytes = block_stride_bytes;
         layout_cfg.dtype                 = dtype;
 
-        layout_cfg.kv_cache_offset_bytes = 0;
-        layout_cfg.kv_block_pool_size_bytes =
-            static_cast<size_t>(layer_num) * static_cast<size_t>(block_num) * block_stride_bytes;
-        layout_cfg.kv_scale_offset_bytes    = layout_cfg.kv_cache_offset_bytes + layout_cfg.kv_block_pool_size_bytes;
+        layout_cfg.kv_cache_offset_bytes    = 0;
+        layout_cfg.kv_block_pool_size_bytes = checkedMul(
+            checkedMul(static_cast<size_t>(layer_num), static_cast<size_t>(block_num), "connector layer-block count"),
+            block_stride_bytes,
+            "connector pool bytes");
+        layout_cfg.kv_scale_offset_bytes    = layout_cfg.kv_block_pool_size_bytes;
         layout_cfg.kv_scale_pool_size_bytes = 0;
         layout_cfg.total_size_bytes         = layout_cfg.kv_block_pool_size_bytes;
 
@@ -129,13 +141,27 @@ private:
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
 
-        cfg.kv_block_pool_size_bytes =
-            static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_block_stride_bytes;
+        cfg.kv_block_pool_size_bytes = checkedMul(checkedMul(static_cast<size_t>(layer_num),
+                                                             static_cast<size_t>(cfg.block_num),
+                                                             "KV layout layer-block count"),
+                                                  cfg.kv_block_stride_bytes,
+                                                  "KV layout pool bytes");
 
-        cfg.kv_scale_pool_size_bytes =
-            static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_scale_stride_bytes;
+        cfg.kv_scale_pool_size_bytes = checkedMul(checkedMul(static_cast<size_t>(layer_num),
+                                                             static_cast<size_t>(cfg.block_num),
+                                                             "scale layout layer-block count"),
+                                                  cfg.kv_scale_stride_bytes,
+                                                  "scale layout pool bytes");
+        RTP_LLM_CHECK_WITH_INFO(cfg.kv_block_pool_size_bytes
+                                    <= std::numeric_limits<size_t>::max() - cfg.kv_scale_pool_size_bytes,
+                                "cache layout total bytes overflow");
         cfg.total_size_bytes = cfg.kv_block_pool_size_bytes + cfg.kv_scale_pool_size_bytes;
         return cfg;
+    }
+
+    static size_t checkedMul(size_t lhs, size_t rhs, const char* what) {
+        RTP_LLM_CHECK_WITH_INFO(lhs == 0 || rhs <= std::numeric_limits<size_t>::max() / lhs, "%s overflow", what);
+        return lhs * rhs;
     }
 };
 

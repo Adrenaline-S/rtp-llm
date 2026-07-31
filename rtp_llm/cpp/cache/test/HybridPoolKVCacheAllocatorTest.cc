@@ -1028,7 +1028,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
     EXPECT_EQ(hca_free_before - hca_state_pool->freeBlocksNum(), 1u);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIncludeSmallRequiredPool) {
+TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreFixedIndependentPool) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
 
     ASSERT_EQ(config.group("hca_state").tag, "hca_state");
@@ -1037,9 +1037,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIncludeSmallRequiredPool)
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    const auto hca_state_tokens =
-        allocator->blockPool("hca_state")->totalBlocksNum() * config.group("hca_state").seq_size_per_block;
-    EXPECT_EQ(hca_state_tokens, allocator->totalTokensNum());
+    size_t expected_tokens = std::numeric_limits<size_t>::max();
+    for (const auto& group : config.topology().groups()) {
+        if (group.policy.fixed_block_num == 0) {
+            expected_tokens =
+                std::min(expected_tokens, allocator->blockPool(group.tag)->totalBlocksNum() * group.seq_size_per_block);
+        }
+    }
+    EXPECT_EQ(expected_tokens, allocator->totalTokensNum());
     EXPECT_EQ(allocator->availableTokensNum(), allocator->maxAvailableTokensNum());
     EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
 }
@@ -1100,10 +1105,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ApplyTokenCapacityUsesFixedAndLogicalPoli
     const auto fixed_tag = firstExplicitIndependentGroup(config);
     setExplicitBlocksForGroup(config, fixed_tag, 50);
 
-    EXPECT_THROW(applyUniformTestBlockCount(config, 200), std::runtime_error);
-    applyUniformTestBlockCount(config, 50);
+    applyUniformTestBlockCount(config, 200);
 
-    const uint64_t capacity_tokens = 50u * config.topology().groups().front().seq_size_per_block;
+    const uint64_t capacity_tokens = 200u * config.topology().groups().front().seq_size_per_block;
     for (const auto& group : config.topology().groups()) {
         const uint32_t expected =
             config.usesFixedBlocks(group.tag) ?
