@@ -6,7 +6,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,7 +17,6 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
-#include "rtp_llm/cpp/cache/connector/RequestPrefixManifestStore.h"
 #include "rtp_llm/cpp/cache/connector/memory/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryDiskBlockCache.h"
@@ -96,6 +97,11 @@ private:
         bool                      request_released{false};
         uint64_t                  generation{0};
         uint64_t                  src_generation{0};
+    };
+    struct NativeItemProjection {
+        size_t          local_index{0};
+        CacheKeyType    cache_key{0};
+        BlockDependency dependency;
     };
     struct NormalizedCopyItem {
         BlockIdxType              mem_block{NULL_BLOCK_IDX};
@@ -226,44 +232,52 @@ private:
                                                           int                              start_index,
                                                           int                              write_num,
                                                           bool&                            no_need_write);
-    std::shared_ptr<CopyPlan> buildManifestCopyPlanForRead(const KVCacheResource&                    resource,
-                                                           const std::vector<RequestPrefixManifest>& manifests,
+    std::shared_ptr<CopyPlan> buildEndpointCopyPlanForRead(const KVCacheResource&           resource,
                                                            const LayerAttnBlockIds&         layer_attn_block_ids,
                                                            const std::vector<LayerTagSlot>& slots,
                                                            size_t                           start_token,
                                                            size_t                           token_count);
-    std::shared_ptr<CopyPlan> buildManifestCopyPlanForWrite(const KVCacheResource&                    resource,
-                                                            const std::vector<RequestPrefixManifest>& manifests,
+    std::shared_ptr<CopyPlan> buildEndpointCopyPlanForWrite(const KVCacheResource&           resource,
                                                             const LayerAttnBlockIds&         layer_attn_block_ids,
                                                             const std::vector<LayerTagSlot>& slots,
                                                             bool&                            no_need_write);
-    std::vector<uint8_t>      nativeItemSlotValidMask(const KVCacheResource&           resource,
-                                                      const NativeCacheItemRef&        native_item,
-                                                      const LayerAttnBlockIds&         layer_attn_block_ids,
-                                                      const std::vector<LayerTagSlot>& slots,
-                                                      CacheBlockKind                   kind,
-                                                      std::vector<BlockIdxType>*       gpu_blocks) const;
-    std::vector<RequestPrefixManifest> buildRequestManifests(const KVCacheResource& resource) const;
-    bool                               attachManifestBackingHolds(std::vector<RequestPrefixManifest>& manifests);
-    bool                               allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
-    bool                               allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
-    bool                               preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);
-    void                               releasePrefixMergeSource(const CopyInfoPerKey& copy_info);
-    bool                               mergePrefixExistingSlots(PrefixTreeMemoryBlockCache::CacheItem&         item,
-                                                                const PrefixTreeMemoryBlockCache::MatchResult& existing,
-                                                                const std::vector<LayerTagSlot>&               slots);
-    bool                               mergePrefixConflictForCommit(CopyInfoPerKey&                        copy_info,
-                                                                    PrefixTreeMemoryBlockCache::CacheItem& item,
-                                                                    const std::vector<LayerTagSlot>&       slots);
-    void                               putPrefixToCache(CopyInfoPerKey&                  copy_info,
-                                                        const BlockDependency&           dependency,
-                                                        const std::vector<LayerTagSlot>& slots);
-    void                               releasePrefixRequestBacking(const CopyInfoPerKey& copy_info);
-    void                               releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
-    void                               referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
-    bool                               copyPrefixMemoryItems(const NormalizedCopyItems&       items,
-                                                             CopyDirection                    direction,
-                                                             const std::vector<LayerTagSlot>& slots);
+    std::optional<NativeItemProjection>
+    nativeItemForOrdinal(const KVCacheResource& resource, std::string_view tag, size_t physical_ordinal) const;
+    std::vector<uint8_t> nativeItemSlotValidMask(const KVCacheResource&           resource,
+                                                 std::string_view                 tag,
+                                                 size_t                           local_index,
+                                                 bool                             full_item,
+                                                 const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                 const std::vector<LayerTagSlot>& slots,
+                                                 CacheBlockKind                   kind,
+                                                 std::vector<BlockIdxType>*       gpu_blocks) const;
+    bool                 endpointBackingsComplete(const KVCacheResource&           resource,
+                                                  size_t                           previous_endpoint,
+                                                  size_t                           endpoint,
+                                                  const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                  const std::vector<LayerTagSlot>& slots) const;
+    void                 publishReadyEndpoints(const KVCacheResource& resource);
+    void                 eraseEndpointRange(const RequestPrefixResource& prefix, size_t start_token, size_t end_token);
+    void                 clearEndpointCommits();
+    bool                 allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
+    bool                 allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
+    bool                 preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);
+    void                 releasePrefixMergeSource(const CopyInfoPerKey& copy_info);
+    bool                 mergePrefixExistingSlots(PrefixTreeMemoryBlockCache::CacheItem&         item,
+                                                  const PrefixTreeMemoryBlockCache::MatchResult& existing,
+                                                  const std::vector<LayerTagSlot>&               slots);
+    bool                 mergePrefixConflictForCommit(CopyInfoPerKey&                        copy_info,
+                                                      PrefixTreeMemoryBlockCache::CacheItem& item,
+                                                      const std::vector<LayerTagSlot>&       slots);
+    void                 putPrefixToCache(CopyInfoPerKey&                  copy_info,
+                                          const BlockDependency&           dependency,
+                                          const std::vector<LayerTagSlot>& slots);
+    void                 releasePrefixRequestBacking(const CopyInfoPerKey& copy_info);
+    void                 releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
+    void                 referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
+    bool                 copyPrefixMemoryItems(const NormalizedCopyItems&       items,
+                                               CopyDirection                    direction,
+                                               const std::vector<LayerTagSlot>& slots);
 
     bool                       freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
     void                       referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
@@ -351,11 +365,11 @@ private:
     bool                       use_prefix_tree_memory_cache_{false};
 
     // metrics reporter
-    kmonitor::MetricsReporterPtr                metrics_reporter_;
-    std::shared_ptr<std::thread>                metrics_reporter_thread_{nullptr};
-    std::atomic<bool>                           stop_{false};
-    std::shared_ptr<RequestPrefixManifestStore> request_manifest_store_ =
-        std::make_shared<RequestPrefixManifestStore>();
+    kmonitor::MetricsReporterPtr                  metrics_reporter_;
+    std::shared_ptr<std::thread>                  metrics_reporter_thread_{nullptr};
+    std::atomic<bool>                             stop_{false};
+    mutable std::mutex                            endpoint_commit_mutex_;
+    std::set<std::pair<RequestPrefixKey, size_t>> endpoint_commits_;
 };
 
 }  // namespace rtp_llm

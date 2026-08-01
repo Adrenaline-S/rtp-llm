@@ -425,10 +425,11 @@ private:
         res->cacheKeys("default") = cache_keys;
         const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
         res->mutableBlockIds("default").assign(default_blocks);
-        // reuse_len in these tests means "GPU already-reused prefix length".
-        // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
-        // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
-        res->setDeviceReuseBlockNum("default", reuse_len);
+        // reuse_len in these tests means "GPU already-reused prefix block count".
+        const size_t         span = res->requestPrefix().matchSpanTokens();
+        std::vector<int32_t> tokens((cache_keys.size() + 1) * span, 1);
+        res->requestPrefix().rebuild(tokens.data(), tokens.size());
+        res->setDeviceReuseTokenNum(reuse_len * span);
         // These unit tests want to include the whole cache_keys range by default.
         res->setLastBlockAligned("default", true);
         return res;
@@ -454,8 +455,10 @@ private:
         }
         res->mutableBlockIds("linear").assign(normalized_linear_blocks);
         res->mutableBlockIds("full1").assign(normalized_full_blocks);
-        res->setDeviceReuseBlockNum("linear", reuse_len);
-        res->setDeviceReuseBlockNum("full1", reuse_len);
+        const size_t         span = res->requestPrefix().matchSpanTokens();
+        std::vector<int32_t> tokens((cache_keys.size() + 1) * span, 1);
+        res->requestPrefix().rebuild(tokens.data(), tokens.size());
+        res->setDeviceReuseTokenNum(reuse_len * span);
         res->setLastBlockAligned("linear", true);
         res->setLastBlockAligned("full1", true);
         return res;
@@ -871,7 +874,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
     // NOTE: asyncRead always skips the last cache_key (cache_keys.size() - 1), so keep size >= 2 here.
     auto res_empty_lbs = std::make_shared<KVCacheResource>();
     res_empty_lbs->initGroups(cache_config_.topologyPtr());
-    res_empty_lbs->cacheKeys(cache_config_.singleReusableGroupTag()) = {1, 2};
+    res_empty_lbs->cacheKeys("default") = {1, 2};
     EXPECT_EQ(connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_token=*/0, /*token_count=*/1), nullptr);
 }
 
@@ -885,7 +888,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
     auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto match_ctx = connector_->asyncMatch(matchView(res), meta);
     EXPECT_EQ(match_ctx, nullptr);
-    EXPECT_EQ(res->reuseBlockNum(cache_config_.singleReusableGroupTag()), N);
+    EXPECT_EQ(res->reuseTokenNum() / cache_config_.seqSizePerBlockForGroup("default"), N);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenPlanEmpty) {
@@ -943,7 +946,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto match_ctx = connector_->asyncMatch(matchView(res), meta);
     ASSERT_NE(match_ctx, nullptr);
-    const int reuse_num = static_cast<int>(res->reuseBlockNum(cache_config_.singleReusableGroupTag()));
+    const int reuse_num = static_cast<int>(res->reuseTokenNum() / cache_config_.seqSizePerBlockForGroup("default"));
     const int read_num  = static_cast<int>(matchedBlocks(match_ctx)) - reuse_num;
     ASSERT_GT(read_num, 0);
     auto ctx = asyncReadBlocks(res, meta, match_ctx, reuse_num, read_num);
@@ -952,7 +955,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     ASSERT_NE(mem_ctx, nullptr);
     ASSERT_TRUE(waitUntilDone(ctx));
     EXPECT_TRUE(ctx->success());
-    EXPECT_EQ(res->reuseBlockNum(cache_config_.singleReusableGroupTag()), 2u);  // last cache key will not be read
+    EXPECT_EQ(res->reuseTokenNum() / cache_config_.seqSizePerBlockForGroup("default"),
+              2u);  // last cache key will not be read
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemoryCache) {
@@ -978,7 +982,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemo
     auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto match_ctx = connector_->asyncMatch(matchView(res), meta);
     ASSERT_NE(match_ctx, nullptr);
-    const int reuse_num = static_cast<int>(res->reuseBlockNum(cache_config_.singleReusableGroupTag()));
+    const int reuse_num = static_cast<int>(res->reuseTokenNum() / cache_config_.seqSizePerBlockForGroup("default"));
     const int read_num  = static_cast<int>(matchedBlocks(match_ctx)) - reuse_num;
     ASSERT_GT(read_num, 0);
     auto ctx = asyncReadBlocks(res, meta, match_ctx, reuse_num, read_num);
@@ -1015,7 +1019,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock)
     auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto match_ctx = connector_->asyncMatch(matchView(res), meta);
     ASSERT_NE(match_ctx, nullptr);
-    const int reuse_num = static_cast<int>(res->reuseBlockNum(cache_config_.singleReusableGroupTag()));
+    const int reuse_num = static_cast<int>(res->reuseTokenNum() / cache_config_.seqSizePerBlockForGroup("default"));
     const int read_num  = static_cast<int>(matchedBlocks(match_ctx)) - reuse_num;
     ASSERT_GT(read_num, 0);
 
@@ -1091,7 +1095,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnMemResponse_NoReuseLenIncr
     ASSERT_NE(mem_ctx, nullptr);
     ASSERT_TRUE(waitUntilDone(ctx));
     EXPECT_FALSE(ctx->success());
-    EXPECT_EQ(res->reuseBlockNum(cache_config_.singleReusableGroupTag()), 0u);
+    EXPECT_EQ(res->reuseTokenNum() / cache_config_.seqSizePerBlockForGroup("default"), 0u);
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -1141,7 +1145,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_FailureOnRpcStatus_NoReuseLenIncrem
     ASSERT_NE(mem_ctx, nullptr);
     ASSERT_TRUE(waitUntilDone(ctx));
     EXPECT_FALSE(ctx->success());
-    EXPECT_EQ(res->reuseBlockNum(cache_config_.singleReusableGroupTag()), 0u);
+    EXPECT_EQ(res->reuseTokenNum() / cache_config_.seqSizePerBlockForGroup("default"), 0u);
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -1198,8 +1202,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
     // uninitialized legacy layer view
     auto res_empty_lbs = std::make_shared<KVCacheResource>();
     res_empty_lbs->initGroups(cache_config_.topologyPtr());
-    res_empty_lbs->cacheKeys(cache_config_.singleReusableGroupTag()) = {1};
-    res_empty_lbs->setLastBlockAligned(cache_config_.singleReusableGroupTag(), true);
+    res_empty_lbs->cacheKeys("default") = {1};
+    res_empty_lbs->setLastBlockAligned("default", true);
     EXPECT_EQ(connector_->asyncWrite(res_empty_lbs, meta), nullptr);
 }
 
@@ -1394,8 +1398,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsTailAfterLastBigKey_InHybridA
     ASSERT_NE(read_ctx, nullptr);
     ASSERT_TRUE(waitUntilDone(read_ctx));
     EXPECT_TRUE(read_ctx->success());
-    EXPECT_EQ(res->memoryReuseBlockNum("linear"), 3u);
-    EXPECT_EQ(res->memoryReuseBlockNum("full1"), 3u);
+    EXPECT_EQ(res->memoryReuseTokenNum(), 3 * span);
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {

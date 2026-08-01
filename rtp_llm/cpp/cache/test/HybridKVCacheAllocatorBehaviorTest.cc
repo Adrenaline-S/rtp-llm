@@ -203,6 +203,12 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
     return res;
 }
 
+static void rebuildRequestPrefixes(const BatchKVCacheResourcePtr& resource, const CompleteTokenIdsPtr& token_ids) {
+    for (int batch_id = 0; batch_id < token_ids->batchSize(); ++batch_id) {
+        resource->cacheResource(batch_id).requestPrefix().rebuild(token_ids->data(batch_id), token_ids->seqLength());
+    }
+}
+
 static int estimateBatchPeakForSingleSequence(const KVCacheAllocator&        allocator,
                                               const BatchKVCacheResourcePtr& batch_resource,
                                               int                            seq_len,
@@ -694,6 +700,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
 
     // seq_len=12 => 3 slots (4 tokens per block).
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    rebuildRequestPrefixes(batch_res, token_ids);
 
     MallocInfo info{batch_res, token_ids};
     info.enable_device_cache = true;
@@ -741,6 +748,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, HeterogeneousReuseLengthIsIndependentOfGr
         resource->setBatchCacheKeys(0, kFullTag, {400, 800});
         resource->setBatchCacheKeys(0, kLinearTag, {200, 400, 600, 800});
         auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/2);
+        rebuildRequestPrefixes(resource, token_ids);
 
         MallocInfo info{resource, token_ids};
         info.enable_device_cache = true;
@@ -771,6 +779,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, FullPromptHitKeepsOneTokenForPrefill) {
     auto cached_blocks = allocateAndCache(allocator->blockPool("default"), shared_cache, "default", {100, 200});
     auto resource      = makeBatchResource(/*batch_size=*/1, config, {100, 200});
     auto token_ids     = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    rebuildRequestPrefixes(resource, token_ids);
 
     MallocInfo info{resource, token_ids};
     info.enable_device_cache = true;
@@ -873,7 +882,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, UpdateKVBlockForksSharedBlocksAcrossGroup
     ASSERT_EQ(full_blocks.size(), 3u);
     ASSERT_EQ(allocator->freeBlocksNum(), free_before - 6);
 
-    auto batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101});
+    auto                 batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101});
+    std::vector<int32_t> prefix_tokens(13, 1);
+    for (int batch_id = 0; batch_id < 2; ++batch_id) {
+        batch_res->cacheResource(batch_id).requestPrefix().rebuild(prefix_tokens.data(), prefix_tokens.size());
+    }
+    auto& source_prefix = batch_res->cacheResource(0).requestPrefix();
+    source_prefix.setDeviceReuseTokens(4);
+    source_prefix.setMemoryReuseTokens(4);
+    source_prefix.setRemoteReuseTokens(4);
+    const auto source_prefix_keys = source_prefix.keys();
     batch_res->mutableBlockIds(0, kLinearTag).assign({linear_blocks[0], NULL_BLOCK_IDX, linear_blocks[1]});
     batch_res->mutableBlockIds(0, kFullTag).assign({full_blocks[0], full_blocks[1]});
     batch_res->mutableBlockIds(1, kLinearTag).assign({linear_blocks[2]});
@@ -894,6 +912,13 @@ TEST_F(HybridPoolKVCacheAllocatorTest, UpdateKVBlockForksSharedBlocksAcrossGroup
     EXPECT_EQ(batch_res->blocks(0, kFullTag), (BlockIndicesType{full_blocks[0], full_blocks[1]}));
     EXPECT_EQ(batch_res->blocks(1, kLinearTag), (BlockIndicesType{linear_blocks[0], NULL_BLOCK_IDX, linear_blocks[1]}));
     EXPECT_EQ(batch_res->blocks(1, kFullTag), (BlockIndicesType{full_blocks[0], full_blocks[1]}));
+    for (int batch_id = 0; batch_id < 2; ++batch_id) {
+        const auto& prefix = batch_res->cacheResource(batch_id).requestPrefix();
+        EXPECT_EQ(prefix.keys(), source_prefix_keys);
+        EXPECT_EQ(prefix.deviceReuseTokens(), 4u);
+        EXPECT_EQ(prefix.memoryReuseTokens(), 4u);
+        EXPECT_EQ(prefix.remoteReuseTokens(), 4u);
+    }
 
     allocator->free(FreeInfo{batch_res, nullptr});
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
@@ -1171,6 +1196,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
 
     auto hit_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    rebuildRequestPrefixes(hit_res, hit_tokens);
 
     MallocInfo hit_malloc{hit_res, hit_tokens};
     hit_malloc.enable_device_cache = true;
@@ -1288,6 +1314,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
 
     // seq_len=20 => 5 slots. block_size-3-reserve_step = 2, so removeSkippedBlocks would scan pos 2.
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+    rebuildRequestPrefixes(batch_res, token_ids);
 
     MallocInfo info{batch_res, token_ids};
     info.enable_device_cache          = true;

@@ -21,11 +21,6 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t block_num,
 
 std::string layerTagCacheTransferKey(size_t request_id, size_t layer_id, const std::string& tag);
 
-enum class CacheTransferRangeMode {
-    PREFIX_ALIGNED,
-    DIRECT_TERMINAL,
-};
-
 struct NativeTransferSelection {
     std::string         tag;
     std::vector<size_t> global_positions;
@@ -35,11 +30,11 @@ struct NativeTransferSelection {
 
 using NativeTransferSelections = std::unordered_map<std::string, NativeTransferSelection>;
 
-NativeTransferSelection projectTokenRangeForGroup(const GroupBase&       group,
-                                                  size_t                 start_token,
-                                                  size_t                 end_token,
-                                                  CacheTransferRangeMode mode,
-                                                  int                    cp_rank = 0,
-                                                  int                    cp_size = 1);
+NativeTransferSelection projectTokenRangeForGroup(const GroupBase& group,
+                                                  size_t           start_token,
+                                                  size_t           end_token,
+                                                  bool             require_aligned_range,
+                                                  int              cp_rank = 0,
+                                                  int              cp_size = 1);
 
 }  // namespace rtp_llm

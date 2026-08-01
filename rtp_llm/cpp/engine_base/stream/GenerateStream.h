@@ -143,19 +143,17 @@ public:
     }
 
     // Only used in C++ world.
-    int                  reuseBlockSize() const;
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    void                 fakeInitKVBlockForTokens(size_t token_capacity, size_t reserve_blocks = 0);
-    virtual absl::Status initKVBlock();
-    virtual absl::Status incrKVBlock();
-    virtual void         releaseResource();
-    int                  nextNeedBlockNums(int reserve_step) const;
-    int                  estimateInitialNeedBlocks() const;
-    int                  estimatePeakNeedBlocks(int remaining_tokens) const;
-    void                 setNeedReleaseResource(bool need_release_resource);
-    bool                 hasCacheKeys() const;
-    const std::string&   singleCacheKeyTag() const;
-    const CacheKeysType& cacheKeys(int32_t batch_id, std::string_view tag) const;
+    int                          reuseBlockSize() const;
+    void                         fakeInitKVBlock(size_t reserved_blocks = 0);
+    void                         fakeInitKVBlockForTokens(size_t token_capacity, size_t reserve_blocks = 0);
+    virtual absl::Status         initKVBlock();
+    virtual absl::Status         incrKVBlock();
+    virtual void                 releaseResource();
+    int                          nextNeedBlockNums(int reserve_step) const;
+    int                          estimateInitialNeedBlocks() const;
+    int                          estimatePeakNeedBlocks(int remaining_tokens) const;
+    void                         setNeedReleaseResource(bool need_release_resource);
+    const RequestPrefixResource& requestPrefix(int32_t batch_id) const;
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;

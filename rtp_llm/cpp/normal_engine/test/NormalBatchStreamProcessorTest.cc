@@ -159,6 +159,12 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     resource.setBatchBlocks(1, "default", {0, 0});
     resource.setBatchCacheKeys(0, "default", CacheKeysType{101, 102, 103});
     resource.setBatchCacheKeys(1, "default", CacheKeysType{201, 202, 203, 204, 205});
+    std::vector<int32_t> request_tokens_0{1, 2, 3, 4, 5};
+    std::vector<int32_t> request_tokens_1{11, 12, 13, 14, 15, 16, 17, 18, 19};
+    resource.cacheResource(0).requestPrefix().rebuild(request_tokens_0.data(), request_tokens_0.size());
+    resource.cacheResource(1).requestPrefix().rebuild(request_tokens_1.data(), request_tokens_1.size());
+    const auto expected_keys_0 = resource.cacheResource(0).requestPrefix().keys();
+    const auto expected_keys_1 = resource.cacheResource(1).requestPrefix().keys();
     stream->setKVCache(resource);
     stream->streamCacheResource().setNeedReleaseResource(false);
     stream->generate_status_->status = StreamState::RUNNING;
@@ -176,7 +182,10 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     ASSERT_TRUE(cache_keys.defined());
     EXPECT_EQ(cache_keys.size(0), 2);
     EXPECT_EQ(cache_keys.size(1), 5);
-    EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 0, 0, 201, 202, 203, 204, 205}));
+    std::vector<int64_t> expected(expected_keys_0.begin(), expected_keys_0.end());
+    expected.resize(5, 0);
+    expected.insert(expected.end(), expected_keys_1.begin(), expected_keys_1.end());
+    EXPECT_EQ(toVec<int64_t>(cache_keys), expected);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testResourceMayContainConfiguredTagSubset) {

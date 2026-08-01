@@ -80,6 +80,12 @@ BatchKVCacheResourcePtr makeBatchRes(int batch_size, const CacheConfig& config, 
     return res;
 }
 
+void rebuildRequestPrefixes(const BatchKVCacheResourcePtr& resource, const CompleteTokenIdsPtr& token_ids) {
+    for (int batch_id = 0; batch_id < token_ids->batchSize(); ++batch_id) {
+        resource->cacheResource(batch_id).requestPrefix().rebuild(token_ids->data(batch_id), token_ids->seqLength());
+    }
+}
+
 void setCPMapper(const HybridPoolKVCacheAllocatorPtr& allocator, int cp_rank, int cp_size) {
     allocator->setCPSlotMappers({{"linear", std::make_shared<CPSlotMapper>(cp_rank, cp_size, 4)},
                                  {"full", std::make_shared<CPSlotMapper>(cp_rank, cp_size, 4)}});
@@ -169,6 +175,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
 
     auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens    = makeTokens(1, 16, 4);
+    rebuildRequestPrefixes(batch_res, tokens);
 
     MallocInfo info{batch_res, tokens};
     info.enable_device_cache = true;
@@ -197,6 +204,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, FullPromptHitRetainsOneCPLogicalBlockF
 
     auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens    = makeTokens(1, 16, 4);
+    rebuildRequestPrefixes(batch_res, tokens);
 
     MallocInfo info{batch_res, tokens};
     info.enable_device_cache = true;

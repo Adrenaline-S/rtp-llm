@@ -268,9 +268,9 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
     if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
-        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, config_);
+        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids);
     } else {
-        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, config_);
+        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids);
     }
 
     return allocator_->malloc(malloc_info);
@@ -284,7 +284,7 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    dropLastPartialBlock(insert_info.batch_kv_cache_resource, config_);
+    dropLastPartialBlock(insert_info.batch_kv_cache_resource);
     allocator_->insertIntoCache(insert_info);
 }
 

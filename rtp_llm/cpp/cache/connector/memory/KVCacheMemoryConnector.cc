@@ -54,8 +54,18 @@ static size_t reusableGroupCount(const CacheConfig& config) {
                                              [](const GroupBase& group) { return group.policy.enable_prefix_reuse; }));
 }
 
-static const std::string& canonicalReusableCacheTag(const CacheConfig& config) {
-    return config.singleReusableGroupTag();
+static const GroupBase& requireSingleReusableGroup(const CacheConfig& config) {
+    const GroupBase* selected = nullptr;
+    for (const auto& group : config.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse) {
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(selected == nullptr,
+                                "native memory wire requires exactly one reusable group, got more than one");
+        selected = &group;
+    }
+    RTP_LLM_CHECK_WITH_INFO(selected != nullptr, "native memory wire requires exactly one reusable group, got zero");
+    return *selected;
 }
 
 static bool copyItemIsComplete(const MemoryOperationRequestPB::CopyItem& item) {
@@ -204,10 +214,12 @@ void KVCacheMemoryConnector::initBlockPool() {
     const bool  multi_group_control_plane = reusableGroupCount(cache_config_) > 1;
     use_prefix_tree_memory_cache_ = (prefix_tree_requested || multi_group_control_plane) && prefix_tree_supported;
     if (multi_group_control_plane && !use_prefix_tree_memory_cache_) {
-        const auto& canonical_tag  = canonicalReusableCacheTag(cache_config_);
-        const auto  canonical_span = cache_config_.seqSizePerBlockForGroup(canonical_tag);
+        size_t canonical_span = 0;
         for (const auto& group : cache_config_.topology().groups()) {
             if (group.policy.enable_prefix_reuse) {
+                if (canonical_span == 0) {
+                    canonical_span = group.seq_size_per_block;
+                }
                 RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block == canonical_span,
                                         "legacy multi-group memory layout requires equal reusable spans");
             }
@@ -632,12 +644,9 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const Requ
     if (!meta->enableMemoryCache()) {
         return nullptr;
     }
-    const auto& slots       = layerTagSlots();
-    const bool  flat_legacy = !usePrefixTreeMemoryCache() && !supportsTypedPrefixCacheLayout(slots);
-    if (flat_legacy) {
-        const auto& tag  = canonicalReusableCacheTag(cache_config_);
-        const auto  span = cache_config_.seqSizePerBlockForGroup(tag);
-        if (span != view.matchSpanTokens() || view.reuseTokens() % span != 0) {
+    if (!usePrefixTreeMemoryCache()) {
+        const auto span = view.matchSpanTokens();
+        if (view.reuseTokens() % span != 0) {
             return nullptr;
         }
         size_t matched_tokens = view.reuseTokens();
@@ -660,16 +669,24 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const Requ
         return std::make_shared<MemoryAsyncMatchContext>(
             matched_tokens, view.reuseTokens(), matched_tokens - view.reuseTokens());
     }
-    auto pinned = request_manifest_store_->match(view, view.reuseTokens());
-    if (!pinned) {
-        return nullptr;
+    size_t matched_tokens = view.reuseTokens();
+    {
+        std::lock_guard<std::mutex> lock(endpoint_commit_mutex_);
+        const size_t                span = view.matchSpanTokens();
+        for (size_t endpoint = matched_tokens + span; endpoint <= view.matchLimitTokens(); endpoint += span) {
+            const size_t key_index = endpoint / span - 1;
+            if (key_index >= view.keys().size()
+                || endpoint_commits_.find({view.keys()[key_index], endpoint}) == endpoint_commits_.end()) {
+                break;
+            }
+            matched_tokens = endpoint;
+        }
     }
-    const size_t matched_tokens = pinned->matchedTokenCount();
     if (matched_tokens <= view.reuseTokens() || matched_tokens > view.matchLimitTokens()) {
         return nullptr;
     }
     return std::make_shared<MemoryAsyncMatchContext>(
-        matched_tokens, view.reuseTokens(), matched_tokens - view.reuseTokens(), std::move(pinned));
+        matched_tokens, view.reuseTokens(), matched_tokens - view.reuseTokens());
 }
 
 bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const {
@@ -756,24 +773,22 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     auto memory_match_context = std::dynamic_pointer_cast<MemoryAsyncMatchContext>(match_context);
     if (!memory_match_context || memory_match_context->plannedStartToken() != start_token
         || memory_match_context->plannedTokenCount() != token_count) {
-        RTP_LLM_LOG_WARNING("memory read requires the exact pinned manifest token range");
+        RTP_LLM_LOG_WARNING("memory read requires the exact matched endpoint token range");
         return nullptr;
     }
     const auto&               slots = layerTagSlots();
     std::shared_ptr<CopyPlan> copy_plan;
-    const bool                flat_legacy = !usePrefixTreeMemoryCache() && !supportsTypedPrefixCacheLayout(slots);
-    auto                      pinned      = memory_match_context->takeManifestChain();
-    if (flat_legacy) {
-        const auto& tag  = canonicalReusableCacheTag(cache_config_);
-        const auto  span = cache_config_.seqSizePerBlockForGroup(tag);
-        if (span != resource->requestPrefix().matchSpanTokens() || start_token % span != 0 || token_count % span != 0) {
-            RTP_LLM_LOG_WARNING("flat memory connector requires aligned request keys");
+    if (!usePrefixTreeMemoryCache()) {
+        const bool multi_group = reusableGroupCount(cache_config_) > 1;
+        const auto span        = resource->requestPrefix().matchSpanTokens();
+        if (start_token % span != 0 || token_count % span != 0) {
+            RTP_LLM_LOG_WARNING("memory connector requires aligned request keys");
             return nullptr;
         }
-        const auto  begin       = start_token / span;
-        const auto  count       = token_count / span;
-        const bool  multi_group = reusableGroupCount(cache_config_) > 1;
-        const auto& cache_keys  = multi_group ? resource->requestPrefix().keys() : resource->cacheKeys(tag);
+        const auto  begin      = start_token / span;
+        const auto  count      = token_count / span;
+        const auto& cache_keys = multi_group ? resource->requestPrefix().keys() :
+                                               resource->cacheKeys(requireSingleReusableGroup(cache_config_).tag);
         if (begin + count > cache_keys.size()) {
             RTP_LLM_LOG_WARNING("flat memory connector read range exceeds request keys");
             return nullptr;
@@ -785,25 +800,22 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         copy_plan = buildCopyPlanForRead(
             cache_keys, layer_attn_block_ids, slots, static_cast<int>(begin), static_cast<int>(count));
     } else {
-        if (!pinned) {
-            return nullptr;
-        }
         auto layer_attn_block_ids = resourceLayerRegionBlocks(*resource, slots);
-        copy_plan                 = buildManifestCopyPlanForRead(
-            *resource, pinned->manifests(), layer_attn_block_ids, slots, start_token, token_count);
+        copy_plan = buildEndpointCopyPlanForRead(*resource, layer_attn_block_ids, slots, start_token, token_count);
     }
     if (!copy_plan || copy_plan->copy_infos.empty()) {
+        if (usePrefixTreeMemoryCache()) {
+            eraseEndpointRange(resource->requestPrefix(), start_token, start_token + token_count);
+        }
         return nullptr;
     }
 
     autil::ScopedTime2 timer;
-    auto read_done = [resource, copy_plan, pinned = std::move(pinned), token_count, timer, this](bool success) mutable {
+    const bool         request_endpoint_control = usePrefixTreeMemoryCache();
+    auto read_done = [resource, copy_plan, request_endpoint_control, start_token, token_count, timer, this](
+                         bool success) mutable {
         if (success) {
-            for (const auto& group : cache_config_.topology().groups()) {
-                if (group.policy.enable_prefix_reuse) {
-                    resource->setMemoryReuseBlockNum(group.tag, token_count / group.seq_size_per_block);
-                }
-            }
+            resource->setMemoryReuseTokenNum(token_count);
             for (const auto& copy_info : copy_plan->copy_infos) {
                 if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
                     const auto removed_item = prefix_block_cache_->detachIfMatch(copy_info.cache_key,
@@ -824,16 +836,11 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                 }
             }
         }
-        if (success) {
-            if (pinned) {
-                for (const auto& manifest : pinned->manifests()) {
-                    request_manifest_store_->evict(manifest.key);
-                }
-            }
+        if (success && request_endpoint_control) {
+            eraseEndpointRange(resource->requestPrefix(), start_token, start_token + token_count);
         }
         const auto item_count = copy_plan->copy_infos.size();
         copy_plan.reset();
-        pinned.reset();
         reportReadMetrics(success, timer.done_us(), item_count, success ? item_count : 0);
     };
     auto context = std::make_shared<MemoryAsyncContext>(read_done);
@@ -1071,44 +1078,23 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     }
     const auto& slots       = layerTagSlots();
     const bool  flat_legacy = !usePrefixTreeMemoryCache() && !supportsTypedPrefixCacheLayout(slots);
-    if (reusableGroupCount(cache_config_) > 1 && !flat_legacy) {
-        auto manifests = buildRequestManifests(*resource);
-        if (manifests.empty()) {
-            return nullptr;
-        }
+    if (usePrefixTreeMemoryCache()) {
         auto layer_attn_block_ids = resourceLayerRegionBlocks(*resource, slots);
         bool no_need_write        = false;
-        auto copy_plan =
-            buildManifestCopyPlanForWrite(*resource, manifests, layer_attn_block_ids, slots, no_need_write);
+        auto copy_plan = buildEndpointCopyPlanForWrite(*resource, layer_attn_block_ids, slots, no_need_write);
         if (!copy_plan || copy_plan->copy_infos.empty()) {
             if (no_need_write) {
-                if (!attachManifestBackingHolds(manifests)) {
-                    return nullptr;
-                }
-                for (const auto& manifest : manifests) {
-                    request_manifest_store_->publish(manifest);
-                }
+                publishReadyEndpoints(*resource);
             }
             return nullptr;
         }
         autil::ScopedTime2 timer;
-        auto write_done = [copy_plan, manifests, resource_copy = resource, timer, this](bool success) mutable {
+        auto               write_done = [copy_plan, resource_copy = resource, timer, this](bool success) mutable {
             if (success) {
                 for (auto& copy_info : copy_plan->copy_infos) {
                     putPrefixToCache(copy_info, copy_info.dependency, layer_tag_slots_);
                 }
-                if (!attachManifestBackingHolds(manifests)) {
-                    RTP_LLM_LOG_WARNING("memory manifest backing pin failed");
-                    success = false;
-                }
-            }
-            if (success) {
-                for (const auto& manifest : manifests) {
-                    if (!request_manifest_store_->publish(manifest)) {
-                        RTP_LLM_LOG_WARNING("memory manifest publication failed at endpoint=%zu",
-                                            manifest.key.token_end);
-                    }
-                }
+                publishReadyEndpoints(*resource_copy);
             }
             const auto item_count = copy_plan->copy_infos.size();
             resource_copy.reset();
@@ -1123,15 +1109,16 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         return context;
     }
 
-    const auto& cache_key_tag      = canonicalReusableCacheTag(cache_config_);
     const bool  legacy_multi_group = flat_legacy && reusableGroupCount(cache_config_) > 1;
-    const auto& cache_keys = legacy_multi_group ? resource->requestPrefix().keys() : resource->cacheKeys(cache_key_tag);
-    const auto  cache_keys_size =
+    const auto* native_group       = legacy_multi_group ? nullptr : &requireSingleReusableGroup(cache_config_);
+    const auto& cache_keys =
+        legacy_multi_group ? resource->requestPrefix().keys() : resource->cacheKeys(native_group->tag);
+    const auto cache_keys_size =
         legacy_multi_group ?
-             cache_keys.size() :
-             (cache_keys.empty() ?
-                  0 :
-                  (resource->lastBlockAligned(cache_key_tag) ? cache_keys.size() : cache_keys.size() - 1));
+            cache_keys.size() :
+            (cache_keys.empty() ?
+                 0 :
+                 (resource->lastBlockAligned(native_group->tag) ? cache_keys.size() : cache_keys.size() - 1));
     if (cache_keys_size == 0) {
         RTP_LLM_LOG_DEBUG("async write skip, cache keys is empty");
         return nullptr;
@@ -1168,63 +1155,6 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
         }
     }
 
-    if (use_prefix_tree) {
-        resource->ensureLinearBlockDependencies(cache_key_tag);
-        bool no_need_write = false;
-        auto copy_plan     = buildPrefixCopyPlanForWrite(cache_keys,
-                                                     resource->blockDependencies(cache_key_tag),
-                                                     layer_attn_block_ids,
-                                                     slots,
-                                                     0,
-                                                     static_cast<int>(cache_keys_size),
-                                                     no_need_write);
-        if (!copy_plan || copy_plan->copy_infos.empty()) {
-            reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
-            return nullptr;
-        }
-        auto write_done =
-            [copy_plan, resource_copy = resource, cache_key_tag, timer, total_block_num = cache_keys_size, this](
-                bool success) mutable {
-                int64_t disk_write_block_num = 0;
-                for (const auto& copy_info : copy_plan->copy_infos) {
-                    if (copy_info.backing_type == CacheBackingType::DISK) {
-                        ++disk_write_block_num;
-                    }
-                }
-                if (success) {
-                    const auto& dependencies = resource_copy->blockDependencies(cache_key_tag);
-                    for (auto& copy_info : copy_plan->copy_infos) {
-                        const auto pos = static_cast<size_t>(std::find(resource_copy->cacheKeys(cache_key_tag).begin(),
-                                                                       resource_copy->cacheKeys(cache_key_tag).end(),
-                                                                       copy_info.cache_key)
-                                                             - resource_copy->cacheKeys(cache_key_tag).begin());
-                        const auto dependency = pos < dependencies.size() ?
-                                                    dependencies[pos] :
-                                                    BlockDependency{false, 0, static_cast<uint32_t>(pos)};
-                        putPrefixToCache(copy_info, dependency, layer_tag_slots_);
-                    }
-                    for (const auto& manifest : buildRequestManifests(*resource_copy)) {
-                        request_manifest_store_->publish(manifest);
-                    }
-                }
-                resource_copy.reset();
-                const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
-                copy_plan.reset();
-                reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
-                if (disk_write_block_num > 0) {
-                    reportDiskWriteMetrics(
-                        success, timer.done_us(), total_block_num, success ? disk_write_block_num : 0);
-                }
-            };
-
-        auto context = std::make_shared<MemoryAsyncContext>(write_done);
-        if (!startCopyAsync(context, copy_plan)) {
-            write_done(false);
-            return nullptr;
-        }
-        return context;
-    }
-
     size_t mem_matched_num = 0;
     for (; mem_matched_num < cache_keys_size; ++mem_matched_num) {
         if (!block_cache_->contains(static_cast<CacheKeyType>(cache_keys[mem_matched_num]))) {
@@ -1237,9 +1167,6 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             mem_matched_num,
             cache_keys_size);
         reportWriteMetrics(true, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
-        for (const auto& manifest : buildRequestManifests(*resource)) {
-            request_manifest_store_->publish(manifest);
-        }
         return nullptr;
     }
 
@@ -1282,9 +1209,6 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             if (success) {
                 for (auto& copy_info : copy_plan->copy_infos) {
                     putToCache(copy_info);
-                }
-                for (const auto& manifest : buildRequestManifests(*resource_copy)) {
-                    request_manifest_store_->publish(manifest);
                 }
             }
             // reset resource to decrease block ref count in destructor
@@ -1502,90 +1426,29 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
     return createCopyPlan(copy_infos, CopyDirection::D2H);
 }
 
-std::vector<RequestPrefixManifest>
-KVCacheMemoryConnector::buildRequestManifests(const KVCacheResource& resource) const {
-    const auto&                             prefix = resource.requestPrefix();
-    const size_t                            span   = prefix.matchSpanTokens();
-    std::vector<RequestPrefixManifest>      manifests;
-    std::optional<RequestPrefixManifestKey> parent;
-    size_t                                  parent_endpoint = 0;
-    for (size_t endpoint = span; endpoint <= prefix.writeLimitTokens(); endpoint += span) {
-        const size_t key_index = endpoint / span - 1;
-        if (key_index >= prefix.keys().size()) {
-            return {};
-        }
-        RequestPrefixManifest manifest;
-        manifest.key    = {prefix.keys()[key_index], endpoint};
-        manifest.parent = parent;
-        for (const auto& group : cache_config_.topology().groups()) {
-            if (!group.policy.enable_prefix_reuse) {
-                continue;
-            }
-            const size_t begin   = group.policy.group_type == CacheGroupType::FULL ? parent_endpoint : 0;
-            const int    cp_size = cpSizeForMetrics();
-            const int    cp_rank =
-                cp_size > 1 && parallelism_config_.tp_size > 1 ? static_cast<int>(parallelism_config_.tp_rank) : 0;
-            const auto selection = projectTokenRangeForGroup(
-                group, begin, endpoint, CacheTransferRangeMode::PREFIX_ALIGNED, cp_rank, cp_size);
-            const auto& native_keys = resource.cacheKeys(group.tag);
-            for (const auto ordinal : selection.owned_global_positions) {
-                if (ordinal >= native_keys.size()) {
-                    return {};
-                }
-                const auto kind =
-                    group.policy.group_type == CacheGroupType::FULL ?
-                        NativeCacheItemKind::FULL_INTERVAL :
-                        (group.policy.group_type == CacheGroupType::SWA ? NativeCacheItemKind::STATE :
-                                                                          NativeCacheItemKind::ACTIVE_TAIL);
-                manifest.native_items.push_back(
-                    NativeCacheItemRef{group.tag, native_keys[ordinal], static_cast<uint32_t>(ordinal), kind, 0});
-            }
-        }
-        if (manifest.native_items.empty()) {
-            return {};
-        }
-        parent          = manifest.key;
-        parent_endpoint = endpoint;
-        manifests.push_back(std::move(manifest));
+std::optional<KVCacheMemoryConnector::NativeItemProjection> KVCacheMemoryConnector::nativeItemForOrdinal(
+    const KVCacheResource& resource, std::string_view tag, size_t physical_ordinal) const {
+    const auto& dependencies = resource.blockDependencies(tag);
+    const auto  dependency_it =
+        std::find_if(dependencies.begin(), dependencies.end(), [&](const BlockDependency& dependency) {
+            return dependency.ordinal == physical_ordinal;
+        });
+    if (dependency_it == dependencies.end()) {
+        return std::nullopt;
     }
-    return manifests;
+    const size_t local_index = static_cast<size_t>(std::distance(dependencies.begin(), dependency_it));
+    const auto&  native_keys = resource.cacheKeys(tag);
+    if (local_index >= native_keys.size()) {
+        return std::nullopt;
+    }
+    return NativeItemProjection{local_index, native_keys[local_index], *dependency_it};
 }
 
-bool KVCacheMemoryConnector::attachManifestBackingHolds(std::vector<RequestPrefixManifest>& manifests) {
-    for (auto& manifest : manifests) {
-        for (const auto& native_item : manifest.native_items) {
-            const auto kind  = native_item.kind == NativeCacheItemKind::FULL_INTERVAL ? CacheBlockKind::COMPRESSED_KV :
-                                                                                        CacheBlockKind::STATE_SWA_KV;
-            const auto match = prefix_block_cache_->matchAndMarkInFlight(native_item.native_cache_key, kind);
-            if (!match.found) {
-                return false;
-            }
-            auto cache = prefix_block_cache_;
-            manifest.native_backing_holds.emplace_back(
-                new uint8_t(0),
-                [this,
-                 cache,
-                 cache_key = native_item.native_cache_key,
-                 kind,
-                 backing_type = match.backing_type,
-                 block_index  = match.block_index,
-                 disk_slot    = match.disk_slot,
-                 generation   = match.generation](void* value) {
-                    delete static_cast<uint8_t*>(value);
-                    auto retired =
-                        cache->releaseInFlight(cache_key, kind, backing_type, block_index, disk_slot, generation);
-                    if (retired.has_value()) {
-                        releasePrefixCacheBacking(*retired);
-                    }
-                });
-        }
-    }
-    return true;
-}
-
-std::vector<uint8_t> KVCacheMemoryConnector::nativeItemSlotValidMask(const KVCacheResource&    resource,
-                                                                     const NativeCacheItemRef& native_item,
-                                                                     const LayerAttnBlockIds&  layer_attn_block_ids,
+std::vector<uint8_t> KVCacheMemoryConnector::nativeItemSlotValidMask(const KVCacheResource&   resource,
+                                                                     std::string_view         tag,
+                                                                     size_t                   local_index,
+                                                                     bool                     full_item,
+                                                                     const LayerAttnBlockIds& layer_attn_block_ids,
                                                                      const std::vector<LayerTagSlot>& slots,
                                                                      CacheBlockKind                   kind,
                                                                      std::vector<BlockIdxType>* gpu_blocks) const {
@@ -1593,22 +1456,12 @@ std::vector<uint8_t> KVCacheMemoryConnector::nativeItemSlotValidMask(const KVCac
     if (gpu_blocks != nullptr) {
         gpu_blocks->assign(slots.size(), NULL_BLOCK_IDX);
     }
-    const bool item_full = native_item.kind == NativeCacheItemKind::FULL_INTERVAL;
-    if ((kind == CacheBlockKind::COMPRESSED_KV) != item_full) {
+    if ((kind == CacheBlockKind::COMPRESSED_KV) != full_item) {
         return mask;
     }
-    const auto& dependencies = resource.blockDependencies(native_item.tag);
-    const auto  dependency_it =
-        std::find_if(dependencies.begin(), dependencies.end(), [&](const BlockDependency& dependency) {
-            return dependency.ordinal == native_item.physical_ordinal;
-        });
-    if (dependency_it == dependencies.end()) {
-        return mask;
-    }
-    const size_t local_idx = static_cast<size_t>(std::distance(dependencies.begin(), dependency_it));
     for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
         const auto& slot = slots[slot_idx];
-        if (slot.tag != native_item.tag || slot.block_kind != kind) {
+        if (slot.tag != tag || slot.block_kind != kind) {
             continue;
         }
         const size_t layer = static_cast<size_t>(slot.layer_id);
@@ -1617,10 +1470,10 @@ std::vector<uint8_t> KVCacheMemoryConnector::nativeItemSlotValidMask(const KVCac
         }
         const auto tag_it = layer_attn_block_ids[layer].find(slot.tag);
         if (tag_it == layer_attn_block_ids[layer].end() || tag_it->second == nullptr
-            || local_idx >= tag_it->second->blocks().size()) {
+            || local_index >= tag_it->second->blocks().size()) {
             continue;
         }
-        const auto block = tag_it->second->blocks()[local_idx];
+        const auto block = tag_it->second->blocks()[local_index];
         if (gpu_blocks != nullptr) {
             (*gpu_blocks)[slot_idx] = block;
         }
@@ -1632,43 +1485,64 @@ std::vector<uint8_t> KVCacheMemoryConnector::nativeItemSlotValidMask(const KVCac
 }
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
-KVCacheMemoryConnector::buildManifestCopyPlanForRead(const KVCacheResource&                    resource,
-                                                     const std::vector<RequestPrefixManifest>& manifests,
-                                                     const LayerAttnBlockIds&                  layer_attn_block_ids,
-                                                     const std::vector<LayerTagSlot>&          slots,
-                                                     size_t                                    start_token,
-                                                     size_t                                    token_count) {
+KVCacheMemoryConnector::buildEndpointCopyPlanForRead(const KVCacheResource&           resource,
+                                                     const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                     const std::vector<LayerTagSlot>& slots,
+                                                     size_t                           start_token,
+                                                     size_t                           token_count) {
     const size_t                end_token = start_token + token_count;
     std::vector<CopyInfoPerKey> copy_infos;
     bool                        success = true;
-    for (size_t manifest_index = 0; manifest_index < manifests.size(); ++manifest_index) {
-        const auto& manifest = manifests[manifest_index];
-        if (manifest.key.token_end <= start_token || manifest.key.token_end > end_token) {
+    for (const auto& group : cache_config_.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse) {
             continue;
         }
-        for (const auto& native_item : manifest.native_items) {
-            const bool tail_item = native_item.kind != NativeCacheItemKind::FULL_INTERVAL;
-            if (tail_item && manifest_index + 1 != manifests.size()) {
-                continue;
+        const bool   full_item = group.policy.group_type == CacheGroupType::FULL;
+        const size_t begin     = full_item ? start_token : 0;
+        const int    cp_size   = cpSizeForMetrics();
+        const int    cp_rank =
+            cp_size > 1 && parallelism_config_.tp_size > 1 ? static_cast<int>(parallelism_config_.tp_rank) : 0;
+        const auto selection = projectTokenRangeForGroup(group, begin, end_token, true, cp_rank, cp_size);
+        for (const auto ordinal : selection.owned_global_positions) {
+            const auto native_item = nativeItemForOrdinal(resource, group.tag, ordinal);
+            if (!native_item.has_value()) {
+                success = false;
+                break;
             }
-            const auto                kind = tail_item ? CacheBlockKind::STATE_SWA_KV : CacheBlockKind::COMPRESSED_KV;
+            const auto                kind = full_item ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV;
             std::vector<BlockIdxType> gpu_blocks;
-            const auto                required_mask =
-                nativeItemSlotValidMask(resource, native_item, layer_attn_block_ids, slots, kind, &gpu_blocks);
+            const auto                required_mask = nativeItemSlotValidMask(resource,
+                                                               group.tag,
+                                                               native_item->local_index,
+                                                               full_item,
+                                                               layer_attn_block_ids,
+                                                               slots,
+                                                               kind,
+                                                               &gpu_blocks);
             if (std::none_of(required_mask.begin(), required_mask.end(), [](uint8_t value) { return value != 0; })) {
                 success = false;
                 break;
             }
-            const auto match =
-                prefix_block_cache_->matchAndMarkInFlight(native_item.native_cache_key, kind, required_mask);
+            const auto match = prefix_block_cache_->matchAndMarkInFlight(native_item->cache_key, kind, required_mask);
             if (!match.found) {
-                request_manifest_store_->evict(manifest.key);
                 success = false;
                 break;
             }
+            const auto release_match = [&]() {
+                const auto retired = prefix_block_cache_->releaseInFlight(native_item->cache_key,
+                                                                          kind,
+                                                                          match.backing_type,
+                                                                          match.block_index,
+                                                                          match.disk_slot,
+                                                                          match.generation);
+                if (retired.has_value()) {
+                    releasePrefixCacheBacking(*retired);
+                }
+            };
             if (match.backing_type == CacheBackingType::MEMORY) {
                 auto pool = memoryPoolFor(kind);
                 if (!pool) {
+                    release_match();
                     success = false;
                     break;
                 }
@@ -1676,13 +1550,14 @@ KVCacheMemoryConnector::buildManifestCopyPlanForRead(const KVCacheResource&     
             } else {
                 auto pool = diskPoolFor(kind);
                 if (!pool || !pool->validSlot(match.disk_slot)) {
+                    release_match();
                     success = false;
                     break;
                 }
                 pool->requestReference(match.disk_slot);
             }
             CopyInfoPerKey info;
-            info.cache_key       = native_item.native_cache_key;
+            info.cache_key       = native_item->cache_key;
             info.kind            = kind;
             info.backing_type    = match.backing_type;
             info.mem_block       = match.block_index;
@@ -1706,47 +1581,90 @@ KVCacheMemoryConnector::buildManifestCopyPlanForRead(const KVCacheResource&     
 }
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
-KVCacheMemoryConnector::buildManifestCopyPlanForWrite(const KVCacheResource&                    resource,
-                                                      const std::vector<RequestPrefixManifest>& manifests,
-                                                      const LayerAttnBlockIds&                  layer_attn_block_ids,
-                                                      const std::vector<LayerTagSlot>&          slots,
-                                                      bool&                                     no_need_write) {
-    std::vector<CopyInfoPerKey>                       copy_infos;
-    std::set<std::pair<CacheKeyType, CacheBlockKind>> planned;
-    for (const auto& manifest : manifests) {
-        for (const auto& native_item : manifest.native_items) {
-            const bool tail_item = native_item.kind != NativeCacheItemKind::FULL_INTERVAL;
-            const auto kind      = tail_item ? CacheBlockKind::STATE_SWA_KV : CacheBlockKind::COMPRESSED_KV;
-            if (!planned.emplace(native_item.native_cache_key, kind).second) {
+KVCacheMemoryConnector::buildEndpointCopyPlanForWrite(const KVCacheResource&           resource,
+                                                      const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                      const std::vector<LayerTagSlot>& slots,
+                                                      bool&                            no_need_write) {
+    std::vector<CopyInfoPerKey>                               copy_infos;
+    std::map<std::pair<CacheKeyType, CacheBlockKind>, size_t> planned;
+    const auto&                                               prefix            = resource.requestPrefix();
+    size_t                                                    previous_endpoint = 0;
+    for (size_t endpoint = prefix.matchSpanTokens(); endpoint <= prefix.writeLimitTokens();
+         endpoint += prefix.matchSpanTokens()) {
+        for (const auto& group : cache_config_.topology().groups()) {
+            if (!group.policy.enable_prefix_reuse) {
                 continue;
             }
-            std::vector<BlockIdxType> gpu_blocks;
-            const auto                slot_mask =
-                nativeItemSlotValidMask(resource, native_item, layer_attn_block_ids, slots, kind, &gpu_blocks);
-            if (std::none_of(slot_mask.begin(), slot_mask.end(), [](uint8_t value) { return value != 0; })
-                || prefix_block_cache_->contains(native_item.native_cache_key, kind, slot_mask)) {
-                continue;
+            const bool   full_item = group.policy.group_type == CacheGroupType::FULL;
+            const size_t begin     = full_item ? previous_endpoint : 0;
+            const int    cp_size   = cpSizeForMetrics();
+            const int    cp_rank =
+                cp_size > 1 && parallelism_config_.tp_size > 1 ? static_cast<int>(parallelism_config_.tp_rank) : 0;
+            const auto selection = projectTokenRangeForGroup(group, begin, endpoint, true, cp_rank, cp_size);
+            for (const auto ordinal : selection.owned_global_positions) {
+                const auto native_item = nativeItemForOrdinal(resource, group.tag, ordinal);
+                if (!native_item.has_value()) {
+                    return nullptr;
+                }
+                const auto kind = full_item ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV;
+                std::vector<BlockIdxType> gpu_blocks;
+                const auto                slot_mask = nativeItemSlotValidMask(resource,
+                                                               group.tag,
+                                                               native_item->local_index,
+                                                               full_item,
+                                                               layer_attn_block_ids,
+                                                               slots,
+                                                               kind,
+                                                               &gpu_blocks);
+                if (std::none_of(slot_mask.begin(), slot_mask.end(), [](uint8_t value) { return value != 0; })) {
+                    continue;
+                }
+
+                const auto plan_key   = std::make_pair(native_item->cache_key, kind);
+                const auto planned_it = planned.find(plan_key);
+                if (planned_it != planned.end()) {
+                    auto& existing = copy_infos[planned_it->second];
+                    if (existing.dependency.has_parent != native_item->dependency.has_parent
+                        || existing.dependency.parent_key != native_item->dependency.parent_key
+                        || existing.dependency.ordinal != native_item->dependency.ordinal) {
+                        return nullptr;
+                    }
+                    for (size_t slot_idx = 0; slot_idx < slot_mask.size(); ++slot_idx) {
+                        if (slot_mask[slot_idx] == 0) {
+                            continue;
+                        }
+                        if (existing.slot_valid_mask[slot_idx] != 0
+                            && existing.gpu_blocks[slot_idx] != gpu_blocks[slot_idx]) {
+                            return nullptr;
+                        }
+                        existing.slot_valid_mask[slot_idx] = 1;
+                        existing.gpu_blocks[slot_idx]      = gpu_blocks[slot_idx];
+                    }
+                    continue;
+                }
+
+                CopyInfoPerKey info;
+                info.cache_key       = native_item->cache_key;
+                info.kind            = kind;
+                info.mem_block       = NULL_BLOCK_IDX;
+                info.block_size      = prefixKindBlockSize(kind, slots);
+                info.is_complete     = true;
+                info.slot_valid_mask = slot_mask;
+                info.gpu_blocks      = std::move(gpu_blocks);
+                info.dependency      = native_item->dependency;
+                planned.emplace(plan_key, copy_infos.size());
+                copy_infos.push_back(std::move(info));
             }
-            const auto& dependencies = resource.blockDependencies(native_item.tag);
-            const auto  dependency_it =
-                std::find_if(dependencies.begin(), dependencies.end(), [&](const BlockDependency& dependency) {
-                    return dependency.ordinal == native_item.physical_ordinal;
-                });
-            if (dependency_it == dependencies.end()) {
-                return nullptr;
-            }
-            CopyInfoPerKey info;
-            info.cache_key       = native_item.native_cache_key;
-            info.kind            = kind;
-            info.mem_block       = NULL_BLOCK_IDX;
-            info.block_size      = prefixKindBlockSize(kind, slots);
-            info.is_complete     = true;
-            info.slot_valid_mask = slot_mask;
-            info.gpu_blocks      = std::move(gpu_blocks);
-            info.dependency      = *dependency_it;
-            copy_infos.push_back(std::move(info));
         }
+        previous_endpoint = endpoint;
     }
+    copy_infos.erase(std::remove_if(copy_infos.begin(),
+                                    copy_infos.end(),
+                                    [&](const CopyInfoPerKey& info) {
+                                        return prefix_block_cache_->contains(
+                                            info.cache_key, info.kind, info.slot_valid_mask);
+                                    }),
+                     copy_infos.end());
     no_need_write = copy_infos.empty();
     if (no_need_write) {
         return nullptr;
@@ -1761,6 +1679,75 @@ KVCacheMemoryConnector::buildManifestCopyPlanForWrite(const KVCacheResource&    
         return nullptr;
     }
     return createCopyPlan(copy_infos, CopyDirection::D2H);
+}
+
+bool KVCacheMemoryConnector::endpointBackingsComplete(const KVCacheResource&           resource,
+                                                      size_t                           previous_endpoint,
+                                                      size_t                           endpoint,
+                                                      const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                      const std::vector<LayerTagSlot>& slots) const {
+    for (const auto& group : cache_config_.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse) {
+            continue;
+        }
+        const bool   full_item = group.policy.group_type == CacheGroupType::FULL;
+        const size_t begin     = full_item ? previous_endpoint : 0;
+        const int    cp_size   = cpSizeForMetrics();
+        const int    cp_rank =
+            cp_size > 1 && parallelism_config_.tp_size > 1 ? static_cast<int>(parallelism_config_.tp_rank) : 0;
+        const auto selection = projectTokenRangeForGroup(group, begin, endpoint, true, cp_rank, cp_size);
+        for (const auto ordinal : selection.owned_global_positions) {
+            const auto native_item = nativeItemForOrdinal(resource, group.tag, ordinal);
+            if (!native_item.has_value()) {
+                return false;
+            }
+            const auto kind = full_item ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV;
+            const auto mask = nativeItemSlotValidMask(
+                resource, group.tag, native_item->local_index, full_item, layer_attn_block_ids, slots, kind, nullptr);
+            if (std::none_of(mask.begin(), mask.end(), [](uint8_t value) { return value != 0; })
+                || !prefix_block_cache_->contains(native_item->cache_key, kind, mask)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void KVCacheMemoryConnector::publishReadyEndpoints(const KVCacheResource& resource) {
+    const auto&                                      prefix = resource.requestPrefix();
+    const auto                                       span   = prefix.matchSpanTokens();
+    const auto                                       blocks = resourceLayerRegionBlocks(resource, layerTagSlots());
+    std::vector<std::pair<RequestPrefixKey, size_t>> ready;
+    size_t                                           previous_endpoint = 0;
+    for (size_t endpoint = span; endpoint <= prefix.writeLimitTokens(); endpoint += span) {
+        const size_t key_index = endpoint / span - 1;
+        if (key_index >= prefix.keys().size()
+            || !endpointBackingsComplete(resource, previous_endpoint, endpoint, blocks, layerTagSlots())) {
+            break;
+        }
+        ready.emplace_back(prefix.keys()[key_index], endpoint);
+        previous_endpoint = endpoint;
+    }
+    std::lock_guard<std::mutex> lock(endpoint_commit_mutex_);
+    endpoint_commits_.insert(ready.begin(), ready.end());
+}
+
+void KVCacheMemoryConnector::eraseEndpointRange(const RequestPrefixResource& prefix,
+                                                size_t                       start_token,
+                                                size_t                       end_token) {
+    const size_t                span = prefix.matchSpanTokens();
+    std::lock_guard<std::mutex> lock(endpoint_commit_mutex_);
+    for (size_t endpoint = start_token + span; endpoint <= end_token; endpoint += span) {
+        const size_t key_index = endpoint / span - 1;
+        if (key_index < prefix.keys().size()) {
+            endpoint_commits_.erase({prefix.keys()[key_index], endpoint});
+        }
+    }
+}
+
+void KVCacheMemoryConnector::clearEndpointCommits() {
+    std::lock_guard<std::mutex> lock(endpoint_commit_mutex_);
+    endpoint_commits_.clear();
 }
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
@@ -2779,7 +2766,6 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
         return true;
     }
 
-    bool released_manifest_leases = false;
     while (true) {
         std::vector<PrefixTreeMemoryBlockCache::CacheItem> evicted_items;
         if (kv_cache_config_.enable_independent_group_eviction && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
@@ -2794,12 +2780,9 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
             }
         }
         if (evicted_items.empty()) {
-            if (!released_manifest_leases && request_manifest_store_->evictAllUnpinned() > 0) {
-                released_manifest_leases = true;
-                continue;
-            }
             return false;
         }
+        clearEndpointCommits();
         for (const auto& evicted : evicted_items) {
             reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
             releasePrefixCacheBacking(evicted);
@@ -3368,6 +3351,7 @@ void KVCacheMemoryConnector::putPrefixToCache(CopyInfoPerKey&                  c
         auto [success, popped] = prefix_block_cache_->putCommitted(copy_info.cache_key, dependency, item);
         if (success) {
             if (popped.has_value()) {
+                clearEndpointCommits();
                 releasePrefixCacheBacking(*popped);
             }
             return;

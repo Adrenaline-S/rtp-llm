@@ -282,14 +282,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
         auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
         batch_resource->setBatchCacheKeys(0, "default", CacheKeysType{100, 101, 102, 103, 200});  // match_keys -> {100}
 
-        auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+        auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+        batch_resource->cacheResource(0).requestPrefix().rebuild(token_ids->data(0), token_ids->seqLength());
         MallocInfo malloc_info{batch_resource, token_ids};
         malloc_info.enable_device_cache = true;
 
         auto result = allocator_->malloc(malloc_info);
         EXPECT_TRUE(result.success);
-        const size_t reuse_blocks = batch_resource->cacheResource(0).reuseBlockNum("default");
-        EXPECT_EQ(reuse_blocks * config.seqSizePerBlockForGroup("default"), static_cast<size_t>(result.reuse_len));
+        EXPECT_EQ(batch_resource->cacheResource(0).reuseTokenNum(), static_cast<size_t>(result.reuse_len));
         EXPECT_EQ(batch_resource->curBlocksNum(), 5);
         EXPECT_EQ(allocator_->availableBlocksNum(), 3);
         FreeInfo free_info{batch_resource, token_ids};
@@ -477,7 +477,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     auto hit_result                     = allocator_->malloc(hit_malloc_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 0);
-    EXPECT_EQ(hit_resource->cacheResource(0).reuseBlockNum("default"), 0u);
+    EXPECT_EQ(hit_resource->cacheResource(0).reuseTokenNum(), 0u);
 
     auto insert_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
     insert_resource->setBatchCacheKeys(0, "default", CacheKeysType{300, 301});
@@ -1052,14 +1052,15 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
 
     resource.cacheKeys("default") = CacheKeysType{100, 101, 102, 103};
     resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
-    resource.setDeviceReuseBlockNum("default", 3);
+    std::vector<int32_t> prefix_tokens(33, 1);
+    resource.requestPrefix().rebuild(prefix_tokens.data(), prefix_tokens.size());
+    resource.setDeviceReuseTokenNum(24);
 
     // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
     auto ref_resource =
         allocator_->incrKVCacheRef(resource, CacheKeysByTag{{"default", CacheKeysType{101, 999, 102, 103}}});
     ASSERT_NE(ref_resource, nullptr);
-    // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
-    EXPECT_EQ(ref_resource->reuseBlockNum("default"), resource.reuseBlockNum("default"));
+    EXPECT_EQ(ref_resource->reuseTokenNum(), resource.reuseTokenNum());
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
@@ -1090,8 +1091,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     std::vector<int32_t> tokens(24);
     std::iota(tokens.begin(), tokens.end(), 1);
     resource.requestPrefix().rebuild(tokens.data(), tokens.size());
-    resource.setDeviceReuseBlockNum("default", 1);
-    resource.setMemoryReuseBlockNum("default", 1);
+    resource.setDeviceReuseTokenNum(8);
+    resource.setMemoryReuseTokenNum(8);
 
     auto ref_resource = allocator_->incrKVCacheRef(
         resource, CacheKeysByTag{{"default", CacheKeysType{101, 103, 999}}}, /*is_connector=*/true);
@@ -1230,6 +1231,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     batch_resource->setBatchCacheKeys(1, "default", CacheKeysType{200, 201});
 
     auto token_ids = createCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/13, /*seq_size_per_block=*/4);
+    batch_resource->cacheResource(0).requestPrefix().rebuild(token_ids->data(0), token_ids->seqLength());
 
     const size_t free_before_fail      = allocator_->freeBlocksNum();
     const size_t available_before_fail = allocator_->availableBlocksNum();

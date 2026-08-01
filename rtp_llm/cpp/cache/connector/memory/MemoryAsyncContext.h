@@ -9,7 +9,6 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/RequestPrefixManifestStore.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
@@ -17,30 +16,26 @@ namespace rtp_llm {
 // 用于 memory connector match
 class MemoryAsyncMatchContext: public AsyncMatchContext {
 public:
-    explicit MemoryAsyncMatchContext(size_t                                                   matched_token_count,
-                                     size_t                                                   planned_start_token = 0,
-                                     size_t                                                   planned_token_count = 0,
-                                     std::shared_ptr<RequestPrefixManifestStore::PinnedChain> manifest_chain = nullptr):
+    explicit MemoryAsyncMatchContext(size_t matched_token_count,
+                                     size_t planned_start_token = 0,
+                                     size_t planned_token_count = 0):
         matched_token_count_(matched_token_count),
         planned_start_token_(planned_start_token),
-        planned_token_count_(planned_token_count),
-        manifest_chain_(std::move(manifest_chain)) {}
+        planned_token_count_(planned_token_count) {}
     ~MemoryAsyncMatchContext() override = default;
 
 public:
-    void                                                     waitDone() override;
-    bool                                                     done() const override;
-    bool                                                     success() const override;
-    size_t                                                   matchedTokenCount() const override;
-    size_t                                                   plannedStartToken() const;
-    size_t                                                   plannedTokenCount() const;
-    std::shared_ptr<RequestPrefixManifestStore::PinnedChain> takeManifestChain();
+    void   waitDone() override;
+    bool   done() const override;
+    bool   success() const override;
+    size_t matchedTokenCount() const override;
+    size_t plannedStartToken() const;
+    size_t plannedTokenCount() const;
 
 private:
-    size_t                                                   matched_token_count_{0};
-    size_t                                                   planned_start_token_{0};
-    size_t                                                   planned_token_count_{0};
-    std::shared_ptr<RequestPrefixManifestStore::PinnedChain> manifest_chain_;
+    size_t matched_token_count_{0};
+    size_t planned_start_token_{0};
+    size_t planned_token_count_{0};
 };
 
 // 用于 memory connector read/write

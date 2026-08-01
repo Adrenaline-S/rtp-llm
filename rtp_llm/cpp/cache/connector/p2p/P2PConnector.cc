@@ -102,12 +102,8 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
     RTP_LLM_CHECK_WITH_INFO(end_token >= start_token, "P2P token range overflow");
     NativeTransferSelections selections;
     for (const auto& group : resource->topology()->groups()) {
-        auto selection = projectTokenRangeForGroup(group,
-                                                   start_token,
-                                                   end_token,
-                                                   CacheTransferRangeMode::DIRECT_TERMINAL,
-                                                   config_.worker_config.cp_rank,
-                                                   config_.worker_config.cp_size);
+        auto selection = projectTokenRangeForGroup(
+            group, start_token, end_token, false, config_.worker_config.cp_rank, config_.worker_config.cp_size);
         selections.emplace(group.tag, std::move(selection));
     }
 

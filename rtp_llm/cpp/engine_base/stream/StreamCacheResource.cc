@@ -300,7 +300,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             const bool tiered_multi_group =
                 enableTieredMemoryCache() && resource_context_.cache_manager->cacheConfig().groupNums() > 1;
             // A resource rebuilt from a tiered device eviction does not retain the original request prefix.
-            // Publish the complete multi-group manifest while the request resource is still available.
+            // Publish request endpoint commits while the complete request resource is still available.
             storeCacheAsync(batch_kv_cache_resource_,
                             reuseCache() && enableMemoryCache() && (!enableTieredMemoryCache() || tiered_multi_group),
                             reuseCache() && enableRemoteCache());
@@ -540,12 +540,8 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
         batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
 }
 
-bool StreamCacheResource::hasCacheKeys() const {
-    return batch_kv_cache_resource_->hasAnyCacheKeys();
-}
-
-const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id, std::string_view tag) const {
-    return batch_kv_cache_resource_->cacheKeys(batch_id, tag);
+const RequestPrefixResource& StreamCacheResource::requestPrefix(int32_t batch_id) const {
+    return batch_kv_cache_resource_->cacheResource(batch_id).requestPrefix();
 }
 
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {

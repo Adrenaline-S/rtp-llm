@@ -11,7 +11,6 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/cache/connector:connector_base",
-        "//rtp_llm/cpp/cache/connector:request_prefix_manifest_store",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/metrics:metrics",

@@ -32,10 +32,6 @@ size_t MemoryAsyncMatchContext::plannedTokenCount() const {
     return planned_token_count_;
 }
 
-std::shared_ptr<RequestPrefixManifestStore::PinnedChain> MemoryAsyncMatchContext::takeManifestChain() {
-    return std::move(manifest_chain_);
-}
-
 // ----------------------------- MemoryAsyncContext ---------------------------------
 
 bool MemoryAsyncContext::done() const {

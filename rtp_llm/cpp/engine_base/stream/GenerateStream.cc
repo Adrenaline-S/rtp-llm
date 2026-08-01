@@ -103,16 +103,8 @@ void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     begin_time_us_ = begin_time_us;
 }
 
-bool GenerateStream::hasCacheKeys() const {
-    return stream_cache_resource_->hasCacheKeys();
-}
-
-const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id, std::string_view tag) const {
-    return stream_cache_resource_->cacheKeys(batch_id, tag);
-}
-
-const std::string& GenerateStream::singleCacheKeyTag() const {
-    return resourceContext().cache_manager->cacheConfig().singleReusableGroupTag();
+const RequestPrefixResource& GenerateStream::requestPrefix(int32_t batch_id) const {
+    return stream_cache_resource_->requestPrefix(batch_id);
 }
 
 absl::Status GenerateStream::initKVBlock() {

@@ -127,6 +127,7 @@ private:
     std::shared_ptr<InitParams>                      init_params_;
 
     std::unique_ptr<remote_connector::GroupPolicy> group_policy_;
+    std::string                                    remote_group_tag_;
     const kmonitor::MetricsReporterPtr             metrics_reporter_;
 };
 

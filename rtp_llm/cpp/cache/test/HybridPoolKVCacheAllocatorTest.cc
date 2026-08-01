@@ -176,6 +176,12 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
     return res;
 }
 
+static void rebuildRequestPrefixes(const BatchKVCacheResourcePtr& resource, const CompleteTokenIdsPtr& token_ids) {
+    for (int batch_id = 0; batch_id < token_ids->batchSize(); ++batch_id) {
+        resource->cacheResource(batch_id).requestPrefix().rebuild(token_ids->data(batch_id), token_ids->seqLength());
+    }
+}
+
 static void setGroupBlockNum(CacheConfig& config, std::string_view tag, uint32_t block_num) {
     const auto             topology_groups = config.topology().groups();
     std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
@@ -847,7 +853,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
     setAllGroupCacheKeys(batch_res, config, 0, CacheKeysType{100, 101, 102});
-    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    rebuildRequestPrefixes(batch_res, token_ids);
+    batch_res->cacheResource(0).setMemoryReuseTokenNum(4);
     MallocInfo malloc_info{batch_res, token_ids};
     malloc_info.enable_device_cache = true;
     malloc_info.reuse_cache         = true;
@@ -859,6 +867,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, kLinearTag), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, kFullTag), 0u);
+    EXPECT_EQ(batch_res->cacheResource(0).deviceReuseTokenNum(), 0u);
+    EXPECT_EQ(batch_res->cacheResource(0).memoryReuseTokenNum(), 4u)
+        << "device allocation rollback must preserve other-tier request state";
     EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
     EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 2u);
     expectPoolCountersEq(allocator, config, counters_before);
@@ -1266,6 +1277,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto hit_res = makeBatchResource(/*batch_size=*/1, config);
     setAllGroupCacheKeys(hit_res, config, 0, request_keys);
     auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
+    rebuildRequestPrefixes(hit_res, hit_tokens);
 
     MallocInfo hit_malloc{hit_res, hit_tokens};
     hit_malloc.reuse_cache         = true;

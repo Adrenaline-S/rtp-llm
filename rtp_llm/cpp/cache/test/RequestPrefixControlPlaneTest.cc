@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <thread>
+
 #include <memory>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/RequestPrefixResource.h"
-#include "rtp_llm/cpp/cache/connector/RequestPrefixManifestStore.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 namespace rtp_llm::test {
@@ -40,12 +42,74 @@ TEST(RequestPrefixResourceTest, CanonicalHashesIgnoreTagsAndTopologyOrder) {
     EXPECT_EQ(lhs.tokenExtent(), 37u);
     EXPECT_EQ(lhs.matchLimitTokens(), 36u);
     EXPECT_EQ(lhs.writeLimitTokens(), 36u);
-    ASSERT_EQ(lhs.keys().size(), 3u);
+    ASSERT_EQ(lhs.keys().size(), 4u);
+    const auto keys_with_partial = lhs.keys();
 
     tokens.push_back(999);
     lhs.rebuild(tokens.data(), tokens.size());
-    EXPECT_EQ(lhs.keys().size(), 3u);
+    EXPECT_EQ(lhs.keys().size(), 4u);
     EXPECT_EQ(lhs.tokenExtent(), 38u);
+    EXPECT_EQ(std::vector<RequestPrefixKey>(lhs.keys().begin(), lhs.keys().begin() + 3),
+              std::vector<RequestPrefixKey>(keys_with_partial.begin(), keys_with_partial.begin() + 3));
+    EXPECT_NE(lhs.keys().back(), keys_with_partial.back());
+}
+
+TEST(RequestPrefixResourceTest, TierReuseTokensAreAlignedAndBoundedByMatchLimit) {
+    std::vector<int32_t>  tokens(37, 1);
+    RequestPrefixResource prefix;
+    prefix.configure(*makeTopology(4, 6, "full-a", "full-b", false));
+    prefix.rebuild(tokens.data(), tokens.size());
+
+    prefix.setDeviceReuseTokens(12);
+    prefix.setMemoryReuseTokens(12);
+    prefix.setRemoteReuseTokens(12);
+    EXPECT_EQ(prefix.reuseTokens(), 36u);
+
+    EXPECT_ANY_THROW(prefix.setDeviceReuseTokens(13));
+    EXPECT_ANY_THROW(prefix.setMemoryReuseTokens(24));
+    EXPECT_EQ(prefix.deviceReuseTokens(), 12u);
+    EXPECT_EQ(prefix.memoryReuseTokens(), 12u);
+    EXPECT_EQ(prefix.remoteReuseTokens(), 12u);
+
+    prefix.setMemoryReuseTokens(0);
+    EXPECT_EQ(prefix.reuseTokens(), 24u);
+}
+
+TEST(RequestPrefixResourceTest, TierUpdatesAndCopiesShareOneSynchronizedSnapshot) {
+    auto                  topology = makeTopology(4, 4, "full-a", "full-b", false);
+    std::vector<int32_t>  tokens(13, 1);
+    RequestPrefixResource prefix;
+    prefix.configure(*topology);
+    prefix.rebuild(tokens.data(), tokens.size());
+    prefix.setDeviceReuseTokens(4);
+
+    std::atomic<bool> start{false};
+    std::thread       memory_writer([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 1000; ++i) {
+            prefix.setMemoryReuseTokens(4);
+        }
+    });
+    std::thread       remote_writer([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 1000; ++i) {
+            prefix.setRemoteReuseTokens(4);
+        }
+    });
+    start.store(true, std::memory_order_release);
+    memory_writer.join();
+    remote_writer.join();
+
+    RequestPrefixResource copy(prefix);
+    EXPECT_EQ(copy.keys(), prefix.keys());
+    EXPECT_EQ(copy.deviceReuseTokens(), 4u);
+    EXPECT_EQ(copy.memoryReuseTokens(), 4u);
+    EXPECT_EQ(copy.remoteReuseTokens(), 4u);
+    EXPECT_EQ(copy.reuseTokens(), 12u);
 }
 
 TEST(KVCacheTransferProjectorTest, HeterogeneousFullCountsAndPartialDirectTail) {
@@ -57,16 +121,21 @@ TEST(KVCacheTransferProjectorTest, HeterogeneousFullCountsAndPartialDirectTail) 
     span6.tag                = "six";
     span6.seq_size_per_block = 6;
 
-    const auto four = projectTokenRangeForGroup(span4, 12, 36, CacheTransferRangeMode::PREFIX_ALIGNED);
-    const auto six  = projectTokenRangeForGroup(span6, 12, 36, CacheTransferRangeMode::PREFIX_ALIGNED);
+    const auto four = projectTokenRangeForGroup(span4, 12, 36, true);
+    const auto six  = projectTokenRangeForGroup(span6, 12, 36, true);
     EXPECT_EQ(four.global_positions.size(), 6u);
     EXPECT_EQ(six.global_positions.size(), 4u);
     EXPECT_EQ(four.global_positions.front(), 3u);
     EXPECT_EQ(six.global_positions.front(), 2u);
 
-    const auto partial = projectTokenRangeForGroup(span6, 12, 37, CacheTransferRangeMode::DIRECT_TERMINAL);
+    const auto partial = projectTokenRangeForGroup(span6, 12, 37, false);
     EXPECT_EQ(partial.global_positions.size(), 5u);
     EXPECT_EQ(partial.global_positions.back(), 6u);
+
+    const auto unaligned = projectTokenRangeForGroup(span6, 13, 37, false);
+    EXPECT_EQ(unaligned.global_positions.front(), 2u);
+    EXPECT_EQ(unaligned.global_positions.back(), 6u);
+    EXPECT_ANY_THROW(projectTokenRangeForGroup(span6, 13, 36, true));
 }
 
 TEST(KVCacheTransferProjectorTest, TailAndCpSelectionsRemainExplicit) {
@@ -75,50 +144,16 @@ TEST(KVCacheTransferProjectorTest, TailAndCpSelectionsRemainExplicit) {
     tail.seq_size_per_block        = 4;
     tail.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
     tail.policy.active_tail_blocks = 2;
-    const auto tail_selection      = projectTokenRangeForGroup(tail, 0, 36, CacheTransferRangeMode::PREFIX_ALIGNED);
+    const auto tail_selection      = projectTokenRangeForGroup(tail, 0, 36, true);
     EXPECT_EQ(tail_selection.global_positions, (std::vector<size_t>{7, 8}));
 
     GroupBase cp;
     cp.tag                = "full";
     cp.seq_size_per_block = 4;
     cp.policy             = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    const auto rank1      = projectTokenRangeForGroup(cp, 0, 36, CacheTransferRangeMode::PREFIX_ALIGNED, 1, 2);
+    const auto rank1      = projectTokenRangeForGroup(cp, 0, 36, true, 1, 2);
     EXPECT_EQ(rank1.local_positions, (std::vector<size_t>{0, 1, 2, 3}));
     EXPECT_EQ(rank1.global_positions.size(), 9u);
-}
-
-TEST(RequestPrefixManifestStoreTest, AtomicChainPinAndEviction) {
-    auto                  store = std::make_shared<RequestPrefixManifestStore>();
-    RequestPrefixManifest root{{11, 12}, std::nullopt, {{"four", 101, 0, NativeCacheItemKind::FULL_INTERVAL, 0}}};
-    RequestPrefixManifest child{
-        {22, 24}, RequestPrefixManifestKey{11, 12}, {{"six", 202, 3, NativeCacheItemKind::ACTIVE_TAIL, 0}}};
-    EXPECT_TRUE(store->publish(root));
-    EXPECT_TRUE(store->publish(child));
-    EXPECT_FALSE(store->publish({{33, 36}, RequestPrefixManifestKey{999, 24}, {}}));
-
-    const std::vector<RequestPrefixKey> keys{11, 22, 33};
-    RequestPrefixMatchView              view(keys, 12, 37, 36, 36, 0);
-    auto                                pinned = store->match(view, 0);
-    ASSERT_NE(pinned, nullptr);
-    EXPECT_EQ(pinned->matchedTokenCount(), 24u);
-    EXPECT_EQ(store->pinCount({11, 12}), 1u);
-    EXPECT_TRUE(store->evict({11, 12}));
-    EXPECT_EQ(store->visibleSize(), 1u);
-    pinned.reset();
-    EXPECT_EQ(store->pinCount({11, 12}), 0u);
-}
-
-TEST(RequestPrefixManifestStoreTest, CancelReleasesPins) {
-    auto store = std::make_shared<RequestPrefixManifestStore>();
-    ASSERT_TRUE(store->publish({{7, 12}, std::nullopt, {{"full", 70, 0, NativeCacheItemKind::FULL_INTERVAL, 0}}}));
-    const std::vector<RequestPrefixKey> keys{7};
-    {
-        RequestPrefixMatchView view(keys, 12, 13, 12, 12, 0);
-        auto                   pinned = store->match(view, 0);
-        ASSERT_NE(pinned, nullptr);
-        EXPECT_EQ(store->pinCount({7, 12}), 1u);
-    }
-    EXPECT_EQ(store->pinCount({7, 12}), 0u);
 }
 
 }  // namespace

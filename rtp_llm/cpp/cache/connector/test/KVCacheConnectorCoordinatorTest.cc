@@ -151,7 +151,7 @@ private:
         auto resource = std::make_shared<KVCacheResource>();
         resource->initGroups(cache_config_.topologyPtr());
         initializeRequestPrefix(resource);
-        resource->setDeviceReuseBlockNum("default", 1);
+        resource->setDeviceReuseTokenNum(4);
 
         auto match_ctx0 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
         auto match_ctx1 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
@@ -786,7 +786,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SetsEmptyFusedReadCo
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(cache_config_.topologyPtr());
     initializeRequestPrefix(resource);
-    resource->setDeviceReuseBlockNum("default", 5);
+    resource->setDeviceReuseTokenNum(20);
 
     // One non-match context should be skipped by dynamic_pointer_cast.
     auto non_match_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -817,7 +817,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_DoesNotUpdateReuse_W
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(cache_config_.topologyPtr());
     initializeRequestPrefix(resource);
-    resource->setDeviceReuseBlockNum("default", 1);
+    resource->setDeviceReuseTokenNum(4);
 
     auto match_ctx1 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
     auto match_ctx2 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
@@ -855,7 +855,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_UsesConnectorByIndex
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(cache_config_.topologyPtr());
     initializeRequestPrefix(resource);
-    resource->setDeviceReuseBlockNum("default", 0);
+    resource->setDeviceReuseTokenNum(0);
 
     auto match0 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
     auto match1 = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
@@ -889,7 +889,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_UsesConnectorByIndex
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_Throws_WhenSizeMismatch) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(cache_config_.topologyPtr());
-    resource->setDeviceReuseBlockNum("default", 0);
+    resource->setDeviceReuseTokenNum(0);
 
     // connectors_ is empty but match contexts has one entry -> should fail check.
     coordinator_->connectors_.clear();

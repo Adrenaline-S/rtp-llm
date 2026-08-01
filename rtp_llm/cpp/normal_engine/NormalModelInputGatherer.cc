@@ -413,17 +413,18 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             copyKvCacheBlocksToModelInput(model_input, kv_cache, i, ctx.batch_idx, config_.warm_up);
 
-            if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
-                const auto& key_tag = stream->singleCacheKeyTag();
-                const auto& keys    = stream->cacheKeys(i, key_tag);
+            if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL) {
+                const auto& keys = stream->requestPrefix(i).keys();
                 RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(keys.size()) <= model_input.cache_keys.size(1),
                                         "cache_keys overflow: stream keys=%zu tensor width=%ld",
                                         keys.size(),
                                         model_input.cache_keys.size(1));
-                std::memcpy(model_input.cache_keys.data_ptr<int64_t>()
-                                + prefill_batch_idx * model_input.cache_keys.size(1),
-                            keys.data(),
-                            keys.size() * sizeof(int64_t));
+                if (!keys.empty()) {
+                    std::memcpy(model_input.cache_keys.data_ptr<int64_t>()
+                                    + prefill_batch_idx * model_input.cache_keys.size(1),
+                                keys.data(),
+                                keys.size() * sizeof(int64_t));
+                }
             }
 
             *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();

@@ -194,6 +194,10 @@ static void setDsv4BatchCacheKeys(BatchKVCacheResource& batch_res,
     }
 }
 
+static void rebuildDsv4RequestPrefix(BatchKVCacheResource& batch_res, const CompleteTokenIdsPtr& token_ids) {
+    batch_res.cacheResource(0).requestPrefix().rebuild(token_ids->data(0), token_ids->seqLength());
+}
+
 static BlockPoolPtr dsv4PoolFor(const HybridPoolKVCacheAllocatorPtr& allocator, std::string_view tag) {
     return allocator->blockPool(std::string(tag));
 }
@@ -2402,6 +2406,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     generate_input->input_ids       = torch::arange(seq_len, torch::kInt32);
     generate_input->generate_config = std::make_shared<GenerateConfig>();
     complete_token_ids->init(generate_input);
+    rebuildDsv4RequestPrefix(*batch_res, complete_token_ids);
 
     MallocInfo info{batch_res, complete_token_ids};
     info.enable_device_cache = true;
@@ -2514,6 +2519,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
+    rebuildDsv4RequestPrefix(*batch_res, cti);
 
     MallocInfo info{batch_res, cti};
     info.enable_device_cache = true;
@@ -2563,6 +2569,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
+    rebuildDsv4RequestPrefix(*batch_res, cti);
 
     MallocInfo info{batch_res, cti};
     info.enable_device_cache = true;
@@ -2609,6 +2616,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     generate_input->input_ids       = torch::arange(seq_len, torch::kInt32);
     generate_input->generate_config = std::make_shared<GenerateConfig>();
     complete_token_ids->init(generate_input);
+    rebuildDsv4RequestPrefix(*batch_res, complete_token_ids);
 
     MallocInfo info{batch_res, complete_token_ids};
     info.enable_device_cache = true;
@@ -2786,6 +2794,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     gi->input_ids       = torch::arange(seq_len, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
+    rebuildDsv4RequestPrefix(*batch_res, cti);
 
     MallocInfo info{batch_res, cti};
     info.enable_device_cache = true;

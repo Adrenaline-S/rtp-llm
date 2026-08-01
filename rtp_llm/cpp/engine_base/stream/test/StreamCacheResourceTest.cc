@@ -42,6 +42,14 @@ protected:
                                               rtp_llm::DataType::TYPE_INT8);
     }
 
+    static void setReuseBlocks(KVCacheResource& resource, size_t device_blocks, size_t memory_blocks) {
+        const size_t         span = resource.requestPrefix().matchSpanTokens();
+        std::vector<int32_t> tokens((device_blocks + memory_blocks) * span + 1, 1);
+        resource.requestPrefix().rebuild(tokens.data(), tokens.size());
+        resource.setDeviceReuseTokenNum(device_blocks * span);
+        resource.setMemoryReuseTokenNum(memory_blocks * span);
+    }
+
     void prepareResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
         prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
     }
@@ -138,12 +146,12 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
         EXPECT_EQ(entry.tag, "__warmup__");
     }
     EXPECT_EQ(resource.curBlocksNum(), 0);
-    EXPECT_FALSE(resource.hasCacheKeys());
-    EXPECT_FALSE(stream_->hasCacheKeys());
+    EXPECT_TRUE(resource.requestPrefix(0).keys().empty());
+    EXPECT_TRUE(stream_->requestPrefix(0).keys().empty());
 
     stream_->fakeInitKVBlock(2);
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
-    EXPECT_FALSE(resource.hasCacheKeys());
+    EXPECT_TRUE(resource.requestPrefix(0).keys().empty());
 }
 
 TEST_F(StreamCacheResourceTest, testFakeInitDerivesWidthFromEachPhysicalGroupSpan) {
@@ -333,8 +341,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
 
     auto kv_resource = std::make_shared<KVCacheResource>();
     kv_resource->initGroups(cache_manager_->config_.topologyPtr());
-    kv_resource->setDeviceReuseBlockNum("default", 2);
-    kv_resource->setMemoryReuseBlockNum("default", 1);
+    setReuseBlocks(*kv_resource, 2, 1);
 
     std::shared_ptr<Meta> meta;
     auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
@@ -375,8 +382,7 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
     auto kv_resource = std::make_shared<KVCacheResource>();
     kv_resource->initGroups(cache_manager_->config_.topologyPtr());
-    kv_resource->setDeviceReuseBlockNum("default", 2);
-    kv_resource->setMemoryReuseBlockNum("default", 1);
+    setReuseBlocks(*kv_resource, 2, 1);
     std::shared_ptr<Meta> meta;
     auto                  read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
 
@@ -704,8 +710,7 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Done_ReturnsTrue_ClearsContext
 
     auto kv_resource = std::make_shared<KVCacheResource>();
     kv_resource->initGroups(cache_manager_->config_.topologyPtr());
-    kv_resource->setDeviceReuseBlockNum("default", 1);
-    kv_resource->setMemoryReuseBlockNum("default", 1);
+    setReuseBlocks(*kv_resource, 1, 1);
 
     std::shared_ptr<Meta> meta;
     auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
@@ -748,8 +753,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
 
     auto kv_resource = std::make_shared<KVCacheResource>();
     kv_resource->initGroups(cache_manager_->config_.topologyPtr());
-    kv_resource->setDeviceReuseBlockNum("default", 2);
-    kv_resource->setMemoryReuseBlockNum("default", 3);
+    setReuseBlocks(*kv_resource, 2, 3);
 
     std::shared_ptr<Meta> meta;
     auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
@@ -797,8 +801,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
 
     auto kv_resource1 = std::make_shared<KVCacheResource>();
     kv_resource1->initGroups(cache_manager_->config_.topologyPtr());
-    kv_resource1->setDeviceReuseBlockNum("default", 2);
-    kv_resource1->setMemoryReuseBlockNum("default", 1);
+    setReuseBlocks(*kv_resource1, 2, 1);
 
     std::shared_ptr<Meta> meta1;
     auto                  load_ctx1 = std::make_shared<FusedAsyncReadContext>(fused_match1, kv_resource1, meta1);

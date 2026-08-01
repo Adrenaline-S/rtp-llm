@@ -50,11 +50,14 @@ void initializeResourceTopology(KVCacheResource&        resource,
     for (size_t i = 0; i < blocks.size(); ++i) {
         keys.push_back(static_cast<CacheKeyType>(i + 1));
     }
-    resource.cacheKeys(tag) = std::move(keys);
+    resource.cacheKeys(tag)   = std::move(keys);
+    const size_t         span = config.seqSizePerBlockForGroup(tag);
+    std::vector<int32_t> tokens((blocks.size() + 1) * span, 1);
+    resource.requestPrefix().rebuild(tokens.data(), tokens.size());
 }
 
 RequestPrefixMatchView requestMatchView(const KVCacheResourcePtr& resource, const CacheConfig& config) {
-    const auto&  tag    = config.singleReusableGroupTag();
+    const auto&  tag    = config.topology().groups().front().tag;
     const auto&  keys   = resource->cacheKeys(tag);
     const size_t span   = config.seqSizePerBlockForGroup(tag);
     const size_t extent = keys.size() * span;
@@ -124,7 +127,7 @@ private:
                                                   const std::shared_ptr<AsyncMatchContext>& match_context,
                                                   size_t                                    start_block,
                                                   size_t                                    block_count) {
-        const size_t span = cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag());
+        const size_t span = cache_config_.seqSizePerBlockForGroup("default");
         return remote_connectors_[tp_rank]->asyncRead(
             resource, meta, match_context, start_block * span, block_count * span);
     }
@@ -175,6 +178,18 @@ private:
     }
 };
 
+TEST_F(RemoteConnectorMockOnlyFullTest, rejectsMultiGroupTopologyAtConstruction) {
+    CacheConfig multi_group = cache_config_;
+    auto        first_spec  = makeTestMhaSpec("first", 8);
+    auto        second_spec = makeTestMhaSpec("second", 8);
+    setTestTopology(multi_group,
+                    {makeTestGroupForConfig(multi_group, first_spec, {0, 1}, CacheGroupType::FULL, "first"),
+                     makeTestGroupForConfig(multi_group, second_spec, {2, 3}, CacheGroupType::FULL, "second")});
+
+    EXPECT_ANY_THROW(std::make_shared<RemoteConnector>(
+        multi_group, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, nullptr));
+}
+
 // 初始reuse_len = 0
 TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu_reuse_len_zero) {
     // match
@@ -197,9 +212,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
         remote_connectors_[tp_rank]->asyncMatch(requestMatchView(kv_cache_resouce, cache_config_), meta);
     waitAsyncContextDone(match_context);
     ASSERT_TRUE(match_context->success());
-    ASSERT_EQ((match_context->matchedTokenCount()
-               / cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag())),
-              3);
+    ASSERT_EQ((match_context->matchedTokenCount() / cache_config_.seqSizePerBlockForGroup("default")), 3);
 
     // read
     {
@@ -214,10 +227,9 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
                                  TransferTraceInfoMatcher(expect_block_ids)))
             .WillOnce(Return(ClientErrorCode::ER_OK));
 
-        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlockNum("default"));  // 0
-        const int matched_num =
-            static_cast<int>((match_context->matchedTokenCount()
-                              / cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag())));  // 3
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseTokenNum() / 8);  // 0
+        const int matched_num   = static_cast<int>(
+            (match_context->matchedTokenCount() / cache_config_.seqSizePerBlockForGroup("default")));  // 3
         // auto      meta     = std::make_shared<TestReadMeta>(gpu_reuse_num, matched_num - gpu_reuse_num);
         int  start_read_block_index = gpu_reuse_num;
         int  read_block_num         = matched_num - gpu_reuse_num;
@@ -225,10 +237,10 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
             asyncReadBlocks(tp_rank, kv_cache_resouce, meta, match_context, start_read_block_index, read_block_num);
         waitAsyncContextDone(read_context);
         ASSERT_TRUE(read_context->success());
-        ASSERT_EQ(kv_cache_resouce->remoteReuseBlockNum("default"), 3);
-        ASSERT_EQ(kv_cache_resouce->reuseBlockNum("default"), 3);
+        ASSERT_EQ(kv_cache_resouce->remoteReuseTokenNum() / 8, 3);
+        ASSERT_EQ(kv_cache_resouce->reuseTokenNum() / 8, 3);
 
-        kv_cache_resouce->setRemoteReuseBlockNum("default", 0);
+        kv_cache_resouce->setRemoteReuseTokenNum(0 * 8);
     }
 
     {
@@ -243,10 +255,9 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
                                  TransferTraceInfoMatcher(expect_block_ids)))
             .WillOnce(Return(ClientErrorCode::ER_OK));
 
-        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlockNum("default"));  // 0
-        const int matched_num =
-            static_cast<int>((match_context->matchedTokenCount()
-                              / cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag())));  // 3
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseTokenNum() / 8);  // 0
+        const int matched_num   = static_cast<int>(
+            (match_context->matchedTokenCount() / cache_config_.seqSizePerBlockForGroup("default")));  // 3
         // auto      meta     = std::make_shared<TestReadMeta>(gpu_reuse_num + 1, matched_num - gpu_reuse_num - 1);
         int  start_read_block_index = gpu_reuse_num + 1;
         int  read_block_num         = matched_num - gpu_reuse_num - 1;
@@ -254,22 +265,21 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
             asyncReadBlocks(tp_rank, kv_cache_resouce, meta, match_context, start_read_block_index, read_block_num);
         waitAsyncContextDone(read_context);
         ASSERT_TRUE(read_context->success());
-        ASSERT_EQ(kv_cache_resouce->remoteReuseBlockNum("default"), 2);
-        kv_cache_resouce->setRemoteReuseBlockNum("default", 0);
+        ASSERT_EQ(kv_cache_resouce->remoteReuseTokenNum() / 8, 2);
+        kv_cache_resouce->setRemoteReuseTokenNum(0 * 8);
     }
 
     {
         // 其他connector也命中了部分,超出了remote
-        const int matched_num =
-            static_cast<int>((match_context->matchedTokenCount()
-                              / cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag())));  // 3
+        const int matched_num = static_cast<int>(
+            (match_context->matchedTokenCount() / cache_config_.seqSizePerBlockForGroup("default")));  // 3
         // auto      meta     = std::make_shared<TestReadMeta>(gpu_reuse_num + 4, matched_num - gpu_reuse_num - 4);
         int  start_read_block_index = matched_num;
         int  read_block_num         = 0;
         auto read_context =
             asyncReadBlocks(tp_rank, kv_cache_resouce, meta, match_context, start_read_block_index, read_block_num);
         ASSERT_EQ(read_context, nullptr);
-        ASSERT_EQ(kv_cache_resouce->remoteReuseBlockNum("default"), 0);
+        ASSERT_EQ(kv_cache_resouce->remoteReuseTokenNum() / 8, 0);
     }
 }
 
@@ -278,7 +288,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     // match
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     initializeResourceTopology(*kv_cache_resouce, cache_config_, "default", {1, 2, 3, 4});
-    kv_cache_resouce->setDeviceReuseBlockNum("default", 1);
+    kv_cache_resouce->setDeviceReuseTokenNum(1 * 8);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
     Locations expected_locations = genFullotherLocations({2, 3});
@@ -296,9 +306,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
         remote_connectors_[tp_rank]->asyncMatch(requestMatchView(kv_cache_resouce, cache_config_), meta);
     waitAsyncContextDone(match_context);
     ASSERT_TRUE(match_context->success());
-    ASSERT_EQ((match_context->matchedTokenCount()
-               / cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag())),
-              3);
+    ASSERT_EQ((match_context->matchedTokenCount() / cache_config_.seqSizePerBlockForGroup("default")), 3);
 
     // read
     {
@@ -313,10 +321,9 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
                                  TransferTraceInfoMatcher(expect_block_ids)))
             .WillOnce(Return(ClientErrorCode::ER_OK));
 
-        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlockNum("default"));  // 1
-        const int matched_num =
-            static_cast<int>((match_context->matchedTokenCount()
-                              / cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag())));  // 3
+        const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseTokenNum() / 8);  // 1
+        const int matched_num   = static_cast<int>(
+            (match_context->matchedTokenCount() / cache_config_.seqSizePerBlockForGroup("default")));  // 3
         // auto      meta     = std::make_shared<TestReadMeta>(gpu_reuse_num, matched_num - gpu_reuse_num);
         int  start_read_block_index = gpu_reuse_num;
         int  read_block_num         = matched_num - gpu_reuse_num;
@@ -324,8 +331,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
             asyncReadBlocks(tp_rank, kv_cache_resouce, meta, match_context, start_read_block_index, read_block_num);
         waitAsyncContextDone(read_context);
         ASSERT_TRUE(read_context->success());
-        ASSERT_EQ(kv_cache_resouce->remoteReuseBlockNum("default"), 2);
-        kv_cache_resouce->setRemoteReuseBlockNum("default", 0);
+        ASSERT_EQ(kv_cache_resouce->remoteReuseTokenNum() / 8, 2);
+        kv_cache_resouce->setRemoteReuseTokenNum(0 * 8);
     }
     {
         // 有其他connector
@@ -339,11 +346,10 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
                                  TransferTraceInfoMatcher(expect_block_ids)))
             .WillOnce(Return(ClientErrorCode::ER_OK));
 
-        const int gpu_reuse_num   = static_cast<int>(kv_cache_resouce->reuseBlockNum("default"));  // 1
-        const int other_reuse_num = 1;                                                             // other connector
-        const int matched_num =
-            static_cast<int>((match_context->matchedTokenCount()
-                              / cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag())));  // 3
+        const int gpu_reuse_num   = static_cast<int>(kv_cache_resouce->reuseTokenNum() / 8);  // 1
+        const int other_reuse_num = 1;                                                        // other connector
+        const int matched_num     = static_cast<int>(
+            (match_context->matchedTokenCount() / cache_config_.seqSizePerBlockForGroup("default")));  // 3
         // auto      meta       = std::make_shared<TestReadMeta>(gpu_reuse_num + other_reuse_num,
         //                                                 matched_num - gpu_reuse_num - other_reuse_num);
         int  start_read_block_index = gpu_reuse_num + other_reuse_num;
@@ -352,16 +358,15 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
             asyncReadBlocks(tp_rank, kv_cache_resouce, meta, match_context, start_read_block_index, read_block_num);
         waitAsyncContextDone(read_context);
         ASSERT_TRUE(read_context->success());
-        ASSERT_EQ(kv_cache_resouce->remoteReuseBlockNum("default"), 1);
-        kv_cache_resouce->setRemoteReuseBlockNum("default", 0);
+        ASSERT_EQ(kv_cache_resouce->remoteReuseTokenNum() / 8, 1);
+        kv_cache_resouce->setRemoteReuseTokenNum(0 * 8);
     }
     {
         // 有其他connector,覆盖了
-        const int gpu_reuse_num   = static_cast<int>(kv_cache_resouce->reuseBlockNum("default"));  // 1
-        const int other_reuse_num = 2;                                                             // other connector
-        const int matched_num =
-            static_cast<int>((match_context->matchedTokenCount()
-                              / cache_config_.seqSizePerBlockForGroup(cache_config_.singleReusableGroupTag())));  // 3
+        const int gpu_reuse_num   = static_cast<int>(kv_cache_resouce->reuseTokenNum() / 8);  // 1
+        const int other_reuse_num = 2;                                                        // other connector
+        const int matched_num     = static_cast<int>(
+            (match_context->matchedTokenCount() / cache_config_.seqSizePerBlockForGroup("default")));  // 3
         // auto      meta       = std::make_shared<TestReadMeta>(gpu_reuse_num + other_reuse_num,
         //                                                 matched_num - gpu_reuse_num - other_reuse_num);
         int  start_read_block_index = gpu_reuse_num + other_reuse_num;
@@ -369,7 +374,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
         auto read_context =
             asyncReadBlocks(tp_rank, kv_cache_resouce, meta, match_context, start_read_block_index, read_block_num);
         ASSERT_EQ(read_context, nullptr);
-        ASSERT_EQ(kv_cache_resouce->remoteReuseBlockNum("default"), 0);
+        ASSERT_EQ(kv_cache_resouce->remoteReuseTokenNum() / 8, 0);
     }
 }
 

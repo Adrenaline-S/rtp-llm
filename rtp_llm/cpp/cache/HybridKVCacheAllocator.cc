@@ -204,10 +204,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 referenced_blocks.emplace(tag, std::move(valid));
             }
         }
-        for (const auto& group : config_.topology().groups()) {
-            kv_resource->cacheResource(0).setDeviceReuseBlockNum(
-                group.tag, static_cast<size_t>(reuse_blocks) / group.seq_size_per_block);
-        }
+        kv_resource->cacheResource(0).setDeviceReuseTokenNum(static_cast<size_t>(reuse_blocks));
     }
 
     if (reserve_blocks > 0 && !hasAvailableBlocksForReserve(malloc_info, reserve_blocks)) {
@@ -487,9 +484,6 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
             referenceBlocksInGroup(tag, valid, is_connector);
         }
         selected_resource->mutableBlockIds(tag).assign(std::move(selected_blocks));
-        selected_resource->setDeviceReuseBlockNum(tag, kvcache_resource.deviceReuseBlockNum(tag));
-        selected_resource->setMemoryReuseBlockNum(tag, kvcache_resource.memoryReuseBlockNum(tag));
-        selected_resource->setRemoteReuseBlockNum(tag, kvcache_resource.remoteReuseBlockNum(tag));
         selected_resource->setLastBlockAligned(tag, source_resource->lastBlockAligned(tag));
         selected_any = true;
     }
@@ -666,9 +660,6 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_
                 cloned_resource.setBlockDependencies(tag, old_resources[old_batch_idx].blockDependencies(tag));
                 cloned_resource.setCacheKeysAreCpCanonical(tag,
                                                            old_resources[old_batch_idx].cacheKeysAreCpCanonical(tag));
-                cloned_resource.setDeviceReuseBlockNum(tag, old_resources[old_batch_idx].deviceReuseBlockNum(tag));
-                cloned_resource.setMemoryReuseBlockNum(tag, old_resources[old_batch_idx].memoryReuseBlockNum(tag));
-                cloned_resource.setRemoteReuseBlockNum(tag, old_resources[old_batch_idx].remoteReuseBlockNum(tag));
                 cloned_resource.setLastBlockAligned(tag, old_resources[old_batch_idx].lastBlockAligned(tag));
                 auto& block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);
                 kv_cache_groups_.at(tag)->reference(block_ids, entry.block_ids->blocks());
@@ -772,9 +763,7 @@ void HybridKVCacheAllocator::rollbackInitMalloc(
         }
         block_ids.resize(0);
     }
-    for (const auto& group : config_.topology().groups()) {
-        kv_resource.cacheResource(0).setDeviceReuseBlockNum(group.tag, 0);
-    }
+    kv_resource.cacheResource(0).setDeviceReuseTokenNum(0);
 }
 
 void HybridKVCacheAllocator::rollbackIncrMalloc(

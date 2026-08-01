@@ -407,6 +407,71 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     }
 }
 
+TEST(KVCacheBatchedMemoryCopyTest, EndpointProjectionMapsPhysicalOrdinalToCompactLocalIndex) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig            kv_config;
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+
+    KVCacheResource resource;
+    initResourceGroupsForConfig(resource, config);
+    resource.cacheKeys("csa_kv")         = {901};
+    resource.blockDependencies("csa_kv") = {rootDep(/*ordinal=*/2)};
+
+    const auto projected = connector->nativeItemForOrdinal(resource, "csa_kv", /*physical_ordinal=*/2);
+    ASSERT_TRUE(projected.has_value());
+    EXPECT_EQ(projected->local_index, 0u);
+    EXPECT_EQ(projected->cache_key, 901);
+    EXPECT_EQ(projected->dependency.ordinal, 2u);
+    EXPECT_FALSE(connector->nativeItemForOrdinal(resource, "csa_kv", /*physical_ordinal=*/0).has_value());
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, EndpointWriteAggregatesSharedNativeKeyMasksAcrossTags) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb                    = 64;
+    kv_config.memory_cache_sync_timeout_ms            = 1000;
+    kv_config.enable_prefix_tree_memory_cache         = true;
+    kv_config.enable_legacy_memory_connector_fallback = false;
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    ASSERT_TRUE(connector->init());
+
+    KVCacheResource resource;
+    initResourceGroupsForConfig(resource, config);
+    std::vector<int32_t> tokens(257, 1);
+    resource.requestPrefix().rebuild(tokens.data(), tokens.size());
+    resource.resizeBlocks(/*reserver_blocks=*/1, NULL_BLOCK_IDX);
+    for (const auto& group : config.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse) {
+            continue;
+        }
+        const CacheKeyType shared_key         = group.policy.group_type == CacheGroupType::FULL ? 901 : 902;
+        resource.cacheKeys(group.tag)         = {shared_key};
+        resource.blockDependencies(group.tag) = {rootDep()};
+        resource.mutableBlockIds(group.tag).setAt(0, 10);
+    }
+
+    const auto slots             = connector->layerTagSlots();
+    const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
+    bool       no_need_write     = true;
+    auto       plan = connector->buildEndpointCopyPlanForWrite(resource, layer_attn_blocks, slots, no_need_write);
+    ASSERT_NE(plan, nullptr);
+    EXPECT_FALSE(no_need_write);
+    ASSERT_EQ(plan->copy_infos.size(), 2u);
+
+    for (const auto& info : plan->copy_infos) {
+        const auto valid_slots = std::count_if(
+            info.slot_valid_mask.begin(), info.slot_valid_mask.end(), [](uint8_t value) { return value != 0; });
+        EXPECT_GT(valid_slots, 1) << "shared native key must retain every contributing tag slot";
+    }
+}
+
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRuntimeSlotMask) {
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
 

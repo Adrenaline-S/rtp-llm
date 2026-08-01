@@ -152,6 +152,58 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
     EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology));
 }
 
+TEST(DecodeRpcServerTest, NormalCacheStoreRejectsHeterogeneousReusableSpans) {
+    CacheConfig config;
+    config.layer_num     = 2;
+    config.layer_all_num = 2;
+    config.setTopology({makeRpcGroup("main", {0}, 8), makeRpcGroup("mtp", {1}, 16)}, {{0, {"main"}}, {1, {"mtp"}}});
+
+    const auto status = DecodeRpcServer::validateNormalCacheStoreWireSpan(config, 8, "main");
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("mtp"), std::string::npos);
+}
+
+TEST(DecodeRpcServerTest, NormalCacheStoreRejectsHeterogeneousParticipatingGroup) {
+    CacheConfig config;
+    config.layer_num                        = 2;
+    config.layer_all_num                    = 2;
+    auto reusable                           = makeRpcGroup("main", {0}, 8);
+    auto non_reusable                       = makeRpcGroup("state", {1}, 16);
+    non_reusable.policy.enable_prefix_reuse = false;
+    config.setTopology({reusable, non_reusable}, {{0, {"main"}}, {1, {"state"}}});
+
+    const auto status = DecodeRpcServer::validateNormalCacheStoreTopologies(config);
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("state"), std::string::npos);
+}
+
+TEST(DecodeRpcServerTest, NormalCacheStoreValidatesEveryMtpSubConfig) {
+    CacheConfig config;
+    config.layer_num     = 1;
+    config.layer_all_num = 1;
+    config.setTopology({makeRpcGroup("main", {0}, 8)}, {{0, {"main"}}});
+
+    auto mtp0           = std::make_shared<CacheConfig>();
+    mtp0->layer_num     = 1;
+    mtp0->layer_all_num = 1;
+    mtp0->setTopology({makeRpcGroup("mtp0", {0}, 8)}, {{0, {"mtp0"}}});
+    auto mtp1           = std::make_shared<CacheConfig>();
+    mtp1->layer_num     = 1;
+    mtp1->layer_all_num = 1;
+    mtp1->setTopology({makeRpcGroup("mtp1", {0}, 16)}, {{0, {"mtp1"}}});
+    config.mtp_sub_configs = {mtp0, mtp1};
+
+    auto status = DecodeRpcServer::validateNormalCacheStoreTopologies(config);
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.error_message().find("MTP module 1"), std::string::npos);
+
+    mtp1->setTopology({makeRpcGroup("mtp1", {0}, 8)}, {{0, {"mtp1"}}});
+    status = DecodeRpcServer::validateNormalCacheStoreTopologies(config);
+    EXPECT_TRUE(status.ok()) << status.error_message();
+}
+
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {
     constexpr size_t mtp_base_model_id = 17;
 

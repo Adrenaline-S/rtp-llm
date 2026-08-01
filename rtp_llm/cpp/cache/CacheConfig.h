@@ -161,11 +161,10 @@ public:
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void               setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
-    void               applyTokenCapacity(uint64_t capacity_tokens);
-    uint64_t           tokenCapacity() const;
-    const std::string& singleReusableGroupTag() const;
-    std::string        debugString(size_t indent = 0) const;
+    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
+    void        applyTokenCapacity(uint64_t capacity_tokens);
+    uint64_t    tokenCapacity() const;
+    std::string debugString(size_t indent = 0) const;
 };
 
 }  // namespace rtp_llm

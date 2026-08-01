@@ -50,18 +50,18 @@ std::string layerTagCacheTransferKey(size_t request_id, size_t layer_id, const s
     return key;
 }
 
-NativeTransferSelection projectTokenRangeForGroup(const GroupBase&       group,
-                                                  size_t                 start_token,
-                                                  size_t                 end_token,
-                                                  CacheTransferRangeMode mode,
-                                                  int                    cp_rank,
-                                                  int                    cp_size) {
+NativeTransferSelection projectTokenRangeForGroup(const GroupBase& group,
+                                                  size_t           start_token,
+                                                  size_t           end_token,
+                                                  bool             require_aligned_range,
+                                                  int              cp_rank,
+                                                  int              cp_size) {
     RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block > 0, "transfer projector requires a positive group span");
     RTP_LLM_CHECK_WITH_INFO(end_token >= start_token, "transfer projector received an inverted token range");
     RTP_LLM_CHECK_WITH_INFO(cp_size > 0 && cp_rank >= 0 && cp_rank < cp_size,
                             "transfer projector received invalid CP rank/size");
     const size_t span = group.seq_size_per_block;
-    if (mode == CacheTransferRangeMode::PREFIX_ALIGNED) {
+    if (require_aligned_range) {
         RTP_LLM_CHECK_WITH_INFO(start_token % span == 0 && end_token % span == 0,
                                 "prefix transfer range [%zu,%zu) is not aligned to tag=%s span=%zu",
                                 start_token,
@@ -70,8 +70,7 @@ NativeTransferSelection projectTokenRangeForGroup(const GroupBase&       group,
                                 span);
     }
     const size_t begin = start_token / span;
-    const size_t end =
-        mode == CacheTransferRangeMode::DIRECT_TERMINAL ? (end_token + span - 1) / span : end_token / span;
+    const size_t end   = require_aligned_range ? end_token / span : (end_token + span - 1) / span;
 
     NativeTransferSelection result;
     result.tag = group.tag;

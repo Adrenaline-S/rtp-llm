@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 #include <algorithm>
-#include <limits>
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 
@@ -298,26 +297,6 @@ void KVCacheResource::ensureLinearBlockDependencies(std::string_view tag) {
     rebuildLinearBlockDependencies(tag);
 }
 
-size_t KVCacheResource::reuseBlockNum(std::string_view tag) const {
-    const auto& resource = groupResource(tag);
-    return resource.device_reuse_block_num + resource.memory_reuse_block_num + resource.remote_reuse_block_num;
-}
-
-size_t KVCacheResource::jointReuseTokens(size_t CacheGroupResource::* counter) const {
-    RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "KVCacheResource groups are not initialized");
-    size_t tokens    = std::numeric_limits<size_t>::max();
-    bool   saw_group = false;
-    for (const auto& group : topology_->groups()) {
-        if (!group.policy.enable_prefix_reuse) {
-            continue;
-        }
-        saw_group            = true;
-        const auto& resource = groupResource(group.tag);
-        tokens               = std::min(tokens, resource.*counter * group.seq_size_per_block);
-    }
-    return saw_group ? tokens : 0;
-}
-
 size_t KVCacheResource::reuseTokenNum() const {
     return request_prefix_.reuseTokens();
 }
@@ -334,31 +313,16 @@ size_t KVCacheResource::remoteReuseTokenNum() const {
     return request_prefix_.remoteReuseTokens();
 }
 
-size_t KVCacheResource::deviceReuseBlockNum(std::string_view tag) const {
-    return groupResource(tag).device_reuse_block_num;
+void KVCacheResource::setDeviceReuseTokenNum(size_t tokens) {
+    request_prefix_.setDeviceReuseTokens(tokens);
 }
 
-void KVCacheResource::setDeviceReuseBlockNum(std::string_view tag, size_t value) {
-    groupResource(tag).device_reuse_block_num = value;
-    request_prefix_.setDeviceReuseTokens(jointReuseTokens(&CacheGroupResource::device_reuse_block_num));
+void KVCacheResource::setMemoryReuseTokenNum(size_t tokens) {
+    request_prefix_.setMemoryReuseTokens(tokens);
 }
 
-size_t KVCacheResource::memoryReuseBlockNum(std::string_view tag) const {
-    return groupResource(tag).memory_reuse_block_num;
-}
-
-void KVCacheResource::setMemoryReuseBlockNum(std::string_view tag, size_t value) {
-    groupResource(tag).memory_reuse_block_num = value;
-    request_prefix_.setMemoryReuseTokens(jointReuseTokens(&CacheGroupResource::memory_reuse_block_num));
-}
-
-size_t KVCacheResource::remoteReuseBlockNum(std::string_view tag) const {
-    return groupResource(tag).remote_reuse_block_num;
-}
-
-void KVCacheResource::setRemoteReuseBlockNum(std::string_view tag, size_t value) {
-    groupResource(tag).remote_reuse_block_num = value;
-    request_prefix_.setRemoteReuseTokens(jointReuseTokens(&CacheGroupResource::remote_reuse_block_num));
+void KVCacheResource::setRemoteReuseTokenNum(size_t tokens) {
+    request_prefix_.setRemoteReuseTokens(tokens);
 }
 
 bool KVCacheResource::lastBlockAligned(std::string_view tag) const {

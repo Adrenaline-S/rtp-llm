@@ -68,7 +68,6 @@ cc_test(
         ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/cache:request_prefix_resource",
-        "//rtp_llm/cpp/cache/connector:request_prefix_manifest_store",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

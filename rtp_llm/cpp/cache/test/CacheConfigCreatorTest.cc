@@ -266,12 +266,6 @@ TEST(CacheConfigCreatorTest, FixedGroupChargesBudgetWithoutCappingLogicalTokens)
                  std::exception);
 }
 
-TEST(CacheConfigCreatorTest, CanonicalReusableTagSelectsFirstGroupForMultiGroupWire) {
-    auto config = makeCapacityConfig({{"full", 4}, {"swa", 6}});
-
-    EXPECT_EQ(config.singleReusableGroupTag(), "full");
-}
-
 TEST(CacheConfigCreatorTest, GroupBlockBytesFailFastBeforeStrideArithmeticWraps) {
     auto config                     = makeCapacityConfig({{"full", 4}});
     auto groups                     = config.topology().groups();

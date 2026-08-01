@@ -88,9 +88,6 @@ struct CacheGroupResource {
     CacheKeysType             cache_keys;
     BlockDependenciesType     block_dependencies;
     bool                      cache_keys_are_cp_canonical{false};
-    size_t                    device_reuse_block_num{0};
-    size_t                    memory_reuse_block_num{0};
-    size_t                    remote_reuse_block_num{0};
     bool                      last_block_aligned{false};
 };
 
@@ -217,20 +214,14 @@ public:
         return local;
     }
 
-    size_t reuseBlockNum(std::string_view tag) const;
     size_t reuseTokenNum() const;
     size_t deviceReuseTokenNum() const;
     size_t memoryReuseTokenNum() const;
     size_t remoteReuseTokenNum() const;
 
-    size_t deviceReuseBlockNum(std::string_view tag) const;
-    void   setDeviceReuseBlockNum(std::string_view tag, size_t device_reuse_blocks_num);
-
-    size_t memoryReuseBlockNum(std::string_view tag) const;
-    void   setMemoryReuseBlockNum(std::string_view tag, size_t memory_reuse_blocks_num);
-
-    size_t remoteReuseBlockNum(std::string_view tag) const;
-    void   setRemoteReuseBlockNum(std::string_view tag, size_t remote_reuse_blocks_num);
+    void setDeviceReuseTokenNum(size_t tokens);
+    void setMemoryReuseTokenNum(size_t tokens);
+    void setRemoteReuseTokenNum(size_t tokens);
 
     bool lastBlockAligned(std::string_view tag) const;
     void setLastBlockAligned(std::string_view tag, bool last_block_aligned);
@@ -245,9 +236,7 @@ private:
     size_t groupOffset(std::string_view tag) const;
     bool   layerContainsTag(int layer_id, std::string_view tag) const;
 
-    const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
-    size_t                          jointReuseTokens(size_t CacheGroupResource::* counter) const;
-
+    const std::vector<std::string>&      groupTagsForLayer(int layer_id) const;
     std::shared_ptr<const CacheTopology> topology_;
     CacheGroupResource&                  groupResource(std::string_view tag);
     const CacheGroupResource&            groupResource(std::string_view tag) const;

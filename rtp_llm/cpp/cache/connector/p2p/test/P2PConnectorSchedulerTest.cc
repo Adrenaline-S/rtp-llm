@@ -89,8 +89,7 @@ protected:
         NativeTransferSelections selections;
         for (const auto& group : resource->topology()->groups()) {
             const size_t end_token = resource->cacheKeys(group.tag).size() * group.seq_size_per_block;
-            selections.emplace(group.tag,
-                               projectTokenRangeForGroup(group, 0, end_token, CacheTransferRangeMode::PREFIX_ALIGNED));
+            selections.emplace(group.tag, projectTokenRangeForGroup(group, 0, end_token, true));
         }
         return selections;
     }

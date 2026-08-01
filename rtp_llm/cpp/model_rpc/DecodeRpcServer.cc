@@ -48,6 +48,54 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     return RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
 }
 
+grpc::Status DecodeRpcServer::validateBeforeCacheStoreInit() const {
+    return validateNormalCacheStoreTopologies(engine_->resourceContext().cache_manager->cacheConfig());
+}
+
+grpc::Status DecodeRpcServer::validateNormalCacheStoreTopologies(const CacheConfig& config) {
+    size_t main_span = 0;
+    for (const auto& group : config.topology().groups()) {
+        if (group.policy.enable_prefix_reuse && !group.layer_ids.empty()) {
+            main_span = group.seq_size_per_block;
+            break;
+        }
+    }
+    if (main_span == 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "NormalCacheStore requires at least one reusable cache group");
+    }
+    auto status = validateNormalCacheStoreWireSpan(config, main_span, "main");
+    if (!status.ok()) {
+        return status;
+    }
+    for (size_t module_index = 0; module_index < config.mtp_sub_configs.size(); ++module_index) {
+        const auto& module_config = config.mtp_sub_configs[module_index];
+        if (module_config == nullptr) {
+            continue;
+        }
+        status =
+            validateNormalCacheStoreWireSpan(*module_config, main_span, "MTP module " + std::to_string(module_index));
+        if (!status.ok()) {
+            return status;
+        }
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status DecodeRpcServer::validateNormalCacheStoreWireSpan(const CacheConfig& config,
+                                                               size_t             expected_span,
+                                                               const std::string& topology_name) {
+    for (const auto& group : config.topology().groups()) {
+        if (!group.layer_ids.empty() && group.seq_size_per_block != expected_span) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                topology_name + " cache group " + group.tag + " has physical span "
+                                    + std::to_string(group.seq_size_per_block) + ", expected "
+                                    + std::to_string(expected_span) + " for the NormalCacheStore key vector");
+        }
+    }
+    return grpc::Status::OK;
+}
+
 std::string
 DecodeRpcServer::makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id) {
     return makeCacheKey(mtp_base_model_id, token_id_str, layer_id);
@@ -384,8 +432,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     auto*             generate_stream = decode_context.getStream().get();
-    const auto&       cache_key_tag   = generate_stream->singleCacheKeyTag();
-    const auto&       cache_keys      = generate_stream->cacheKeys(0, cache_key_tag);
+    const auto&       cache_keys      = generate_stream->requestPrefix(0).keys();
     TaggedBlockIdsMap block_ids_by_tag;
     for (const auto& group : generate_stream->kvCachePtr()->groupResources(0)) {
         block_ids_by_tag.emplace(group.tag, group.block_ids);
