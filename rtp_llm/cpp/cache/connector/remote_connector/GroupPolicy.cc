@@ -156,10 +156,10 @@ bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Lo
 
 bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                                  std::vector<std::string>& location_spec_group_names) const {
-    const auto& cache_keys = resource->cacheKeys();
+    const auto& cache_keys = resource->cacheKeys(wireKeyTag());
     RTP_LLM_CHECK(!cache_keys.empty());
     size_t valid_keys_size = cache_keys.size();
-    if (!resource->lastBlockAligned()) {
+    if (!resource->lastBlockAligned(wireKeyTag())) {
         valid_keys_size--;
     }
     if (!validateResourceGroupBlocks(*resource, groups_, valid_keys_size)) {
@@ -173,6 +173,10 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
             if (!isNullBlockIdx(gpu_block_idx)) {
                 groups_name_bithash |= group.group_name_bithash;
             }
+        }
+        if (groups_name_bithash == 0) {
+            RTP_LLM_LOG_WARNING("cache key index [%zu] has no valid group blocks", key_idx);
+            return false;
         }
         location_spec_group_names.push_back(location_spec_group_map_.at(groups_name_bithash));
     }
@@ -278,7 +282,10 @@ bool FullLayerGroupPolicy::init() {
 bool FullLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                               std::vector<std::string>&               location_spec_group_names) const {
     if (groups_.size() == 1) {
-        return true;
+        // Keep the legacy single-group wire representation empty, but still validate
+        // that every published key has a corresponding local block.
+        std::vector<std::string> validation_only;
+        return DefaultLayerGroupPolicy::getNeedWriteGroups(resource, validation_only);
     }
     return DefaultLayerGroupPolicy::getNeedWriteGroups(resource, location_spec_group_names);
 }
@@ -330,10 +337,10 @@ bool FullOtherGroupPolicy::init() {
 
 bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                               std::vector<std::string>&               location_spec_group_names) const {
-    const auto& cache_keys = resource->cacheKeys();
+    const auto& cache_keys = resource->cacheKeys(wireKeyTag());
     RTP_LLM_CHECK(!cache_keys.empty());
     size_t valid_keys_size = cache_keys.size();
-    if (!resource->lastBlockAligned()) {
+    if (!resource->lastBlockAligned(wireKeyTag())) {
         valid_keys_size--;
     }
     if (!validateResourceGroupBlocks(*resource, groups_, valid_keys_size)) {

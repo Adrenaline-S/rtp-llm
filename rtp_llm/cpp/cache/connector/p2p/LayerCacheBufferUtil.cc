@@ -32,7 +32,7 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
         return std::nullopt;
     }
 
-    const auto& cache_keys                = resource.cacheKeys();
+    const auto& cache_keys                = resource.cacheKeys(cache_tag);
     const auto& block_ids                 = resource.blocksForLayer(layer_id, cache_tag);
     const auto  rank                      = static_cast<size_t>(cp_rank);
     const auto  world_size                = static_cast<size_t>(cp_size);

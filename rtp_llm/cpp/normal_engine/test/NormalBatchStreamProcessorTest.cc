@@ -34,9 +34,8 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
     cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    test::setTestTopology(
-        cache_config,
-        {test::makeTestGroupForConfig(cache_config, spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
+    test::setTestTopology(cache_config,
+                          {test::makeTestGroupForConfig(spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
 }
 
 static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, const std::vector<std::string>& tags) {
@@ -46,7 +45,7 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, const 
     for (const auto& tag : tags) {
         auto spec = std::make_shared<MHAKVCacheSpec>();
         spec->tag = tag;
-        groups.push_back(test::makeTestGroupForConfig(cache_config, spec, layer_ids, CacheGroupType::FULL, tag));
+        groups.push_back(test::makeTestGroupForConfig(spec, layer_ids, CacheGroupType::FULL, tag));
     }
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
     cache_config.layer_all_num = static_cast<uint32_t>(layer_num);

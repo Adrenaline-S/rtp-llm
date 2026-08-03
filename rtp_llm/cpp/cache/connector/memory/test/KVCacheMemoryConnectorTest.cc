@@ -15,10 +15,8 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/TestRpcService.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
@@ -105,7 +103,7 @@ protected:
         createDevice();
 
         cache_config_ = createMockCacheConfig();
-        allocator_    = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+        allocator_    = std::make_shared<KVCacheAllocator>(cache_config_, AllocationType::DEVICE);
         ASSERT_TRUE(allocator_->init());
 
         const int server_num = 4;
@@ -164,7 +162,7 @@ private:
                                                        /*group_layer_num=*/2,
                                                        /*local_head_num_kv=*/8,
                                                        /*size_per_head=*/128);
-        allocator_    = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+        allocator_    = std::make_shared<KVCacheAllocator>(cache_config_, AllocationType::DEVICE);
         ASSERT_TRUE(allocator_->init());
         connector_ =
             std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
@@ -200,12 +198,10 @@ private:
         const auto             topology_groups = cfg.topology().groups();
         std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
         for (auto& group : groups) {
-            group.block_num             = cfg.block_num;
             group.kv_block_stride_bytes = stride_bytes;
             group.kv_scale_stride_bytes = 0;
         }
         cfg.setTopology(std::move(groups), cfg.topology().layers());
-        cfg.group_block_layout_initialized = true;
     }
 
     void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) const {
@@ -303,7 +299,7 @@ private:
 
         size_t byte_off = 0;
         for (size_t layer = 0; layer < layer_num; ++layer) {
-            const size_t layer_stride = static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
+            const size_t layer_stride = cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
             const auto   block_id     = layer_to_block[layer];
             if (isNullBlockIdx(block_id)) {
                 byte_off += layer_stride;
@@ -339,7 +335,7 @@ private:
 
         size_t total = 0;
         for (size_t layer = 0; layer < layer_num; ++layer) {
-            total += static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
+            total += cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
         }
 
         for (size_t layer = 0; layer < layer_num; ++layer) {
@@ -350,7 +346,7 @@ private:
             const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
             const auto bytes    = sumBlockInfosBytes(gpu_bufs);
             ASSERT_GT(bytes, 0u);
-            ASSERT_LE(bytes, static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]));
+            ASSERT_LE(bytes, cache_config_.layerBlockStrideBytes(static_cast<int>(layer)));
             if (fill_gpu) {
                 setBlockInfosContent(gpu_bufs, static_cast<char>('k' + static_cast<int>(layer)));
             }
@@ -375,7 +371,7 @@ private:
         if (fill_cpu) {
             size_t byte_off = 0;
             for (size_t layer = 0; layer < layer_num; ++layer) {
-                const size_t layer_stride = static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
+                const size_t layer_stride = cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
                 const auto   block_id     = layer_to_block[layer];
                 if (isNullBlockIdx(block_id)) {
                     byte_off += layer_stride;
@@ -423,9 +419,9 @@ private:
     makeCacheResource(const CacheKeysType&                          cache_keys,
                       const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                       size_t                                        reuse_len = 0) const {
-        auto res         = std::make_shared<KVCacheResource>();
-        res->cacheKeys() = cache_keys;
+        auto res = std::make_shared<KVCacheResource>();
         res->initGroups(cache_config_.topologyPtr());
+        res->cacheKeys("default") = cache_keys;
         const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
         res->mutableBlockIds("default").assign(default_blocks);
         // reuse_len in these tests means "GPU already-reused prefix length".
@@ -433,7 +429,7 @@ private:
         // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
         res->setDeviceReuseBlockNum(reuse_len);
         // These unit tests want to include the whole cache_keys range by default.
-        res->setLastBlockAligned(true);
+        res->setLastBlockAligned("default", true);
         return res;
     }
 
@@ -441,11 +437,12 @@ private:
                                                              const std::vector<BlockIdxType>& linear_blocks,
                                                              const std::vector<BlockIdxType>& full_blocks,
                                                              size_t                           reuse_len = 0) const {
-        auto res               = std::make_shared<KVCacheResource>();
-        res->cacheKeys()       = cache_keys;
+        auto         res       = std::make_shared<KVCacheResource>();
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         RTP_LLM_CHECK_WITH_INFO(layer_num == 4, "test helper expects 4 layers, got %zu", layer_num);
         res->initGroups(cache_config_.topologyPtr());
+        res->cacheKeys("linear")      = cache_keys;
+        res->cacheKeys("full1")       = cache_keys;
         auto normalized_linear_blocks = linear_blocks;
         if (normalized_linear_blocks.size() < cache_keys.size()) {
             normalized_linear_blocks.resize(cache_keys.size(), NULL_BLOCK_IDX);
@@ -457,7 +454,8 @@ private:
         res->mutableBlockIds("linear").assign(normalized_linear_blocks);
         res->mutableBlockIds("full1").assign(normalized_full_blocks);
         res->setDeviceReuseBlockNum(reuse_len);
-        res->setLastBlockAligned(true);
+        res->setLastBlockAligned("linear", true);
+        res->setLastBlockAligned("full1", true);
         return res;
     }
 
@@ -513,7 +511,7 @@ private:
         // (e.g. when some layers are NULL for a key) should still be served by the same pool.
         auto pool = connector_->block_pool_;
         if (!pool) {
-            // initBlockPool uses cache_config_.block_size_bytes and kv_cache_config_.memory_cache_size_mb.
+            // initBlockPool uses the tag-local group strides and kv_cache_config_.memory_cache_size_mb.
             EXPECT_NO_THROW(connector_->initBlockPool());
             pool = connector_->block_pool_;
         }
@@ -603,9 +601,6 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
     auto cfg = cache_config_;
     setGroupBlockBytes(cfg, 0);
-    cfg.layer_to_block_stride_bytes.clear();
-    cfg.kv_block_stride_bytes = 0;
-    cfg.kv_scale_stride_bytes = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -619,7 +614,6 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenPoolTooSmallForBlockSize
     auto cfg = cache_config_;
     // Make sure pool_size_mb * 1MB / total_stride_bytes == 0 -> createBlockPool() should fail with CHECK.
     setGroupBlockBytes(cfg, 1024 * 1024);
-    cfg.layer_to_block_stride_bytes.assign(cfg.layer_all_num, 1024 * 1024);
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -651,9 +645,6 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
     auto cfg = cache_config_;
     setGroupBlockBytes(cfg, 0);
-    cfg.layer_to_block_stride_bytes.clear();
-    cfg.kv_block_stride_bytes = 0;
-    cfg.kv_scale_stride_bytes = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -668,7 +659,6 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails)
     // Force createBlockPool() to compute block_num=0:
     // block_num = pool_size_mb * 1MB / total_stride_bytes.
     setGroupBlockBytes(cfg, 1024 * 1024);
-    cfg.layer_to_block_stride_bytes.assign(cfg.layer_all_num, 1024 * 1024);
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -723,7 +713,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WithHybridGroups)
                                        /*linear_blocks=*/{1, 2, 3},
                                        /*full_blocks=*/{4, 5, 6});
     for (int layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-        ASSERT_EQ(res->blockIdsForLayer(layer).size(), 1u);
+        const auto& tags = res->groupTagsForLayer(layer);
+        ASSERT_EQ(tags.size(), 1u);
+        ASSERT_EQ(res->blockIdsForLayer(layer, tags.front()).blocks().size(), cache_keys.size());
     }
     putItemsToCache({cache_keys[0]}, memoryCacheBlockBytes());
 
@@ -866,10 +858,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
 
     // uninitialized legacy layer view
     // NOTE: asyncRead always skips the last cache_key (cache_keys.size() - 1), so keep size >= 2 here.
-    auto res_empty_lbs         = std::make_shared<KVCacheResource>();
-    res_empty_lbs->cacheKeys() = {1, 2};
-    EXPECT_ANY_THROW((void)connector_->asyncRead(
-        res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1));
+    auto res_empty_lbs = std::make_shared<KVCacheResource>();
+    res_empty_lbs->initGroups(cache_config_.topologyPtr());
+    res_empty_lbs->cacheKeys("default") = {1, 2};
+    EXPECT_EQ(connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_token=*/0, /*token_count=*/1), nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
@@ -1033,7 +1025,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock)
         upgraded_item.is_resident = false;
         upgraded_item.is_complete = true;
         connector_->block_cache_->remove(cache_keys[1]);
-        pool->blockCacheFree({block_indices[1]});
+        pool->blockCacheFree(block_indices[1]);
         auto [ok, popped] = connector_->block_cache_->put(upgraded_item);
         ASSERT_TRUE(ok);
         pool->blockCacheReference({new_block_idx});
@@ -1193,10 +1185,11 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
     EXPECT_EQ(ctx1, nullptr);
 
     // uninitialized legacy layer view
-    auto res_empty_lbs         = std::make_shared<KVCacheResource>();
-    res_empty_lbs->cacheKeys() = {1};
-    res_empty_lbs->setLastBlockAligned(true);
-    EXPECT_ANY_THROW((void)connector_->asyncWrite(res_empty_lbs, meta));
+    auto res_empty_lbs = std::make_shared<KVCacheResource>();
+    res_empty_lbs->initGroups(cache_config_.topologyPtr());
+    res_empty_lbs->cacheKeys("default") = {1};
+    res_empty_lbs->setLastBlockAligned("default", true);
+    EXPECT_EQ(connector_->asyncWrite(res_empty_lbs, meta), nullptr);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysInCache) {
@@ -1323,20 +1316,13 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenBuildPlanEmpty) {
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysAreSmall_NoNeedWrite) {
     resetToHybridCacheConfig();
-    // Hybrid-attn: allow writing small keys for continuity, BUT if there is NO "big" key in the tail,
-    // buildCopyPlanForWrite() should return nullptr and asyncWrite should be a no-op (return nullptr).
-    CacheKeysType cache_keys{81001, 81002, 81003};
-    auto          res = makeHybridCacheResource(cache_keys,
-                                       /*linear_blocks=*/{NULL_BLOCK_IDX, 1, NULL_BLOCK_IDX},
-                                       /*full_blocks=*/{1, NULL_BLOCK_IDX, 1});
-
-    auto pool = connector_->block_pool_;
+    auto resource = makeHybridCacheResource(
+        /*cache_keys=*/{81001, 81002}, /*linear_blocks=*/{1, NULL_BLOCK_IDX}, /*full_blocks=*/{NULL_BLOCK_IDX, 1});
+    auto pool = requireExistingBlockPool(memoryCacheBlockBytes());
     ASSERT_NE(pool, nullptr);
     const size_t free_before = pool->freeBlocksNum();
-
-    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
-    auto ctx  = connector_->asyncWrite(res, meta);
-    EXPECT_EQ(ctx, nullptr);
+    auto         meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    EXPECT_EQ(connector_->asyncWrite(resource, meta), nullptr);
     EXPECT_EQ(pool->freeBlocksNum(), free_before);
 }
 
@@ -1775,46 +1761,37 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     ctx.attn_config        = &attn_config;
     auto mla_spec          = SpecBuilder::build(desc, ctx);
 
-    cache_config_.layer_num             = static_cast<uint32_t>(kLayerNum);
-    cache_config_.layer_all_num         = static_cast<uint32_t>(kLayerNum);
-    cache_config_.block_num             = static_cast<uint32_t>(kBlockNum);
-    cache_config_.seq_size_per_block    = kSeqPerBlock;
-    cache_config_.use_mla               = true;
-    cache_config_.is_sparse             = false;
-    cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP8_E4M3;
-    cache_config_.kv_block_stride_bytes = kKvBytesPerTok * kSeqPerBlock;
-    cache_config_.kv_scale_stride_bytes = kScaleBytesPerTok * kSeqPerBlock;
-    cache_config_.kv_block_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_block_stride_bytes;
-    cache_config_.kv_scale_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_scale_stride_bytes;
-    cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-    const size_t kPerLayerStrideBytes   = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-    cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(kLayerNum),
-                                                     static_cast<int>(kPerLayerStrideBytes));
+    cache_config_.layer_num                = static_cast<uint32_t>(kLayerNum);
+    cache_config_.layer_all_num            = static_cast<uint32_t>(kLayerNum);
+    cache_config_.use_mla                  = true;
+    cache_config_.is_sparse                = false;
+    cache_config_.dtype                    = rtp_llm::DataType::TYPE_FP8_E4M3;
+    const size_t     kv_block_stride_bytes = kKvBytesPerTok * kSeqPerBlock;
+    const size_t     kv_scale_stride_bytes = kScaleBytesPerTok * kSeqPerBlock;
     std::vector<int> layer_ids(kLayerNum);
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
-    setTestTopology(
-        cache_config_,
-        {makeTestGroupForConfig(cache_config_, mla_spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
+    setTestTopology(cache_config_,
+                    {makeTestGroupForConfig(mla_spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
     const auto             topology_groups = cache_config_.topology().groups();
     std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
     ASSERT_EQ(groups.size(), 1u);
     groups[0].block_num             = static_cast<uint32_t>(kBlockNum);
-    groups[0].kv_block_stride_bytes = cache_config_.kv_block_stride_bytes;
-    groups[0].kv_scale_stride_bytes = cache_config_.kv_scale_stride_bytes;
+    groups[0].kv_block_stride_bytes = kv_block_stride_bytes;
+    groups[0].kv_scale_stride_bytes = kv_scale_stride_bytes;
     cache_config_.setTopology(std::move(groups), cache_config_.topology().layers());
-    cache_config_.group_block_layout_initialized = true;
-    ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
+    ASSERT_EQ(mla_spec->block_size_bytes(), kv_block_stride_bytes);
 
-    const size_t merged_one_key = memoryCacheBlockBytes(cache_config_);
-    ASSERT_EQ(merged_one_key, static_cast<size_t>(kLayerNum) * kPerLayerStrideBytes);
+    const size_t per_layer_stride_bytes = kv_block_stride_bytes + kv_scale_stride_bytes;
+    const size_t merged_one_key         = memoryCacheBlockBytes(cache_config_);
+    ASSERT_EQ(merged_one_key, static_cast<size_t>(kLayerNum) * per_layer_stride_bytes);
     const int pool_mb =
         static_cast<int>((merged_one_key * static_cast<size_t>(kCopyBlockCount) + (1024ULL * 1024 - 1)) / (1024 * 1024))
         + 256;
     kv_cache_config_.memory_cache_size_mb = std::max(pool_mb, 512);
 
-    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+    allocator_ = std::make_shared<KVCacheAllocator>(cache_config_, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     connector_ = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
     ASSERT_TRUE(connector_->init());
@@ -1991,7 +1968,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
     // Allocate one memory block for the merged layout (one cache-key across all layers).
     size_t total_bytes = 0;
     for (int layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-        total_bytes += static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[static_cast<size_t>(layer)]);
+        total_bytes += cache_config_.layerBlockStrideBytes(layer);
     }
     ASSERT_GT(total_bytes, 0u);
 
@@ -2025,7 +2002,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
     }
     size_t byte_off = 0;
     for (size_t layer = 0; layer < layer_num; ++layer) {
-        const size_t layer_stride = static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
+        const size_t layer_stride = cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
         const auto   block_id     = layer_to_block[layer];
         if (isNullBlockIdx(block_id)) {
             byte_off += layer_stride;

@@ -59,13 +59,11 @@ protected:
         resource->initGroups(test::makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
+            const auto tag = "group" + std::to_string(layer_id);
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds("group" + std::to_string(layer_id)).add({i});
+                resource->mutableBlockIds(tag).add({i});
+                resource->cacheKeys(tag).push_back(1000 + layer_id * blocks_per_layer + i);
             }
-        }
-
-        for (int i = 0; i < num_layers * blocks_per_layer; ++i) {
-            resource->cacheKeys().push_back(1000 + i);
         }
 
         return resource;

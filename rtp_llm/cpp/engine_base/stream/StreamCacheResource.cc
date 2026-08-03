@@ -297,8 +297,12 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
+            const bool tiered_multi_group =
+                enableTieredMemoryCache() && resource_context_.cache_manager->cacheConfig().groupNums() > 1;
+            // A resource rebuilt from device-cache eviction is only an eviction fragment. For hybrid cache,
+            // publish the complete tagged resource before eviction so later memory reads restore every group.
             storeCacheAsync(batch_kv_cache_resource_,
-                            reuseCache() && enableMemoryCache() && !enableTieredMemoryCache(),
+                            reuseCache() && enableMemoryCache() && (!enableTieredMemoryCache() || tiered_multi_group),
                             reuseCache() && enableRemoteCache());
             // only evict when succeeds
             if (enableTieredMemoryCache()) {
@@ -537,11 +541,17 @@ bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch,
 }
 
 bool StreamCacheResource::hasCacheKeys() const {
-    return batch_kv_cache_resource_->hasCacheKeys();
+    return batch_kv_cache_resource_->hasAnyCacheKeys();
 }
 
 const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
-    return batch_kv_cache_resource_->cacheKeys(batch_id);
+    const auto& groups = batch_kv_cache_resource_->cacheResource(batch_id).groupResources();
+    RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "StreamCacheResource::cacheKeys requires at least one cache group");
+    // This branch still models the PD/model-input key stream with one global
+    // seq_size_per_block, so every tagged group carries the same logical keys.
+    // Select the topology's deterministic first group explicitly instead of
+    // invoking KVCacheResource's strict single-group compatibility adapter.
+    return groups.front().cache_keys;
 }
 
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
@@ -692,7 +702,7 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
 
     const auto need_blocks      = static_cast<size_t>(min_free_blocks) - not_in_use_blocks;
     auto       evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
-    if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
+    if (!evicted_resource || !evicted_resource->hasAnyCacheKeys()) {
         RTP_LLM_LOG_INFO(
             "tiered memory cache skip eviction, stream[%ld], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
             stream_->streamId(),
@@ -708,7 +718,7 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
         not_in_use_blocks,
         min_free_blocks,
         need_blocks,
-        evicted_resource->cacheKeys(0).size());
+        evicted_resource->cacheResource(0).groupResources().front().cache_keys.size());
     storeCacheAsync(evicted_resource, /*enable_memory_cache=*/true, /*enable_remote_cache=*/false);
     resource_context_.cache_manager->blockCacheFree(evicted_resource);
 }
@@ -737,9 +747,12 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
 }
 
 void StreamCacheResource::holdKVCacheForPDSep() {
-    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
-    const auto& cache_keys = resource.cacheKeys();
-    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
+    auto&            resource = batch_kv_cache_resource_->cacheResource(0);
+    CacheKeysByGroup cache_keys_by_group;
+    for (const auto& entry : resource.groupResources()) {
+        cache_keys_by_group.emplace(entry.tag, entry.cache_keys);
+    }
+    auto ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys_by_group, /*is_connector=*/true);
     if (ref) {
         pd_kvcache_ref_ = std::move(ref);
     }

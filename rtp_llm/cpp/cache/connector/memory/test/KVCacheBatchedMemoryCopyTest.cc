@@ -85,16 +85,15 @@ TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
 
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
-    config.layer_num                   = use_flash ? 43 : 61;
-    config.layer_all_num               = config.layer_num;
-    config.block_num                   = 512;
-    config.seq_size_per_block          = 256;
-    config.kernel_seq_size_per_block   = 256;
-    config.use_independent_block_pools = true;
-    config.use_typed_cache_regions     = true;
-    config.use_opaque_kv_cache_store   = true;
-    config.is_sparse                   = true;
+    config.dtype                     = rtp_llm::DataType::TYPE_UINT8;
+    config.layer_num                 = use_flash ? 43 : 61;
+    config.layer_all_num             = config.layer_num;
+    config.block_num                 = 512;
+    config.seq_size_per_block        = 256;
+    config.kernel_seq_size_per_block = 256;
+    config.use_typed_cache_regions   = true;
+    config.use_opaque_kv_cache_store = true;
+    config.is_sparse                 = true;
 
     constexpr size_t               kDsv4PoolNum = 7;
     const std::vector<std::string> group_tags   = {
@@ -124,9 +123,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     const std::vector<size_t>     group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
     const std::vector<uint32_t>   group_block_nums(kDsv4PoolNum, config.block_num);
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
-    config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
-
-    auto make_spec = [&](size_t gid) -> KVCacheSpecPtr {
+    auto                          make_spec = [&](size_t gid) -> KVCacheSpecPtr {
         return makeResolvedOpaqueSpec(group_types[gid] != CacheGroupType::FULL,
                                       group_tags[gid],
                                       config.dtype,
@@ -157,8 +154,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     std::vector<GroupBase> groups;
     groups.reserve(kDsv4PoolNum);
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
-        auto group                  = makeTestGroupForConfig(config,
-                                            make_spec(gid),
+        auto group                  = makeTestGroupForConfig(make_spec(gid),
                                             std::move(layers_by_group[gid]),
                                             group_types[gid],
                                             group_tags[gid],
@@ -169,7 +165,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         groups.push_back(std::move(group));
     }
     setTestTopology(config, std::move(groups));
-    config.group_block_layout_initialized = true;
     return config;
 }
 
@@ -185,7 +180,6 @@ void setGroupStridesForConfig(CacheConfig& config, size_t kv_block_stride_bytes,
         group.kv_scale_stride_bytes = kv_scale_stride_bytes;
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
 }
 
 void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) {
@@ -303,7 +297,11 @@ public:
         return convertIndexToBuffer(layer_id, tag, block_id);
     }
 
-    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&, const CacheKeysType&, bool) override {
+    BlockPoolPtr blockPool(std::string_view) const override {
+        return nullptr;
+    }
+
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&, const CacheKeysByGroup&, bool) override {
         return nullptr;
     }
 
@@ -410,6 +408,47 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     }
 }
 
+TEST(KVCacheBatchedMemoryCopyTest, MultiGroupReuseEnablesTypedPrefixTreeWithoutExplicitFlag) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 64;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    ASSERT_TRUE(connector->init());
+    EXPECT_TRUE(connector->usePrefixTreeMemoryCache());
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, LegacyMultiGroupBlocksProjectOntoFullGroupOrdinals) {
+    auto                     config = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+                                                 /*block_num=*/10,
+                                                 /*tokens_per_block=*/8,
+                                                 DataType::TYPE_FP16,
+                                                 /*group_layer_num=*/2);
+    KVCacheConfig            kv_config;
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+
+    KVCacheResource resource;
+    initResourceGroupsForConfig(resource, config);
+    resource.setCacheKeys("full1", {101, 102, 103});
+    resource.setBlockDependencies("full1", {{false, 0, 0}, {true, 101, 1}, {true, 102, 2}});
+    resource.mutableBlockIds("full1").assign({21, 22, 23});
+    resource.setCacheKeys("linear", {201, 203});
+    resource.setBlockDependencies("linear", {{false, 0, 0}, {true, 201, 2}});
+    resource.mutableBlockIds("linear").assign({11, 13});
+
+    std::vector<std::unique_ptr<BlockIds>> owned_blocks;
+    const auto                             projected = connector->resourceLegacyFlatLayerRegionBlocks(
+        resource, connector->layerGroupSlots(), "full1", /*required_len=*/3, owned_blocks);
+    ASSERT_EQ(projected.at(0).at("linear")->blocks(), BlockIndicesType({11, NULL_BLOCK_IDX, 13}));
+    ASSERT_EQ(projected.at(2).at("full1")->blocks(), BlockIndicesType({21, 22, 23}));
+}
+
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRuntimeSlotMask) {
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
 
@@ -437,19 +476,20 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     ASSERT_EQ(config.groupForLayer(hca_layer, "swa_kv").tag, "swa_kv");
 
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
+    const std::string key_tag   = "hca_kv";
+    resource.cacheKeys(key_tag) = {901, 902};
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
 
     resource.mutableBlockIds("hca_kv").assign({11, 12});
     resource.mutableBlockIds("hca_state").assign({51, 52});
     resource.mutableBlockIds("swa_kv").assign({61, NULL_BLOCK_IDX});
-    resource.ensureLinearBlockDependencies();
+    resource.ensureLinearBlockDependencies(key_tag);
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     bool       no_need_write     = true;
-    auto       plan              = connector->buildPrefixCopyPlanForWrite(resource.cacheKeys(),
-                                                       resource.blockDependencies(),
+    auto       plan              = connector->buildPrefixCopyPlanForWrite(resource.cacheKeys(key_tag),
+                                                       resource.blockDependencies(key_tag),
                                                        layer_attn_blocks,
                                                        slots,
                                                        /*start_index=*/0,
@@ -507,12 +547,13 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
+    const std::string key_tag   = "hca_kv";
+    resource.cacheKeys(key_tag) = {901, 902};
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
     resource.mutableBlockIds("hca_kv").assign({11, 12});
     resource.mutableBlockIds("swa_kv").assign({61, 62});
-    resource.ensureLinearBlockDependencies();
+    resource.ensureLinearBlockDependencies(key_tag);
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     const auto compressed_mask =
@@ -531,10 +572,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     copy_info.mem_block       = mem_blocks[0];
     copy_info.block_size      = connector->prefixKindBlockSize(CacheBlockKind::COMPRESSED_KV, slots);
     copy_info.slot_valid_mask = compressed_mask;
-    connector->putPrefixToCache(copy_info, resource.blockDependencies()[0], slots);
+    connector->putPrefixToCache(copy_info, resource.blockDependencies(key_tag)[0], slots);
 
-    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(),
-                                                           resource.blockDependencies(),
+    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(key_tag),
+                                                           resource.blockDependencies(key_tag),
                                                            layer_attn_blocks,
                                                            slots,
                                                            /*start_index=*/0,
@@ -562,12 +603,13 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
+    const std::string key_tag   = "hca_kv";
+    resource.cacheKeys(key_tag) = {901, 902};
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
     resource.mutableBlockIds("hca_kv").assign({0, NULL_BLOCK_IDX});
     resource.mutableBlockIds("swa_kv").assign({61, 62});
-    resource.ensureLinearBlockDependencies();
+    resource.ensureLinearBlockDependencies(key_tag);
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     const auto compressed_mask =
@@ -586,10 +628,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     copy_info.mem_block       = mem_blocks[0];
     copy_info.block_size      = connector->prefixKindBlockSize(CacheBlockKind::STATE_SWA_KV, slots);
     copy_info.slot_valid_mask = state_mask;
-    connector->putPrefixToCache(copy_info, resource.blockDependencies()[0], slots);
+    connector->putPrefixToCache(copy_info, resource.blockDependencies(key_tag)[0], slots);
 
-    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(),
-                                                           resource.blockDependencies(),
+    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(key_tag),
+                                                           resource.blockDependencies(key_tag),
                                                            layer_attn_blocks,
                                                            slots,
                                                            /*start_index=*/0,
@@ -1103,9 +1145,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     const CacheKeysType cache_keys{101, 102};
     KVCacheResource     resource;
     initResourceGroupsForConfig(resource, config);
+    const auto key_tag = config.topology().groups().front().tag;
     resource.resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
-    resource.setCacheKeys(cache_keys);
-    resource.ensureLinearBlockDependencies();
+    resource.setCacheKeys(key_tag, cache_keys);
+    resource.ensureLinearBlockDependencies(key_tag);
 
     for (const auto& group : config.topology().groups()) {
         auto& blocks = resource.mutableBlockIds(group.tag);
@@ -1119,7 +1162,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     bool       no_need_write     = true;
 
     auto plan = connector->buildPrefixCopyPlanForWrite(cache_keys,
-                                                       resource.blockDependencies(),
+                                                       resource.blockDependencies(key_tag),
                                                        layer_attn_blocks,
                                                        slots,
                                                        /*start_index=*/0,

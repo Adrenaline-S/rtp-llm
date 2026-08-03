@@ -108,6 +108,9 @@ public:
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
         return convertIndexToBuffer(layer_id, tag, block_id);
     }
+    BlockPoolPtr blockPool(std::string_view) const override {
+        return nullptr;
+    }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
         ++all_layer_cache_base_call_count_;
         const auto                            topology = config_.topologyPtr();
@@ -144,9 +147,9 @@ public:
                                            int  target_batch_size) const override {
         return 0;
     }
-    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                    const CacheKeysType&   cache_keys,
-                                                    bool                   is_connector = false) override {
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&  kvcache_resource,
+                                                    const CacheKeysByGroup& cache_keys,
+                                                    bool                    is_connector = false) override {
         return {};
     }
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {
@@ -236,9 +239,9 @@ public:
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
         setTestTopology(cache_config_,
-                        {makeTestGroupForConfig(cache_config_, mha_spec, layers, CacheGroupType::FULL, "0"),
-                         makeTestGroupForConfig(cache_config_, linear_spec_1, layers, CacheGroupType::LINEAR, "1"),
-                         makeTestGroupForConfig(cache_config_, linear_spec_2, layers, CacheGroupType::LINEAR, "2")});
+                        {makeTestGroupForConfig(mha_spec, layers, CacheGroupType::FULL, "0"),
+                         makeTestGroupForConfig(linear_spec_1, layers, CacheGroupType::LINEAR, "1"),
+                         makeTestGroupForConfig(linear_spec_2, layers, CacheGroupType::LINEAR, "2")});
         const auto             topology_groups = cache_config_.topology().groups();
         std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
         for (auto& group : groups) {
@@ -247,7 +250,6 @@ public:
             group.kv_scale_stride_bytes = 0;
         }
         cache_config_.setTopology(std::move(groups), cache_config_.topology().layers());
-        cache_config_.group_block_layout_initialized = true;
     }
 
     void TearDown() override {}
@@ -330,7 +332,6 @@ TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSize
         group.kv_scale_stride_bytes = 0;
     }
     heterogeneous_config.setTopology(std::move(groups), heterogeneous_config.topology().layers());
-    heterogeneous_config.group_block_layout_initialized = true;
 
     std::vector<std::string> full_group_tags({"0"});
     std::vector<std::string> linear_group_tags({"1", "2"});
@@ -364,16 +365,13 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
     auto full_spec          = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
     config.block_size_bytes = full_spec->block_size_bytes();
 
-    std::vector<GroupBase>   build_groups{makeTestGroupForConfig(config, full_spec, {0}, CacheGroupType::FULL, "full")};
+    std::vector<GroupBase>   build_groups{makeTestGroupForConfig(full_spec, {0}, CacheGroupType::FULL, "full")};
     std::vector<std::string> full_group_tags{"full"};
     std::vector<std::string> linear_group_tags;
     for (size_t i = 0; i < linear_group_count; ++i) {
         const auto tag = "linear" + std::to_string(i);
-        build_groups.push_back(makeTestGroupForConfig(config,
-                                                      makeTestLinearSpec(tag, /*seq_size_per_block=*/8),
-                                                      {static_cast<int>(i + 1)},
-                                                      CacheGroupType::LINEAR,
-                                                      tag));
+        build_groups.push_back(makeTestGroupForConfig(
+            makeTestLinearSpec(tag, /*seq_size_per_block=*/8), {static_cast<int>(i + 1)}, CacheGroupType::LINEAR, tag));
         linear_group_tags.push_back(tag);
     }
     setTestTopology(config, std::move(build_groups));
@@ -385,7 +383,6 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
         group.kv_scale_stride_bytes = 0;
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
 
     auto allocator =
         std::make_shared<FakeKVCacheAllocator>(config, full_group_tags, linear_group_tags, /*per_group_layer_num=*/1);
@@ -403,10 +400,9 @@ TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
     CacheConfig first_config;
     first_config.layer_num     = 1;
     first_config.layer_all_num = 1;
-    setTestTopology(
-        first_config,
-        {makeTestGroupForConfig(first_config, makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full"),
-         makeTestGroupForConfig(first_config, makeTestLinearSpec("linear", 8), {0}, CacheGroupType::LINEAR, "linear")});
+    setTestTopology(first_config,
+                    {makeTestGroupForConfig(makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full"),
+                     makeTestGroupForConfig(makeTestLinearSpec("linear", 8), {0}, CacheGroupType::LINEAR, "linear")});
     auto first_allocator = std::make_shared<FakeKVCacheAllocator>(
         first_config, std::vector<std::string>{"full"}, std::vector<std::string>{"linear"}, 1);
     auto first_policy = std::make_shared<FullLinearLayerGroupPolicy>(
@@ -416,11 +412,9 @@ TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
     CacheConfig reversed_config;
     reversed_config.layer_num     = 1;
     reversed_config.layer_all_num = 1;
-    setTestTopology(
-        reversed_config,
-        {makeTestGroupForConfig(
-             reversed_config, makeTestLinearSpec("linear", 8), {0}, CacheGroupType::LINEAR, "linear"),
-         makeTestGroupForConfig(reversed_config, makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full")});
+    setTestTopology(reversed_config,
+                    {makeTestGroupForConfig(makeTestLinearSpec("linear", 8), {0}, CacheGroupType::LINEAR, "linear"),
+                     makeTestGroupForConfig(makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full")});
     auto reversed_allocator = std::make_shared<FakeKVCacheAllocator>(
         reversed_config, std::vector<std::string>{"full"}, std::vector<std::string>{"linear"}, 1);
     auto reversed_policy = std::make_shared<FullLinearLayerGroupPolicy>(
@@ -443,10 +437,9 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     CacheConfig first_config;
     first_config.layer_num     = 1;
     first_config.layer_all_num = 1;
-    setTestTopology(
-        first_config,
-        {makeTestGroupForConfig(first_config, makeTestMhaSpec("full_a", 8), {0}, CacheGroupType::FULL, "full_a"),
-         makeTestGroupForConfig(first_config, makeTestMhaSpec("full_b", 8), {0}, CacheGroupType::FULL, "full_b")});
+    setTestTopology(first_config,
+                    {makeTestGroupForConfig(makeTestMhaSpec("full_a", 8), {0}, CacheGroupType::FULL, "full_a"),
+                     makeTestGroupForConfig(makeTestMhaSpec("full_b", 8), {0}, CacheGroupType::FULL, "full_b")});
     auto first_allocator = std::make_shared<FakeKVCacheAllocator>(
         first_config, std::vector<std::string>{"full_a", "full_b"}, std::vector<std::string>{}, 1);
     auto first_policy = std::make_shared<FullLayerGroupPolicy>(
@@ -469,10 +462,9 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     CacheConfig reversed_config;
     reversed_config.layer_num     = 1;
     reversed_config.layer_all_num = 1;
-    setTestTopology(
-        reversed_config,
-        {makeTestGroupForConfig(reversed_config, makeTestMhaSpec("full_b", 8), {0}, CacheGroupType::FULL, "full_b"),
-         makeTestGroupForConfig(reversed_config, makeTestMhaSpec("full_a", 8), {0}, CacheGroupType::FULL, "full_a")});
+    setTestTopology(reversed_config,
+                    {makeTestGroupForConfig(makeTestMhaSpec("full_b", 8), {0}, CacheGroupType::FULL, "full_b"),
+                     makeTestGroupForConfig(makeTestMhaSpec("full_a", 8), {0}, CacheGroupType::FULL, "full_a")});
     auto reversed_allocator = std::make_shared<FakeKVCacheAllocator>(
         reversed_config, std::vector<std::string>{"full_a", "full_b"}, std::vector<std::string>{}, 1);
     auto reversed_policy = std::make_shared<FullLayerGroupPolicy>(
@@ -493,8 +485,7 @@ TEST(RemoteConnectorBlockBufferValidationTest, RejectsAllocatorBufferSizeThatDoe
     CacheConfig config;
     config.layer_num     = 1;
     config.layer_all_num = 1;
-    setTestTopology(config,
-                    {makeTestGroupForConfig(config, makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full")});
+    setTestTopology(config, {makeTestGroupForConfig(makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full")});
 
     auto allocator =
         std::make_shared<FakeKVCacheAllocator>(config, std::vector<std::string>{"full"}, std::vector<std::string>{}, 1);
@@ -512,8 +503,7 @@ TEST(RemoteConnectorBlockBufferValidationTest, RejectsMisalignedOrInvalidTagsWit
     CacheConfig config;
     config.layer_num     = 1;
     config.layer_all_num = 1;
-    setTestTopology(config,
-                    {makeTestGroupForConfig(config, makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full")});
+    setTestTopology(config, {makeTestGroupForConfig(makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full")});
 
     auto allocator =
         std::make_shared<FakeKVCacheAllocator>(config, std::vector<std::string>{"full"}, std::vector<std::string>{}, 1);

@@ -73,7 +73,7 @@ public:
                     layer_ids.push_back(next_layer_id++);
                 }
                 groups.push_back(rtp_llm::test::makeTestGroupForConfig(
-                    fake_config, makeFakeSpec(tag), std::move(layer_ids), CacheGroupType::FULL, tag));
+                    makeFakeSpec(tag), std::move(layer_ids), CacheGroupType::FULL, tag));
             };
             for (const auto& tag : full_group_tags) {
                 append_group(tag);
@@ -100,6 +100,9 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
         return {};
+    }
+    BlockPoolPtr blockPool(std::string_view) const override {
+        return nullptr;
     }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
         RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
@@ -137,9 +140,9 @@ public:
         return 0;
     }
 
-    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                    const CacheKeysType&   cache_keys,
-                                                    bool                   is_connector = false) override {
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&  kvcache_resource,
+                                                    const CacheKeysByGroup& cache_keys,
+                                                    bool                    is_connector = false) override {
         return nullptr;
     }
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {
@@ -330,6 +333,13 @@ private:
         for (const auto& [tag, blocks] : blocks_by_group) {
             resource.mutableBlockIds(tag).assign(blocks);
         }
+        CacheKeysType keys;
+        const auto    key_count = blocks_by_group.begin()->second.size();
+        keys.reserve(key_count);
+        for (size_t i = 0; i < key_count; ++i) {
+            keys.push_back(static_cast<CacheKeyType>(i));
+        }
+        resource.cacheKeys(group_policy_->wireKeyTag()) = std::move(keys);
     }
 
     kv_cache_manager::Locations genFullLinearLocations(size_t                          tp_size,
@@ -430,113 +440,102 @@ private:
 
     void test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_2() {
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(false);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), false);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3, 4};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, 7, 21}}, {"2", {8, 9, 10, 11, 22}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {-1, -1, -1, 7}}, {"2", {-1, -1, -1, 11}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, -1, 6, 7}}, {"2", {8, -1, 10, 11}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, -1}}, {"2", {8, 9, 10, -1}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0L1L2", "F0"};
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3, 4};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource,
                               {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, -1, 7, 21}}, {"2", {8, 9, -1, 11, 22}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0L1L2", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3, 4};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource,
                               {{"0", {0, 1, 2, 3, 20}}, {"1", {4, -1, -1, 7, 21}}, {"2", {8, -1, -1, 11, 22}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {  // exist empty block
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {-1, 5, -1, 7}}, {"2", {-1, 9, -1, 11}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {  // edge case
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0}}, {"1", {1}}, {"2", {2}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {};  // all full linear
             ASSERT_EQ(expected, real);
         }
         {  // edge case
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0}}, {"1", {-1}}, {"2", {-1}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0"};
             ASSERT_EQ(expected, real);
@@ -545,32 +544,29 @@ private:
 
     void test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_1() {
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {};
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3, 4};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource,
                               {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, -1, 21}}, {"2", {8, 9, 10, -1, 22}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0L1L2", "F0L1L2", "F0L1L2", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0}}, {"1", {4}}, {"2", {8}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {};
             ASSERT_EQ(expected, real);
@@ -579,51 +575,46 @@ private:
 
     void test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_0() {
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3, 4};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, 7, 21}}, {"2", {8, 9, 10, 11, 22}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0", "F0", "F0", "F0L1L2"};
             ASSERT_EQ(expected, real);
         }
         {
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0, 1, 2, 3};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, -1}}, {"2", {8, 9, 10, -1}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0", "F0", "F0L1L2", "F0"};
             ASSERT_EQ(expected, real);
         }
         {  // edge case
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0}}, {"1", {4}}, {"2", {8}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {};
             ASSERT_EQ(expected, real);
         }
         {  // edge case
-            auto resource        = std::make_shared<KVCacheResource>();
-            resource->cache_keys = {0};
+            auto resource = std::make_shared<KVCacheResource>();
             setResourceBlocks(*resource, {{"0", {0}}, {"1", {-1}}, {"2", {-1}}});
             std::vector<std::string> real;
-            resource->setLastBlockAligned(true);
+            resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
             std::vector<std::string> expected = {"F0"};
             ASSERT_EQ(expected, real);
@@ -762,10 +753,9 @@ TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_success_for_multiple_full
     EXPECT_EQ(group_policy_->location_spec_group_map_,
               (std::unordered_map<uint64_t, std::string>{{0b01, "F0"}, {0b10, "F1"}, {0b11, "F0F1"}}));
 
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {0, 1};
+    auto resource = std::make_shared<KVCacheResource>();
     setResourceBlocks(*resource, {{"0", {10, 11}}, {"1", {20, NULL_BLOCK_IDX}}});
-    resource->setLastBlockAligned(true);
+    resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
 
     std::vector<std::string> need_write_groups;
     ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, need_write_groups));
@@ -999,24 +989,21 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
                     linear_group_tags,
                     linear_attention_write_interval);
     {  // incomplete block
-        auto resource        = std::make_shared<KVCacheResource>();
-        resource->cache_keys = {0, 1, 2, 3, 4};
+        auto resource = std::make_shared<KVCacheResource>();
         setResourceBlocks(*resource, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, -1, 6, 7, -1}}, {"2", {8, 9, 10, 11, -1}}});
         std::vector<std::string> real;
-        resource->setLastBlockAligned(true);
+        resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
     {  // invalid group size
-        auto resource        = std::make_shared<KVCacheResource>();
-        resource->cache_keys = {0, 1, 2, 3, 4};
+        auto resource = std::make_shared<KVCacheResource>();
         setResourceBlocks(*resource, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, 7, 21}}});
         std::vector<std::string> real;
-        resource->setLastBlockAligned(true);
+        resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
     {  // invalid group size
-        auto resource        = std::make_shared<KVCacheResource>();
-        resource->cache_keys = {0, 1, 2, 3, 4};
+        auto resource = std::make_shared<KVCacheResource>();
         EXPECT_ANY_THROW(setResourceBlocks(*resource,
                                            {{"0", {0, 1, 2, 3, 20}},
                                             {"1", {4, 5, 6, 7, 21}},
@@ -1059,11 +1046,10 @@ TEST_F(GroupPolicyTest, test_FullLayerGroupPolicy_filterNeedWriteGroups_success)
                     other_group_tags,
                     linear_attention_write_interval);
     {
-        auto resource        = std::make_shared<KVCacheResource>();
-        resource->cache_keys = {0, 1, 2, 3};
+        auto resource = std::make_shared<KVCacheResource>();
         setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}});
         std::vector<std::string> real;
-        resource->setLastBlockAligned(true);
+        resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
         std::vector<std::string> expected = {};
         ASSERT_EQ(expected, real);
@@ -1082,32 +1068,29 @@ TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_succe
                     other_group_tags,
                     linear_attention_write_interval);
     {
-        auto resource        = std::make_shared<KVCacheResource>();
-        resource->cache_keys = {0, 1, 2, 3};
+        auto resource = std::make_shared<KVCacheResource>();
         setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
         std::vector<std::string> real;
-        resource->setLastBlockAligned(true);
+        resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
         std::vector<std::string> expected = {"F0G1G2", "F0G1G2", "F0G1G2", "F0G1G2"};
         ASSERT_EQ(expected, real);
     }
     {
-        auto resource        = std::make_shared<KVCacheResource>();
-        resource->cache_keys = {0, 1, 2, 3};
+        auto resource = std::make_shared<KVCacheResource>();
         setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
         std::vector<std::string> real;
-        resource->setLastBlockAligned(false);
+        resource->setLastBlockAligned(group_policy_->wireKeyTag(), false);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
         std::vector<std::string> expected = {"F0G1G2", "F0G1G2", "F0G1G2"};
         ASSERT_EQ(expected, real);
     }
     {
-        auto resource        = std::make_shared<KVCacheResource>();
-        resource->cache_keys = {0, 1, 2, 3, 4, 5};
+        auto resource = std::make_shared<KVCacheResource>();
         setResourceBlocks(*resource,
                           {{"0", {0, 1, 2, 3, 20, -1}}, {"1", {4, -1, 6, 7, -1, 21}}, {"2", {8, 9, -1, 11, -1, 22}}});
         std::vector<std::string> real;
-        resource->setLastBlockAligned(true);
+        resource->setLastBlockAligned(group_policy_->wireKeyTag(), true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
         std::vector<std::string> expected = {"F0G1G2", "F0G2", "F0G1", "F0G1G2", "F0", "G1G2"};
         ASSERT_EQ(expected, real);

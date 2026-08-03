@@ -76,7 +76,7 @@ public:
         // read-only, so reproduce that input-building step in the test wrapper.
         inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
-        refreshTaggedAttentionInputs(inputs);
+        refreshGroupedAttentionInputs(inputs);
         return runner_->forward(inputs, state_);
     }
 

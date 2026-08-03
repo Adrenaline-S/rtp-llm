@@ -5,7 +5,9 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
@@ -126,8 +128,16 @@ public:
     }
 
     // Increment KV cache reference count for PD separation (connector refcount)
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&  resource,
+                                                    const CacheKeysByGroup& cache_keys_by_group,
+                                                    bool                    is_connector = true);
     std::shared_ptr<KVCacheResource>
-    incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
+    incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true) {
+        RTP_LLM_CHECK_WITH_INFO(resource.groupResources().size() == 1,
+                                "legacy cache reference requires exactly one tagged group, got %zu",
+                                resource.groupResources().size());
+        return incrKVCacheRef(resource, {{resource.groupResources().front().tag, cache_keys}}, is_connector);
+    }
 
     // CP page-level RR sharding context. Returns nullptr when sharding is not active
     // (single-rank or kv_cache_sharded=false).  Used by connector / cache_store to

@@ -586,15 +586,16 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
 void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&         resource,
                                      const std::shared_ptr<Meta>&                    meta,
                                      const std::shared_ptr<RemoteAsyncMatchContext>& async_context) {
+    const auto& wire_key_tag = group_policy_->wireKeyTag();
     RTP_LLM_LOG_DEBUG(
         "asyncMatchTask, deviceReuseBlockNum[%d], memoryReuseBlockNum[%d],  remoteReuseBlockNum[%d], cacheKeysSize[%zu]",
         resource->deviceReuseBlockNum(),
         resource->memoryReuseBlockNum(),
         resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
+        resource->cacheKeys(wire_key_tag).size());
 
     // do not match last block, whether last block aligned or not
-    auto keys = resource->cacheKeys();
+    auto keys = resource->cacheKeys(wire_key_tag);
 
     if (!keys.empty()) {
         keys.pop_back();
@@ -627,12 +628,13 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
                                     int                                                 reuse_size,
                                     const std::shared_ptr<RemoteConnectorAsyncContext>& async_context,
                                     const std::shared_ptr<RemoteAsyncMatchContext>&     match_context) {
+    const auto& wire_key_tag = group_policy_->wireKeyTag();
     RTP_LLM_LOG_DEBUG(
         "asyncReadTask, deviceReuseBlockNum[%d], memoryReuseBlockNum[%d], remoteReuseBlockNum[%d], cacheKeysSize[%zu]",
         resource->deviceReuseBlockNum(),
         resource->memoryReuseBlockNum(),
         resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
+        resource->cacheKeys(wire_key_tag).size());
     const std::string& match_trace_id = match_context->trace_id();
     RTP_LLM_LOG_DEBUG("start_block_index:[%d], reuse_size:[%d]", start_block_index, reuse_size);
     assert(start_block_index >= match_context->prev_reuse_blocks_num());
@@ -677,14 +679,15 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
 void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
                                      const std::shared_ptr<Meta>&                        meta,
                                      const std::shared_ptr<RemoteConnectorAsyncContext>& async_context) {
+    const auto& wire_key_tag = group_policy_->wireKeyTag();
     RTP_LLM_LOG_DEBUG(
         "asyncWriteTask, deviceReuseBlockNum[%d], memoryReuseBlockNum[%d],  remoteReuseBlockNum[%d], cacheKeysSize[%zu]",
         resource->deviceReuseBlockNum(),
         resource->memoryReuseBlockNum(),
         resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
-    auto keys = resource->cacheKeys();
-    if (!keys.empty() && !resource->lastBlockAligned()) {
+        resource->cacheKeys(wire_key_tag).size());
+    auto keys = resource->cacheKeys(wire_key_tag);
+    if (!keys.empty() && !resource->lastBlockAligned(wire_key_tag)) {
         keys.pop_back();
     }
     WriteMetricsHelper          helper(meta->trace_id(), metrics_reporter_);

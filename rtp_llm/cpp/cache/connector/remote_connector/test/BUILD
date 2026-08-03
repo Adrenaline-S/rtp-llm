@@ -16,10 +16,6 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
-test_copts = [
-    "-fno-access-control",
-] + copts()
-
 cc_test(
     name = "group_policy_test",
     srcs = [
@@ -43,19 +39,6 @@ cc_test(
     # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
-    ],
-)
-
-cc_test(
-    name = "remote_connector_mock_full_linear_test",
-    srcs = [
-        "RemoteConnectorMockFullLinearTest.cc",
-    ],
-    copts = test_copts,
-    exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
-    deps = test_deps + [
-        ":remote_connector_mock_base",
     ],
 )
 

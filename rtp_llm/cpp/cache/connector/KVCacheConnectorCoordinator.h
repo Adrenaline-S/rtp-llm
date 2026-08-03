@@ -67,12 +67,10 @@ private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();
     bool                                    initP2PConnectorInternal();
-    // Returns CP size when page-level RR sharding is active; 1 otherwise.
-    int  cpSize() const;
-    void initUpdateThread();
-    void updateOnce();
-    void processReadContexts();
-    void processWriteContexts();
+    void                                    initUpdateThread();
+    void                                    updateOnce();
+    void                                    processReadContexts();
+    void                                    processWriteContexts();
     void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
 
     bool isPdInvertMode() const;

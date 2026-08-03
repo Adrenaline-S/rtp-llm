@@ -10,16 +10,16 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
     topology_ = std::move(topology);
 
-    group_block_ids_.clear();
-    group_block_ids_.reserve(topology_->groups().size());
+    group_resources_.clear();
+    group_resources_.reserve(topology_->groups().size());
     group_offset_by_tag_.clear();
     group_offset_by_tag_.reserve(topology_->groups().size());
     for (const auto& group : topology_->groups()) {
         const size_t blocks_per_kv_block = group.seq_size_per_block / group.kernel_seq_size_per_block;
         const size_t stored_blocks_per_kv_block =
             group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
-        const size_t offset = group_block_ids_.size();
-        group_block_ids_.push_back({group.tag, std::make_shared<BlockIds>(stored_blocks_per_kv_block)});
+        const size_t offset = group_resources_.size();
+        group_resources_.push_back({group.tag, std::make_shared<BlockIds>(stored_blocks_per_kv_block)});
         RTP_LLM_CHECK_WITH_INFO(group_offset_by_tag_.emplace(group.tag, offset).second,
                                 "KVCacheResource has duplicate tag=%s",
                                 group.tag.c_str());
@@ -144,7 +144,7 @@ void BlockIds::syncKernelBlocks() {
 }
 
 void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
-    for (auto& group : group_block_ids_) {
+    for (auto& group : group_resources_) {
         group.block_ids->resize(reserver_blocks, value);
     }
 }
@@ -170,7 +170,7 @@ const BlockIndicesType& KVCacheResource::kernelBlocksForLayer(int layer_id, std:
 }
 
 BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
-    return *group_block_ids_[groupOffset(tag)].block_ids;
+    return *group_resources_[groupOffset(tag)].block_ids;
 }
 
 BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) const {
@@ -206,73 +206,133 @@ int KVCacheResource::layerNum() const {
 }
 
 int KVCacheResource::groupNums() const {
-    return static_cast<int>(group_block_ids_.size());
+    return static_cast<int>(group_resources_.size());
 }
 
-const std::vector<TaggedBlockIds>& KVCacheResource::groupBlocks() const {
-    return group_block_ids_;
+const GroupBase& KVCacheResource::groupSpec(std::string_view tag) const {
+    RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "KVCacheResource groups are not initialized");
+    return topology_->group(tag);
+}
+
+size_t KVCacheResource::physicalBlockSpan(std::string_view tag) const {
+    return groupSpec(tag).seq_size_per_block;
+}
+
+const std::vector<KVCacheGroupResource>& KVCacheResource::groupResources() const {
+    return group_resources_;
+}
+
+KVCacheGroupResource& KVCacheResource::groupResource(std::string_view tag) {
+    return group_resources_[groupOffset(tag)];
+}
+
+const KVCacheGroupResource& KVCacheResource::groupResource(std::string_view tag) const {
+    return group_resources_[groupOffset(tag)];
+}
+
+const std::string& KVCacheResource::strictSingleGroupTag() const {
+    RTP_LLM_CHECK_WITH_INFO(group_resources_.size() == 1,
+                            "legacy cache resource adapter requires exactly one tagged group, got %zu",
+                            group_resources_.size());
+    return group_resources_.front().tag;
+}
+
+CacheKeysType& KVCacheResource::cacheKeys(std::string_view tag) {
+    return groupResource(tag).cache_keys;
+}
+
+const CacheKeysType& KVCacheResource::cacheKeys(std::string_view tag) const {
+    return groupResource(tag).cache_keys;
 }
 
 CacheKeysType& KVCacheResource::cacheKeys() {
-    return cache_keys;
+    return cacheKeys(strictSingleGroupTag());
 }
 
 const CacheKeysType& KVCacheResource::cacheKeys() const {
-    return cache_keys;
+    return cacheKeys(strictSingleGroupTag());
+}
+
+void KVCacheResource::setCacheKeys(std::string_view tag, const CacheKeysType& keys) {
+    auto& resource                       = groupResource(tag);
+    resource.cache_keys                  = keys;
+    resource.cache_keys_are_cp_canonical = false;
+    rebuildLinearBlockDependencies(tag);
+}
+
+void KVCacheResource::setCacheKeys(std::string_view tag, CacheKeysType&& keys) {
+    auto& resource                       = groupResource(tag);
+    resource.cache_keys                  = std::move(keys);
+    resource.cache_keys_are_cp_canonical = false;
+    rebuildLinearBlockDependencies(tag);
 }
 
 void KVCacheResource::setCacheKeys(const CacheKeysType& keys) {
-    cache_keys                   = keys;
-    cache_keys_are_cp_canonical_ = false;
-    rebuildLinearBlockDependencies();
+    setCacheKeys(strictSingleGroupTag(), keys);
 }
 
 void KVCacheResource::setCacheKeys(CacheKeysType&& keys) {
-    cache_keys                   = std::move(keys);
-    cache_keys_are_cp_canonical_ = false;
-    rebuildLinearBlockDependencies();
+    setCacheKeys(strictSingleGroupTag(), std::move(keys));
 }
 
-bool KVCacheResource::cacheKeysAreCpCanonical() const {
-    return cache_keys_are_cp_canonical_;
+bool KVCacheResource::cacheKeysAreCpCanonical(std::string_view tag) const {
+    return groupResource(tag).cache_keys_are_cp_canonical;
 }
 
-void KVCacheResource::setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical) {
-    cache_keys_are_cp_canonical_ = cache_keys_are_cp_canonical;
+void KVCacheResource::setCacheKeysAreCpCanonical(std::string_view tag, bool value) {
+    groupResource(tag).cache_keys_are_cp_canonical = value;
+}
+
+BlockDependenciesType& KVCacheResource::blockDependencies(std::string_view tag) {
+    return groupResource(tag).block_dependencies;
+}
+
+const BlockDependenciesType& KVCacheResource::blockDependencies(std::string_view tag) const {
+    return groupResource(tag).block_dependencies;
 }
 
 BlockDependenciesType& KVCacheResource::blockDependencies() {
-    return block_dependencies;
+    return blockDependencies(strictSingleGroupTag());
 }
 
 const BlockDependenciesType& KVCacheResource::blockDependencies() const {
-    return block_dependencies;
+    return blockDependencies(strictSingleGroupTag());
 }
 
-void KVCacheResource::setBlockDependencies(const BlockDependenciesType& dependencies) {
-    block_dependencies = dependencies;
+void KVCacheResource::setBlockDependencies(std::string_view tag, const BlockDependenciesType& dependencies) {
+    groupResource(tag).block_dependencies = dependencies;
 }
 
-void KVCacheResource::setBlockDependencies(BlockDependenciesType&& dependencies) {
-    block_dependencies = std::move(dependencies);
+void KVCacheResource::setBlockDependencies(std::string_view tag, BlockDependenciesType&& dependencies) {
+    groupResource(tag).block_dependencies = std::move(dependencies);
 }
 
-void KVCacheResource::rebuildLinearBlockDependencies() {
-    block_dependencies.clear();
-    block_dependencies.reserve(cache_keys.size());
-    for (size_t i = 0; i < cache_keys.size(); ++i) {
+void KVCacheResource::rebuildLinearBlockDependencies(std::string_view tag) {
+    auto& resource = groupResource(tag);
+    RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "KVCacheResource groups are not initialized");
+    resource.block_dependencies.clear();
+    resource.block_dependencies.reserve(resource.cache_keys.size());
+    for (size_t i = 0; i < resource.cache_keys.size(); ++i) {
         BlockDependency dependency;
         dependency.ordinal = static_cast<uint32_t>(i);
         if (i > 0) {
             dependency.has_parent = true;
-            dependency.parent_key = cache_keys[i - 1];
+            dependency.parent_key = resource.cache_keys[i - 1];
         }
-        block_dependencies.push_back(dependency);
+        resource.block_dependencies.push_back(dependency);
     }
 }
 
-void KVCacheResource::ensureLinearBlockDependencies() {
-    rebuildLinearBlockDependencies();
+void KVCacheResource::rebuildLinearBlockDependencies() {
+    rebuildLinearBlockDependencies(strictSingleGroupTag());
+}
+
+void KVCacheResource::ensureLinearBlockDependencies(std::string_view tag) {
+    const auto& resource = groupResource(tag);
+    if (resource.block_dependencies.size() == resource.cache_keys.size()) {
+        return;
+    }
+    rebuildLinearBlockDependencies(tag);
 }
 
 size_t KVCacheResource::reuseBlockNum() const {
@@ -283,37 +343,45 @@ size_t KVCacheResource::deviceReuseBlockNum() const {
     return device_reuse_block_num_;
 }
 
-void KVCacheResource::setDeviceReuseBlockNum(size_t device_reuse_blocks_num) {
-    device_reuse_block_num_ = device_reuse_blocks_num;
-}
-
 size_t KVCacheResource::memoryReuseBlockNum() const {
     return memory_reuse_block_num_;
-}
-
-void KVCacheResource::setMemoryReuseBlockNum(size_t memory_reuse_blocks_num) {
-    memory_reuse_block_num_ = memory_reuse_blocks_num;
 }
 
 size_t KVCacheResource::remoteReuseBlockNum() const {
     return remote_reuse_block_num_;
 }
 
-void KVCacheResource::setRemoteReuseBlockNum(size_t remote_reuse_blocks_num) {
-    remote_reuse_block_num_ = remote_reuse_blocks_num;
+void KVCacheResource::setDeviceReuseBlockNum(size_t blocks) {
+    device_reuse_block_num_ = blocks;
+}
+
+void KVCacheResource::setMemoryReuseBlockNum(size_t blocks) {
+    memory_reuse_block_num_ = blocks;
+}
+
+void KVCacheResource::setRemoteReuseBlockNum(size_t blocks) {
+    remote_reuse_block_num_ = blocks;
+}
+
+bool KVCacheResource::lastBlockAligned(std::string_view tag) const {
+    return groupResource(tag).last_block_aligned;
+}
+
+void KVCacheResource::setLastBlockAligned(std::string_view tag, bool value) {
+    groupResource(tag).last_block_aligned = value;
 }
 
 bool KVCacheResource::lastBlockAligned() const {
-    return last_block_aligned_;
+    return lastBlockAligned(strictSingleGroupTag());
 }
 
-void KVCacheResource::setLastBlockAligned(bool last_block_aligned) {
-    last_block_aligned_ = last_block_aligned;
+void KVCacheResource::setLastBlockAligned(bool value) {
+    setLastBlockAligned(strictSingleGroupTag(), value);
 }
 
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
-    for (const auto& group : group_block_ids_) {
+    for (const auto& group : group_resources_) {
         debug_string << "group:[" << group.tag << "], block:[";
         const auto& block_indices = group.block_ids->blocks();
         for (auto& block : block_indices) {

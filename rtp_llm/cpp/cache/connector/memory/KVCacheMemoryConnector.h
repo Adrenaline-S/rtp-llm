@@ -190,6 +190,11 @@ private:
     LayerBlockIds             resourceLayerBlocks(const KVCacheResource& resource) const;
     LayerAttnBlockIds         resourceLayerRegionBlocks(const KVCacheResource&             resource,
                                                         const std::vector<LayerGroupSlot>& slots) const;
+    LayerAttnBlockIds         resourceLegacyFlatLayerRegionBlocks(const KVCacheResource&                  resource,
+                                                                  const std::vector<LayerGroupSlot>&      slots,
+                                                                  std::string_view                        wire_tag,
+                                                                  size_t                                  required_len,
+                                                                  std::vector<std::unique_ptr<BlockIds>>& owned_blocks) const;
     bool                      checkLayerRegionBlocks(const LayerAttnBlockIds&           layer_attn_block_ids,
                                                      const std::vector<LayerGroupSlot>& slots,
                                                      size_t                             required_len) const;

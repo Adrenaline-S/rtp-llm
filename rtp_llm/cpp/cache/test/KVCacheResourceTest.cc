@@ -182,37 +182,38 @@ TEST(PrefillCPConfigTest, ToStringIncludesShardingFields) {
 
 TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
     KVCacheResource resource;
-    resource.setCacheKeys(CacheKeysType{10, 20, 30});
+    resource.initGroups(makeTestCacheTopology(/*group_num=*/1, /*layer_num=*/1, /*layer_group_ids=*/{{0}}));
+    resource.setCacheKeys("group0", CacheKeysType{10, 20, 30});
 
-    ASSERT_EQ(resource.blockDependencies().size(), 3u);
-    EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
-    EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[1].parent_key, 10);
-    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 1u);
-    EXPECT_TRUE(resource.blockDependencies()[2].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[2].parent_key, 20);
-    EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
+    ASSERT_EQ(resource.blockDependencies("group0").size(), 3u);
+    EXPECT_FALSE(resource.blockDependencies("group0")[0].has_parent);
+    EXPECT_EQ(resource.blockDependencies("group0")[0].ordinal, 0u);
+    EXPECT_TRUE(resource.blockDependencies("group0")[1].has_parent);
+    EXPECT_EQ(resource.blockDependencies("group0")[1].parent_key, 10);
+    EXPECT_EQ(resource.blockDependencies("group0")[1].ordinal, 1u);
+    EXPECT_TRUE(resource.blockDependencies("group0")[2].has_parent);
+    EXPECT_EQ(resource.blockDependencies("group0")[2].parent_key, 20);
+    EXPECT_EQ(resource.blockDependencies("group0")[2].ordinal, 2u);
 
     BlockDependenciesType custom = {
         BlockDependency{false, 0, 7},
         BlockDependency{true, 100, 8},
     };
-    resource.setCacheKeys(CacheKeysType{100, 200});
-    resource.setBlockDependencies(custom);
-    resource.ensureLinearBlockDependencies();
-    ASSERT_EQ(resource.blockDependencies().size(), 2u);
-    EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
-    EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[1].parent_key, 100);
-    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 1u);
+    resource.setCacheKeys("group0", CacheKeysType{100, 200});
+    resource.setBlockDependencies("group0", custom);
+    resource.ensureLinearBlockDependencies("group0");
+    ASSERT_EQ(resource.blockDependencies("group0").size(), 2u);
+    EXPECT_FALSE(resource.blockDependencies("group0")[0].has_parent);
+    EXPECT_EQ(resource.blockDependencies("group0")[0].ordinal, 7u);
+    EXPECT_TRUE(resource.blockDependencies("group0")[1].has_parent);
+    EXPECT_EQ(resource.blockDependencies("group0")[1].parent_key, 100);
+    EXPECT_EQ(resource.blockDependencies("group0")[1].ordinal, 8u);
 
-    resource.cacheKeys().push_back(300);
-    resource.ensureLinearBlockDependencies();
-    ASSERT_EQ(resource.blockDependencies().size(), 3u);
-    EXPECT_EQ(resource.blockDependencies()[2].parent_key, 200);
-    EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
+    resource.cacheKeys("group0").push_back(300);
+    resource.ensureLinearBlockDependencies("group0");
+    ASSERT_EQ(resource.blockDependencies("group0").size(), 3u);
+    EXPECT_EQ(resource.blockDependencies("group0")[2].parent_key, 200);
+    EXPECT_EQ(resource.blockDependencies("group0")[2].ordinal, 2u);
 }
 
 TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
@@ -250,19 +251,19 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     ASSERT_EQ(all_g0.size(), 2u);
     ASSERT_EQ(all_g0[0], (BlockIndicesType{1, 2}));
 
-    batch.pushBackCacheKey(0, 100);
-    batch.pushBackCacheKey(1, 200);
-    ASSERT_TRUE(batch.hasCacheKeys());
+    batch.pushBackCacheKey(0, "group0", 100);
+    batch.pushBackCacheKey(1, "group0", 200);
+    ASSERT_TRUE(batch.hasCacheKeys("group0"));
 
-    batch.popBackAllBatchCacheKeys();
-    ASSERT_EQ(batch.cacheKeys(0).size(), 0u);
-    ASSERT_EQ(batch.cacheKeys(1).size(), 0u);
-    ASSERT_FALSE(batch.hasCacheKeys());
+    batch.popBackAllBatchCacheKeys("group0");
+    ASSERT_EQ(batch.cacheKeys(0, "group0").size(), 0u);
+    ASSERT_EQ(batch.cacheKeys(1, "group0").size(), 0u);
+    ASSERT_FALSE(batch.hasCacheKeys("group0"));
 
-    batch.setLastBlockAligned(true);
-    ASSERT_TRUE(batch.lastBlockAligned());
-    batch.cacheResource(1).setLastBlockAligned(false);
-    ASSERT_FALSE(batch.lastBlockAligned());
+    batch.setLastBlockAligned("group0", true);
+    ASSERT_TRUE(batch.lastBlockAligned("group0"));
+    batch.cacheResource(1).setLastBlockAligned("group0", false);
+    ASSERT_FALSE(batch.lastBlockAligned("group0"));
 
     std::vector<KVCacheResource> old_resources;
     batch.resetAndReturnOldResources(/*new_batch_size=*/1, old_resources);
