@@ -28,12 +28,10 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
         spec->tag                      = kWarmupCacheTag;
 
         GroupBase group;
-        group.tag                       = kWarmupCacheTag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
+        group.tag       = kWarmupCacheTag;
+        group.spec      = std::move(spec);
+        group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.layer_ids = {0};
 
         return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
     }();
@@ -214,12 +212,12 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
         auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
         sp_output_buffer->propose_step = payload->propose_tokens.size() > 0 ? payload->propose_tokens.size() - 1 : 0;
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
+        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
         memcpy(sp_output_buffer->tokens.data_ptr<int>(),
                payload->propose_tokens.data(),
                payload->propose_tokens.size() * sizeof(int));
 
-        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        const auto cuda_i32                  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
         sp_output_buffer->propose_tokens_gpu = sp_output_buffer->tokens.to(cuda_i32, /*non_blocking=*/true);
         if (tensorPbHasPayload(payload->propose_probs)) {
             sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(torch::kCUDA);
@@ -233,10 +231,9 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         if (payload->propose_tokens.size() >= 2) {
             auto propose_tokens_gpu = sp_output_buffer->tokens.narrow(1, 1, 1).to(cuda_i32, /*non_blocking=*/true);
             auto accept_len         = torch::ones({1}, cuda_i32);
-            auto accept_tokens =
-                torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
-            accept_tokens[0][0] = sp_output_buffer->tokens[0][0];
-            auto next_seq_len   = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
+            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
+            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+            auto next_seq_len       = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
 
             stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
                 .epoch                  = 0,

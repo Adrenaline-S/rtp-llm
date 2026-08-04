@@ -34,8 +34,8 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device =
             inputs.attention_inputs.kv_cache_kernel_block_id_device;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id = inputs.attention_inputs.kv_cache_kernel_block_id;
-        py_model_inputs_.attention_inputs.kv_cache_block_id_device = inputs.attention_inputs.kv_cache_block_id_device;
-        py_model_inputs_.attention_inputs.kv_cache_block_id        = inputs.attention_inputs.kv_cache_block_id;
+        py_model_inputs_.attention_inputs.kv_cache_block_id_device = torch::Tensor();
+        py_model_inputs_.attention_inputs.kv_cache_block_id        = torch::Tensor();
         py_model_inputs_.attention_inputs_by_tag                   = inputs.attention_inputs_by_tag;
         py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.attention_inputs.prefix_lengths_device    = inputs.attention_inputs.prefix_lengths_device;

@@ -36,14 +36,17 @@ public:
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_group_tags_(graph_params.kv_cache_group_tags),
+        kv_cache_kernel_block_table_capacities_(graph_params.kv_cache_kernel_block_table_capacities),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (kernel_seq_size_per_block_ <= 0) {
-            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
+        for (const auto& [tag, capacity] : kv_cache_kernel_block_table_capacities_) {
+            RTP_LLM_CHECK_WITH_INFO(capacity > 0,
+                                    "CUDA graph kernel block-table capacity must be positive for tag=%s, got %ld",
+                                    tag.c_str(),
+                                    capacity);
         }
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
@@ -165,9 +168,9 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string>      kv_cache_group_tags_;
-    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
-    mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
+    std::map<std::string, int64_t> kv_cache_kernel_block_table_capacities_;
+    int                            position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    mutable std::atomic<uint64_t>  combo_position_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

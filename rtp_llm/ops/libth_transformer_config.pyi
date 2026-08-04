@@ -975,7 +975,6 @@ class CacheTailPolicyDesc:
 class CacheCpPolicyDesc:
     mapping: typing.Any
     slice: typing.Any
-    scale_seq_size: typing.Any
     align_payload: typing.Any
     prefill_slice_layout: typing.Any
     def __init__(self) -> None: ...
@@ -985,6 +984,7 @@ class KVCacheSpecDesc:
     cache_type: KVCacheSpecType
     dtype: DataType
     is_state_cache: bool
+    kernel_seq_size_per_block: typing.Optional[int]
     entry_elems: int
     entry_dtype: DataType
     entry_count_mode: OpaqueBlockEntryCountMode
