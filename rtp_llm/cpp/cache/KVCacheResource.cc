@@ -19,10 +19,16 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
         const auto& group = groups[group_id];
         tag_to_group_id_.emplace(group.tag, static_cast<int>(group_id));
 
-        const size_t blocks_per_kv_block = group.seq_size_per_block / group.kernel_seq_size_per_block;
-        const size_t stored_blocks_per_kv_block =
-            group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
-        group_block_ids.push_back(std::make_shared<BlockIds>(stored_blocks_per_kv_block));
+        const size_t physical_seq_size = group.spec->seq_size_per_block;
+        const size_t kernel_seq_size   = group.spec->kernel_seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(kernel_seq_size > 0 && physical_seq_size >= kernel_seq_size
+                                    && physical_seq_size % kernel_seq_size == 0,
+                                "invalid block subdivision for tag=%s: physical=%zu kernel=%zu",
+                                group.tag.c_str(),
+                                physical_seq_size,
+                                kernel_seq_size);
+        const size_t blocks_per_kv_block = physical_seq_size / kernel_seq_size;
+        group_block_ids.push_back(std::make_shared<BlockIds>(blocks_per_kv_block));
     }
 
     const auto& layers = topology->layers();
