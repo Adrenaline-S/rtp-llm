@@ -35,15 +35,10 @@ void CacheTopology::validateAndBuildIndex() {
                                 "CacheTopology has duplicate tag=%s",
                                 group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
-            group.seq_size_per_block > 0, "CacheTopology tag=%s has zero seq_size_per_block", group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0,
+            group.spec->seq_size_per_block > 0, "CacheTopology tag=%s has zero seq_size_per_block", group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group.spec->kernel_seq_size_per_block > 0,
                                 "CacheTopology tag=%s has zero kernel_seq_size_per_block",
                                 group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
-                                "CacheTopology tag=%s seq_size_per_block=%zu is not divisible by kernel size=%zu",
-                                group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
 
         for (int layer_id : group.layer_ids) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers_.size(),
