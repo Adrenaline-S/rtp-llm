@@ -320,11 +320,13 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         // Cache-store metadata must describe the actual backing tensor on both
         // the prefill and decode side (including CP-local slicing).
         const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
-        for (const auto& group : topology.groups()) {
+        for (size_t gid = 0; gid < topology.groups().size(); ++gid) {
+            const auto& group = topology.groupById(gid);
             cache_store_inputs.kv_cache_group_policies.emplace(group.tag, group.policy);
-            cache_store_inputs.tokens_per_block_by_tag.emplace(
-                group.tag,
-                use_group_local_storage_layout ? group.seq_size_per_block : cache_store_inputs.tokens_per_block);
+            cache_store_inputs.tokens_per_block_by_tag.emplace(group.tag,
+                                                               use_group_local_storage_layout ?
+                                                                   cache_config.seqSizePerBlockForGroup(gid) :
+                                                                   cache_store_inputs.tokens_per_block);
             cache_store_inputs.kv_block_stride_bytes_by_tag.emplace(group.tag,
                                                                     use_group_local_storage_layout ?
                                                                         group.kv_block_stride_bytes :

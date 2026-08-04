@@ -7,7 +7,10 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.kv_cache_config import KVCacheConfig
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import (
+    ModelConfig,
+    resolve_kv_cache_kernel_seq_size_per_block,
+)
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
@@ -20,11 +23,11 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
+    KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,
@@ -214,6 +217,9 @@ class BaseModel(object):
             desc.cache_type = KVCacheSpecType.MHA
 
         desc.tag = "default"
+        desc.kernel_seq_size_per_block = resolve_kv_cache_kernel_seq_size_per_block(
+            model_config
+        )
         model_config.kv_cache_spec_descs = [
             [desc] for _ in range(model_config.num_layers)
         ]

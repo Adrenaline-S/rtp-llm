@@ -70,6 +70,17 @@ public:
         return runner_ != nullptr && runner_->canRun(inputs, state_);
     }
 
+    void clearTaggedPhysicalBlockTable(torch_ext::PyModelInputs& inputs, const std::string& tag, bool device) {
+        const auto it = inputs.attention_inputs_by_tag.find(tag);
+        RTP_LLM_CHECK_WITH_INFO(
+            it != inputs.attention_inputs_by_tag.end(), "missing tagged attention inputs for tag=%s", tag.c_str());
+        if (device) {
+            it->second.kv_cache_block_id_device = torch::Tensor();
+        } else {
+            it->second.kv_cache_block_id = torch::Tensor();
+        }
+    }
+
     torch_ext::PyModelOutputs forward(torch_ext::PyModelInputs& inputs) {
         // Production PyWrappedModel creates these device mirrors. Python tests
         // cannot assign them because the bindings intentionally expose them as
@@ -128,6 +139,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("is_target_verify")  = false,
              py::arg("num_tokens_per_bs") = 1)
         .def("canRun", &CudaGraphTestRunner::canRun)
+        .def("clearTaggedPhysicalBlockTable",
+             &CudaGraphTestRunner::clearTaggedPhysicalBlockTable,
+             py::arg("inputs"),
+             py::arg("tag"),
+             py::arg("device"))
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }
