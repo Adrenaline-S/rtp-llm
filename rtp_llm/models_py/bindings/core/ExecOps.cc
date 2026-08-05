@@ -183,22 +183,21 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const bool             use_group_cache_transfer_policy = param.kv_cache_group_policies.size() > 1;
 
     const auto seq_it = param.group_tokens_per_block.find(param.tag);
-    const auto seq_size_per_block =
-        seq_it != param.group_tokens_per_block.end() ? seq_it->second : param.tokens_per_block;
-    const auto kv_stride_it = param.group_kv_block_stride_bytes.find(param.tag);
-    const auto kv_block_stride_bytes =
-        kv_stride_it != param.group_kv_block_stride_bytes.end() ? kv_stride_it->second : param.kv_block_stride_bytes;
-    const auto scale_stride_it       = param.group_kv_scale_stride_bytes.find(param.tag);
-    const auto kv_scale_stride_bytes = scale_stride_it != param.group_kv_scale_stride_bytes.end() ?
-                                           scale_stride_it->second :
-                                           param.kv_scale_stride_bytes;
-    const auto kv_transfer_it        = param.group_kv_block_transfer_bytes.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(seq_it != param.group_tokens_per_block.end(),
+                            "cache-store tag=%s is missing group_tokens_per_block",
+                            param.tag.c_str());
+    const auto seq_size_per_block = seq_it->second;
+    const auto require_layout     = [&param](const auto& values, const char* field) -> size_t {
+        const auto it = values.find(param.tag);
+        RTP_LLM_CHECK_WITH_INFO(it != values.end(), "cache-store tag=%s is missing %s", param.tag.c_str(), field);
+        return it->second;
+    };
+    const auto kv_block_stride_bytes = require_layout(param.group_kv_block_stride_bytes, "group_kv_block_stride_bytes");
+    const auto kv_scale_stride_bytes = require_layout(param.group_kv_scale_stride_bytes, "group_kv_scale_stride_bytes");
     const auto kv_block_transfer_bytes =
-        kv_transfer_it != param.group_kv_block_transfer_bytes.end() ? kv_transfer_it->second : kv_block_stride_bytes;
-    const auto scale_transfer_it       = param.group_kv_scale_transfer_bytes.find(param.tag);
-    const auto kv_scale_transfer_bytes = scale_transfer_it != param.group_kv_scale_transfer_bytes.end() ?
-                                             scale_transfer_it->second :
-                                             kv_scale_stride_bytes;
+        require_layout(param.group_kv_block_transfer_bytes, "group_kv_block_transfer_bytes");
+    const auto kv_scale_transfer_bytes =
+        require_layout(param.group_kv_scale_transfer_bytes, "group_kv_scale_transfer_bytes");
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", param.tag.c_str());
     RTP_LLM_CHECK_WITH_INFO(
         kv_block_stride_bytes > 0, "cache-store tag=%s has zero kv block stride", param.tag.c_str());

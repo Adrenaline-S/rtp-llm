@@ -254,16 +254,13 @@ struct PyCacheStoreInputs {
     std::map<std::string, size_t> group_kv_block_transfer_bytes;
     std::map<std::string, size_t> group_kv_scale_transfer_bytes;
     std::vector<std::string>      cache_keys;  // [context_batch_size]
-    size_t                        tokens_per_block = 0;
-    // Physical KV-manager block strides, supplied by CacheConfig rather than inferred from tensor views.
-    size_t kv_block_stride_bytes     = 0;
-    size_t kv_scale_stride_bytes     = 0;
-    bool   pd_separation             = false;
-    size_t model_id                  = 0;
-    bool   decode_entrance           = false;
-    bool   warmup                    = false;
-    bool   use_opaque_kv_cache_store = false;
-    bool   mla_kvcache               = false;
+    size_t                        tokens_per_block          = 0;
+    bool                          pd_separation             = false;
+    size_t                        model_id                  = 0;
+    bool                          decode_entrance           = false;
+    bool                          warmup                    = false;
+    bool                          use_opaque_kv_cache_store = false;
+    bool                          mla_kvcache               = false;
 
     // Cache store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;

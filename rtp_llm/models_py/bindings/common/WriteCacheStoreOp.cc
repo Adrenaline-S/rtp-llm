@@ -38,10 +38,11 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_cache_store,
                 captured_kv_cache,
                 event = std::move(event)]() mutable {
-        const auto   tokens_it              = captured_cache_store.group_tokens_per_block.find(captured_kv_cache.tag);
-        const size_t store_tokens_per_block = tokens_it != captured_cache_store.group_tokens_per_block.end() ?
-                                                  tokens_it->second :
-                                                  captured_cache_store.tokens_per_block;
+        const auto tokens_it = captured_cache_store.group_tokens_per_block.find(captured_kv_cache.tag);
+        RTP_LLM_CHECK_WITH_INFO(tokens_it != captured_cache_store.group_tokens_per_block.end(),
+                                "cache-store tag=%s is missing group_tokens_per_block",
+                                captured_kv_cache.tag.c_str());
+        const size_t store_tokens_per_block = tokens_it->second;
         const size_t layer_tokens_per_block = static_cast<size_t>(captured_kv_cache.seq_size_per_block);
         RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
                                 "LayerKVCache.seq_size_per_block must be positive for tag=%s",
@@ -66,8 +67,6 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         inputs.request_pd_separation                         = captured_cache_store.request_pd_separation;
         inputs.cache_keys                                    = captured_cache_store.cache_keys;
         inputs.tokens_per_block                              = captured_cache_store.tokens_per_block;
-        inputs.kv_block_stride_bytes                         = captured_cache_store.kv_block_stride_bytes;
-        inputs.kv_scale_stride_bytes                         = captured_cache_store.kv_scale_stride_bytes;
         inputs.pd_separation                                 = captured_cache_store.pd_separation;
         inputs.model_id                                      = captured_cache_store.model_id;
         inputs.decode_entrance                               = captured_cache_store.decode_entrance;

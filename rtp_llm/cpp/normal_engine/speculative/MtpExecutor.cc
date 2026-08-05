@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -24,8 +25,23 @@
 
 namespace rtp_llm {
 
+static void validateCacheLayoutForForward(const GptModelInputs& model_input) {
+    for (const auto& [tag, table] : model_input.group_block_tables) {
+        (void)table;
+        const auto require_layout = [&tag](const auto& values, const char* field) {
+            RTP_LLM_CHECK_WITH_INFO(
+                values.find(tag) != values.end(), "model input tag=%s is missing %s", tag.c_str(), field);
+        };
+        require_layout(model_input.group_kv_block_stride_bytes, "group_kv_block_stride_bytes");
+        require_layout(model_input.group_kv_scale_stride_bytes, "group_kv_scale_stride_bytes");
+        require_layout(model_input.group_kv_block_transfer_bytes, "group_kv_block_transfer_bytes");
+        require_layout(model_input.group_kv_scale_transfer_bytes, "group_kv_scale_transfer_bytes");
+    }
+}
+
 GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
+    validateCacheLayoutForForward(inputs);
     if (model_inputs_logger_) {
         model_inputs_logger_->log(inputs, role, model->model_id_);
     }
@@ -53,9 +69,25 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
-static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
-    model_input.kv_block_stride_bytes = cache_config.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
+static void applyCacheLayoutToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
+    model_input.group_kv_block_stride_bytes.clear();
+    model_input.group_kv_scale_stride_bytes.clear();
+    model_input.group_kv_block_transfer_bytes.clear();
+    model_input.group_kv_scale_transfer_bytes.clear();
+
+    const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
+    for (const auto& group : cache_config.topology().groups()) {
+        model_input.group_kv_block_stride_bytes.emplace(
+            group.tag,
+            use_group_local_storage_layout ? group.kv_block_stride_bytes :
+                                             BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(cache_config));
+        model_input.group_kv_scale_stride_bytes.emplace(
+            group.tag,
+            use_group_local_storage_layout ? group.kv_scale_stride_bytes :
+                                             BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(cache_config));
+        model_input.group_kv_block_transfer_bytes.emplace(group.tag, group.kv_block_stride_bytes);
+        model_input.group_kv_scale_transfer_bytes.emplace(group.tag, group.kv_scale_stride_bytes);
+    }
 }
 
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
@@ -400,7 +432,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+        applyCacheLayoutToModelInput(model_input, mtp_cache_cfg);
         draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
     }
 
@@ -676,7 +708,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
         maybePrintModelInput(model_input, "decode post draft model");
         const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+        applyCacheLayoutToModelInput(model_input, mtp_cache_cfg);
     }
 
     {
@@ -833,7 +865,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     buffer_holder_.release();
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+    applyCacheLayoutToModelInput(model_input, mtp_cache_cfg);
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -928,7 +960,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             execBroadcast({broadcast_tensors, 0});
         }
 
-        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+        applyCacheLayoutToModelInput(model_input, cache_manager_->cacheConfig());
     }
 }
 

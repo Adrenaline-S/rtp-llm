@@ -480,7 +480,10 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
 
-        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+        // Opaque KV stores keep TP-replicated latent blocks like MLA, so both
+        // must use the single-peer load layout instead of the split-KV one.
+        const auto& load_cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+        if (load_cache_config.use_mla || load_cache_config.usesOpaqueKVCacheStore()) {
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -604,7 +607,9 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             ClientContext          client_context;
             BroadcastLoadRequestPB load_request;
 
-            if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+            // Same MLA-style single-peer layout for opaque KV stores as above.
+            const auto& load_cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+            if (load_cache_config.use_mla || load_cache_config.usesOpaqueKVCacheStore()) {
                 load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
             } else {
                 load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -666,7 +671,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     const bool use_mla             = cache_config.use_mla;
     const bool use_hybrid          = cache_config.groupNums() > 1;
-    const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
+    const bool use_opaque_kv_store = cache_config.usesOpaqueKVCacheStore();
     if (!use_mla && !use_opaque_kv_store && peer_cnt > 1) {
         for (const auto& group : cache_config.topology().groups()) {
             const size_t k_total_bytes = group.spec->k_block_size_bytes();
@@ -931,7 +936,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
-                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
+                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.usesOpaqueKVCacheStore();
 
                         // Same multi-group iteration as the main path.
                         auto mtp_layer_tags = layerGroupTags(mtp_cache_cfg, layer_id);

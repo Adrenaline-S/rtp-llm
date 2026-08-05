@@ -273,19 +273,21 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         const auto& topology     = cache_config.topology();
 
         PyCacheStoreInputs cache_store_inputs;
-        cache_store_inputs.context_batch_size        = context_batch_size;
-        cache_store_inputs.decoder_batch_size        = decoder_batch_size;
-        cache_store_inputs.request_id                = inputs.request_id;
-        cache_store_inputs.request_pd_separation     = inputs.request_pd_separation;
-        cache_store_inputs.cache_keys                = transVectorToString(cache_keys_vec);
-        cache_store_inputs.tokens_per_block          = inputs.seq_size_per_block;
-        cache_store_inputs.kv_block_stride_bytes     = inputs.kv_block_stride_bytes;
-        cache_store_inputs.kv_scale_stride_bytes     = inputs.kv_scale_stride_bytes;
-        cache_store_inputs.pd_separation             = inputs.pd_separation;
-        cache_store_inputs.model_id                  = model_id_;
-        cache_store_inputs.decode_entrance           = inputs.decode_entrance;
-        cache_store_inputs.warmup                    = inputs.warmup;
-        cache_store_inputs.use_opaque_kv_cache_store = inputs.use_opaque_kv_cache_store;
+        cache_store_inputs.context_batch_size            = context_batch_size;
+        cache_store_inputs.decoder_batch_size            = decoder_batch_size;
+        cache_store_inputs.request_id                    = inputs.request_id;
+        cache_store_inputs.request_pd_separation         = inputs.request_pd_separation;
+        cache_store_inputs.cache_keys                    = transVectorToString(cache_keys_vec);
+        cache_store_inputs.tokens_per_block              = inputs.seq_size_per_block;
+        cache_store_inputs.group_kv_block_stride_bytes   = inputs.group_kv_block_stride_bytes;
+        cache_store_inputs.group_kv_scale_stride_bytes   = inputs.group_kv_scale_stride_bytes;
+        cache_store_inputs.group_kv_block_transfer_bytes = inputs.group_kv_block_transfer_bytes;
+        cache_store_inputs.group_kv_scale_transfer_bytes = inputs.group_kv_scale_transfer_bytes;
+        cache_store_inputs.pd_separation                 = inputs.pd_separation;
+        cache_store_inputs.model_id                      = model_id_;
+        cache_store_inputs.decode_entrance               = inputs.decode_entrance;
+        cache_store_inputs.warmup                        = inputs.warmup;
+        cache_store_inputs.use_opaque_kv_cache_store     = inputs.use_opaque_kv_cache_store;
         cache_store_inputs.mla_kvcache =
             description_.attention_conf.use_mla && mla_ops_type_ != rtp_llm::MlaOpsType::MHA;
         cache_store_inputs.cache_store              = cache_manager_->getCacheStore();
@@ -295,11 +297,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         cache_store_inputs.cp_rank =
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0;
 
-        // Shared-pool allocators pad every group to the runtime layout carried
-        // by GptModelInputs.  The topology keeps the group's logical/spec
-        // layout, which is only the physical layout for independent pools.
-        // Cache-store metadata must describe the actual backing tensor on both
-        // the prefill and decode side (including CP-local slicing).
         const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
         for (const auto& group : topology.groups()) {
             cache_store_inputs.kv_cache_group_policies.emplace(group.tag, group.policy);
@@ -307,19 +304,16 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
                                                               use_group_local_storage_layout ?
                                                                   cache_config.seqSizePerBlockForGroup(group.tag) :
                                                                   cache_store_inputs.tokens_per_block);
-            cache_store_inputs.group_kv_block_stride_bytes.emplace(group.tag,
-                                                                   use_group_local_storage_layout ?
-                                                                       group.kv_block_stride_bytes :
-                                                                       cache_store_inputs.kv_block_stride_bytes);
-            cache_store_inputs.group_kv_scale_stride_bytes.emplace(group.tag,
-                                                                   use_group_local_storage_layout ?
-                                                                       group.kv_scale_stride_bytes :
-                                                                       cache_store_inputs.kv_scale_stride_bytes);
-            // The decode-side allocator registers the tag-local logical block,
-            // even when the shared backing pool spaces blocks by the maximum
-            // group stride. Keep transfer length separate from address stride.
-            cache_store_inputs.group_kv_block_transfer_bytes.emplace(group.tag, group.kv_block_stride_bytes);
-            cache_store_inputs.group_kv_scale_transfer_bytes.emplace(group.tag, group.kv_scale_stride_bytes);
+            const auto require_layout = [&group](const auto& values, const char* field) {
+                RTP_LLM_CHECK_WITH_INFO(values.find(group.tag) != values.end(),
+                                        "cache-store tag=%s is missing %s",
+                                        group.tag.c_str(),
+                                        field);
+            };
+            require_layout(cache_store_inputs.group_kv_block_stride_bytes, "group_kv_block_stride_bytes");
+            require_layout(cache_store_inputs.group_kv_scale_stride_bytes, "group_kv_scale_stride_bytes");
+            require_layout(cache_store_inputs.group_kv_block_transfer_bytes, "group_kv_block_transfer_bytes");
+            require_layout(cache_store_inputs.group_kv_scale_transfer_bytes, "group_kv_scale_transfer_bytes");
         }
         params = cache_store_inputs;
     }
