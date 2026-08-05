@@ -480,7 +480,10 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
 
-        if (engine_->resourceContext().cache_manager->cacheConfig().usesMla()) {
+        // Opaque KV stores keep TP-replicated latent blocks like MLA, so both
+        // must use the single-peer load layout instead of the split-KV one.
+        const auto& load_cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+        if (load_cache_config.usesMla() || load_cache_config.usesOpaqueKVCacheStore()) {
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -604,7 +607,9 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             ClientContext          client_context;
             BroadcastLoadRequestPB load_request;
 
-            if (engine_->resourceContext().cache_manager->cacheConfig().usesMla()) {
+            // Same MLA-style single-peer layout for opaque KV stores as above.
+            const auto& load_cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+            if (load_cache_config.usesMla() || load_cache_config.usesOpaqueKVCacheStore()) {
                 load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
             } else {
                 load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
