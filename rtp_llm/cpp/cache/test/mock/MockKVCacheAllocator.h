@@ -45,6 +45,7 @@ public:
                 singleBatchNeedBlocks,
                 (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step),
                 (const, override));
+    MOCK_METHOD(BlockPoolPtr, getBlockPool, (std::string_view tag), (const, override));
     MOCK_METHOD(int,
                 estimatePeakNeedBlocks,
                 (const KVCacheResource& kv_cache_resource,

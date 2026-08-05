@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 
 #include <algorithm>
 #include <optional>
@@ -57,12 +57,12 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
 
 }  // namespace
 
-bool HybridKVCacheAllocator::skipReuseCacheGroup(std::string_view tag) const {
+bool HybridPoolKVCacheAllocator::skipReuseCacheGroup(std::string_view tag) const {
     const auto it = kv_cache_groups_.find(std::string(tag));
     return it != kv_cache_groups_.end() && !it->second->prefixReuseEnabled();
 }
 
-std::vector<std::string> HybridKVCacheAllocator::independentEvictionTags() const {
+std::vector<std::string> HybridPoolKVCacheAllocator::independentEvictionTags() const {
     std::vector<std::string> tags;
     for (const auto& [tag, group] : kv_cache_groups_) {
         if (group->evictPolicy() == CacheEvictPolicy::INDEPENDENT) {
@@ -72,21 +72,15 @@ std::vector<std::string> HybridKVCacheAllocator::independentEvictionTags() const
     return tags;
 }
 
-bool HybridKVCacheAllocator::cpCompactSwaGroup(std::string_view                     tag,
-                                               const std::shared_ptr<CPSlotMapper>& mapper) const {
+bool HybridPoolKVCacheAllocator::cpCompactSwaGroup(std::string_view                     tag,
+                                                   const std::shared_ptr<CPSlotMapper>& mapper) const {
     return mapper && mapper->isSharded() && kv_cache_groups_.find(std::string(tag)) != kv_cache_groups_.end()
            && mapper->compactLastRankGroup(config_, tag);
 }
 
-HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
-                                               AllocationType                     allocation_type,
-                                               const kmonitor::MetricsReporterPtr metrics_reporter,
-                                               int64_t                            reserve_block_ratio):
-    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
-
-int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
-                                       BatchKVCacheResource&                kv_resource,
-                                       const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+int HybridPoolKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
+                                           BatchKVCacheResource&                kv_resource,
+                                           const std::shared_ptr<CPSlotMapper>& cp_mapper) {
     // Under cp shard, FULL groups index block_ids by cp-virtual-block units
     // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
     // raw block_size logical blocks. So when populating tail blocks for
@@ -181,7 +175,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     return reuse_blocks_len;
 }
 
-MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
+MallocResult HybridPoolKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto&     kv_resource = malloc_info.batch_kv_cache_resource;
     const int batch_size  = kv_resource->batchSize();
 
@@ -210,7 +204,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     int                                               reuse_blocks       = 0;
     std::unordered_map<std::string, BlockIndicesType> referenced_blocks;
 
-    if (malloc_info.enable_device_cache) {
+    const auto& reuse_anchor_tags = !full_group_tags_.empty()   ? full_group_tags_ :
+                                    !linear_group_tags_.empty() ? linear_group_tags_ :
+                                                                  swa_group_tags_;
+    const bool  prefix_reuse_enabled =
+        !reuse_anchor_tags.empty()
+        && std::all_of(reuse_anchor_tags.begin(), reuse_anchor_tags.end(), [this](const std::string& tag) {
+               return !skipReuseCacheGroup(tag);
+           });
+    if (malloc_info.enable_device_cache && prefix_reuse_enabled) {
         // CP-sharded: subsample to last-rank canonical key namespace before matching.
         CacheKeysType cp_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
         // Off mode drops the last key to skip the partial trailing block. Under
@@ -269,7 +271,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     return {true, reuse_blocks * reuse_unit_tokens, match_cost_time_us};
 }
 
-MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
+MallocResult HybridPoolKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     auto&       kv_resource  = malloc_info.batch_kv_cache_resource;
     const auto& cp_mapper    = cp_slot_mapper_;
     const int   batch_size   = kv_resource->batchSize();
@@ -356,7 +358,7 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     return {false, 0};
 }
 
-void HybridKVCacheAllocator::free(const FreeInfo& free_info) {
+void HybridPoolKVCacheAllocator::free(const FreeInfo& free_info) {
     auto& kv_cache_resource = free_info.batch_kv_cache_resource;
     if (kv_cache_resource->curBlocksNum() == 0) {
         return;
@@ -369,7 +371,7 @@ void HybridKVCacheAllocator::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
-void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
+void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
     RTP_LLM_CHECK(kv_cache_resource != nullptr);
     if (!shared_block_cache_) {
@@ -484,9 +486,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     }
 }
 
-std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                                        const CacheKeysType&   cache_keys,
-                                                                        bool                   is_connector) {
+std::shared_ptr<KVCacheResource> HybridPoolKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
+                                                                            const CacheKeysType&   cache_keys,
+                                                                            bool                   is_connector) {
     if (cache_keys.empty() || kvcache_resource.groupNums() <= 0) {
         return nullptr;
     }
@@ -561,7 +563,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
     return selected_resource;
 }
 
-void HybridKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
+void HybridPoolKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
     for (const auto& [tag, block_ids] : kvcache_resource.groupBlocks()) {
         BlockIndicesType valid;
         for (auto b : block_ids->blocks()) {
@@ -575,10 +577,10 @@ void HybridKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resou
     }
 }
 
-bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                           const std::vector<int>&        block_src_batch,
-                                           bool                           copy_last_block,
-                                           std::vector<GroupBlockIdPair>& block_update_mapping) {
+bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                               const std::vector<int>&        block_src_batch,
+                                               bool                           copy_last_block,
+                                               std::vector<GroupBlockIdPair>& block_update_mapping) {
     block_update_mapping.clear();
     if (block_src_batch.empty()) {
         return true;
@@ -758,29 +760,13 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_
     return true;
 }
 
-int HybridKVCacheAllocator::seqSizePerBlock() const {
+int HybridPoolKVCacheAllocator::seqSizePerBlock() const {
     return static_cast<int>(config_.seq_size_per_block);
 }
 
-bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const {
-    const int need_blocks = getNeedBlocks(malloc_info);
-    if (need_blocks <= 0) {
-        return true;
-    }
-    const size_t available_blocks = availableBlocksNum();
-    const bool   accepted         = available_blocks >= static_cast<size_t>(need_blocks) + reserve_blocks;
-    if (!accepted && malloc_info.verbose) {
-        RTP_LLM_LOG_INFO("Hybrid initMalloc rejected by reserve blocks: request_id=%ld "
-                         "need_blocks=%d available_blocks=%zu reserve_blocks=%zu",
-                         malloc_info.request_id,
-                         need_blocks,
-                         available_blocks,
-                         reserve_blocks);
-    }
-    return accepted;
-}
-
-void HybridKVCacheAllocator::rollbackBlockIdsToSize(std::string_view tag, BlockIds& block_ids, size_t original_size) {
+void HybridPoolKVCacheAllocator::rollbackBlockIdsToSize(std::string_view tag,
+                                                        BlockIds&        block_ids,
+                                                        size_t           original_size) {
     if (block_ids.blocksNum() <= original_size) {
         return;
     }
@@ -791,7 +777,7 @@ void HybridKVCacheAllocator::rollbackBlockIdsToSize(std::string_view tag, BlockI
     }
 }
 
-void HybridKVCacheAllocator::rollbackInitMalloc(
+void HybridPoolKVCacheAllocator::rollbackInitMalloc(
     BatchKVCacheResource&                                    kv_resource,
     const std::unordered_map<std::string, BlockIndicesType>& referenced_blocks,
     const std::unordered_map<std::string, size_t>&           original_sizes) {
@@ -810,7 +796,7 @@ void HybridKVCacheAllocator::rollbackInitMalloc(
     kv_resource.cacheResource(0).setDeviceReuseBlockNum(0);
 }
 
-void HybridKVCacheAllocator::rollbackIncrMalloc(
+void HybridPoolKVCacheAllocator::rollbackIncrMalloc(
     BatchKVCacheResource&                                       kv_resource,
     const std::vector<std::unordered_map<std::string, size_t>>& original_sizes,
     int                                                         failed_batch) {
@@ -824,13 +810,13 @@ void HybridKVCacheAllocator::rollbackIncrMalloc(
     }
 }
 
-MemoryType HybridKVCacheAllocator::memoryTypeForGroup(std::string_view tag) const {
+MemoryType HybridPoolKVCacheAllocator::memoryTypeForGroup(std::string_view tag) const {
     (void)tag;
     return allocation_type_ == AllocationType::DEVICE ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 
-void HybridKVCacheAllocator::copyBlockMappingForGroup(std::string_view                tag,
-                                                      const std::vector<BlockIdPair>& block_update_mapping) const {
+void HybridPoolKVCacheAllocator::copyBlockMappingForGroup(std::string_view                tag,
+                                                          const std::vector<BlockIdPair>& block_update_mapping) const {
     if (block_update_mapping.empty()) {
         return;
     }
@@ -868,7 +854,7 @@ void HybridKVCacheAllocator::copyBlockMappingForGroup(std::string_view          
     execBatchCopy(copy_params);
 }
 
-int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
+int HybridPoolKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return 0;
     }
@@ -894,11 +880,11 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     return common_blocks_total + batch_size * extra_blocks_total;
 }
 
-int HybridKVCacheAllocator::estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
-                                                   int                    seq_len,
-                                                   int                    remaining_tokens,
-                                                   int                    reserve_step,
-                                                   bool                   enable_reuse_cache) const {
+int HybridPoolKVCacheAllocator::estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                                                       int                    seq_len,
+                                                       int                    remaining_tokens,
+                                                       int                    reserve_step,
+                                                       bool                   enable_reuse_cache) const {
     int need_blocks = 0;
     for (const auto& [tag, block_ids] : kv_cache_resource.groupBlocks()) {
         need_blocks += kv_cache_groups_.at(tag)->estimatePeakNeedBlocks(
@@ -907,12 +893,12 @@ int HybridKVCacheAllocator::estimatePeakNeedBlocks(const KVCacheResource& kv_cac
     return need_blocks;
 }
 
-int HybridKVCacheAllocator::estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                                               int  common_seq_len,
-                                                               int  remaining_tokens,
-                                                               int  reserve_step,
-                                                               bool enable_reuse_cache,
-                                                               int  target_batch_size) const {
+int HybridPoolKVCacheAllocator::estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                                   int  common_seq_len,
+                                                                   int  remaining_tokens,
+                                                                   int  reserve_step,
+                                                                   bool enable_reuse_cache,
+                                                                   int  target_batch_size) const {
     int peak_blocks = 0;
     for (const auto& [tag, group] : kv_cache_groups_) {
         peak_blocks += group->estimateInitialBatchPeakNeedBlocks(
@@ -921,7 +907,7 @@ int HybridKVCacheAllocator::estimateInitialBatchPeakNeedBlocks(int  seq_len,
     return peak_blocks;
 }
 
-void HybridKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& malloc_info) const {
+void HybridPoolKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& malloc_info) const {
     if (!cp_slot_mapper_ || !cp_slot_mapper_->isSharded()) {
         return;
     }
@@ -956,9 +942,9 @@ void HybridKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& malloc
     }
 }
 
-int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                  int                            seq_len,
-                                                  int                            reserve_step) const {
+int HybridPoolKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                      int                            seq_len,
+                                                      int                            reserve_step) const {
     int need_blocks = 0;
     for (const auto& [tag, unused_block_ids] : batch_kv_cache_resource->groupBlocks()) {
         const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, seq_len);

@@ -25,8 +25,6 @@ private:
     std::shared_ptr<const CacheTopology> cache_topology;
 
 public:
-    bool use_independent_block_pools = false;
-
     uint32_t layer_num     = 0;  // the number of main model layers
     uint32_t layer_all_num = 0;  // the number of all layers including mtp modules
     bool     use_mla       = false;
@@ -94,7 +92,6 @@ public:
     uint32_t          totalLayerNum() const;
     uint32_t          blockNum() const;
     size_t            groupLayerNum() const;
-    size_t            layerBlockStrideBytes(int layer_id) const;
     size_t            explicitlySizedPoolReserveBytes() const;
     bool              usesTypedCacheRegions() const;
     bool              usesOpaqueKVCacheStore() const;

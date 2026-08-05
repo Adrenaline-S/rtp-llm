@@ -297,13 +297,10 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         cache_store_inputs.cp_rank =
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0;
 
-        const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
         for (const auto& group : topology.groups()) {
             cache_store_inputs.kv_cache_group_policies.emplace(group.tag, group.policy);
             cache_store_inputs.group_tokens_per_block.emplace(group.tag,
-                                                              use_group_local_storage_layout ?
-                                                                  cache_config.seqSizePerBlockForGroup(group.tag) :
-                                                                  cache_store_inputs.tokens_per_block);
+                                                              cache_config.seqSizePerBlockForGroup(group.tag));
             const auto require_layout = [&group](const auto& values, const char* field) {
                 RTP_LLM_CHECK_WITH_INFO(values.find(group.tag) != values.end(),
                                         "cache-store tag=%s is missing %s",

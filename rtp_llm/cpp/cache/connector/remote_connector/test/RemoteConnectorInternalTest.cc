@@ -167,6 +167,9 @@ public:
     int seqSizePerBlock() const override {
         return 0;
     }
+    BlockPoolPtr getBlockPool(std::string_view) const override {
+        return nullptr;
+    }
 
     bool doInit() override {
         return true;

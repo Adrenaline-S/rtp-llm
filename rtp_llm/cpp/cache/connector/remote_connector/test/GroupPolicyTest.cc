@@ -155,6 +155,9 @@ public:
     int seqSizePerBlock() const override {
         return 0;
     }
+    BlockPoolPtr getBlockPool(std::string_view) const override {
+        return nullptr;
+    }
 
     const std::shared_ptr<const CacheTopology>& topology() const {
         return topology_;

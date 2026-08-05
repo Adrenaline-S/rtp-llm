@@ -869,7 +869,6 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
     ParallelismConfig pc;
     auto config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(true), pc, false, 0);
 
-    EXPECT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_EQ(config.typeForGroup("full"), CacheGroupType::FULL);
     EXPECT_EQ(config.typeForGroup("linear"), CacheGroupType::LINEAR);
@@ -984,7 +983,6 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionAlwaysUsesIndependentGroupPools
     ParallelismConfig pc;
     auto config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
 
-    EXPECT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_EQ(config.group("linear").block_num, 0u);
     EXPECT_EQ(config.group("full").block_num, 0u);
@@ -1786,13 +1784,13 @@ TEST(CacheConfigTest, AllCreatorsConsumeTheSameAtomicSpecAndPolicyResult) {
     auto hybrid                                            = base;
     hybrid.hybrid_attention_config.enable_hybrid_attention = true;
     hybrid.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::NONE};
-    auto shared_pool = CacheConfigCreator::createBasicConfig(hybrid, pc, false, 0);
+    auto hybrid_config = CacheConfigCreator::createBasicConfig(hybrid, pc, false, 0);
 
     auto hybrid_pool                                                      = hybrid;
     hybrid_pool.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    auto independent_pool = CacheConfigCreator::createBasicConfig(hybrid_pool, pc, false, 0);
+    auto hybrid_pool_config = CacheConfigCreator::createBasicConfig(hybrid_pool, pc, false, 0);
 
-    for (const auto* config : {&shared_pool, &independent_pool}) {
+    for (const auto* config : {&hybrid_config, &hybrid_pool_config}) {
         ASSERT_EQ(config->groupNums(), 1);
         EXPECT_EQ(config->specForGroup("full")->fingerprint(), single.specForGroup("full")->fingerprint());
         EXPECT_TRUE(CacheConfig::samePolicy(config->policyForGroup("full"), single.policyForGroup("full")));
@@ -1900,7 +1898,6 @@ TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSingleAndHybridPo
     auto hybrid_config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
     hybrid_config.finalizeBlockNums(123, runtime_config);
     EXPECT_EQ(hybrid_config.blockNum(), 123u);
-    EXPECT_TRUE(hybrid_config.use_independent_block_pools);
     EXPECT_EQ(hybrid_config.blockNumForGroup("linear"), 123u);
     EXPECT_EQ(hybrid_config.blockNumForGroup("full"), 123u);
     EXPECT_EQ(hybrid_config.explicitlySizedPoolReserveBytes(), 0u);

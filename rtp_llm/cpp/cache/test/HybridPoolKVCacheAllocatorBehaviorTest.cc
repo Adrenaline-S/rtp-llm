@@ -460,7 +460,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolsSupportOnlyLinearGroups) 
 
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config, AllocationType::DEVICE);
     EXPECT_TRUE(allocator->init());
-    EXPECT_EQ(allocator->getBlockPool(), nullptr);
+    EXPECT_EQ(allocator->getBlockPool("missing"), nullptr);
     EXPECT_EQ(allocator->groupBlockPools().size(), 2u);
 }
 
@@ -1437,7 +1437,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
     EXPECT_NE(full_buf[0].addr, nullptr);
     EXPECT_EQ(linear_buf[0].size_bytes, config.kvBlockStrideBytesForGroup(kLinearTag));
     EXPECT_EQ(full_buf[0].size_bytes, config.kvBlockStrideBytesForGroup(kFullTag));
-    EXPECT_LT(linear_buf[0].size_bytes, BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(config));
+    EXPECT_LT(linear_buf[0].size_bytes, config.kvBlockStrideBytesForGroup(kFullTag));
 
     auto layout = allocator->allLayerCacheBase();
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
