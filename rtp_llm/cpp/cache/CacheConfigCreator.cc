@@ -37,11 +37,11 @@ bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVC
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     if (!config.use_independent_block_pools) {
-        budget.paged_block_bytes = config.block_size_bytes;
+        budget.paged_block_bytes = config.blockSizeBytes();
         return budget;
     }
 
-    budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
+    budget.explicit_pool_reserve_bytes = config.explicitlySizedPoolReserveBytes();
     for (const auto& group : config.topology().groups()) {
         if (config.usesExplicitIndependentBlocks(group.tag)) {
             continue;
@@ -233,10 +233,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_num,
-                            static_cast<long>(config.block_size_bytes / 1024 / 1024));
+                            static_cast<long>(config.blockSizeBytes() / 1024 / 1024));
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    config.block_num            = static_cast<int>(block_num);
     config.finalizeBlockNums(block_num, runtime_config);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
@@ -285,9 +284,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         total_layer_num += propose_config.layer_num;
     }
 
-    size_t total_block_size_bytes = score_config.block_size_bytes;
+    size_t total_block_size_bytes = score_config.blockSizeBytes();
     for (int i = 0; i < num_mtp_modules; ++i) {
-        total_block_size_bytes += propose_config.block_size_bytes;
+        total_block_size_bytes += propose_config.blockSizeBytes();
     }
 
     KVCacheBlockBudget joint_budget = blockBudgetForConfig(score_config);
@@ -312,8 +311,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 "sp kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB (score=%zu MiB + propose=%zu MiB x %d)",
                 kv_cache_mem_size / 1024 / 1024,
                 explicit_pool_reserve / 1024 / 1024,
-                score_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
-                propose_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
+                score_config.explicitlySizedPoolReserveBytes() / 1024 / 1024,
+                propose_config.explicitlySizedPoolReserveBytes() / 1024 / 1024,
                 num_mtp_modules);
         }
         block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, joint_budget, joint_step);
@@ -321,41 +320,19 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
 
-    CacheConfig config                         = score_config;
-    config.linear_step                         = joint_step;
-    config.layer_all_num                       = score_config.layer_num;
-    config.block_size_bytes                    = total_block_size_bytes;
-    config.block_num                           = block_num;
-    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
-
+    CacheConfig config            = score_config;
+    config.linear_step            = joint_step;
     const uint32_t main_layer_num = score_config.layer_num;
-    const uint32_t mtp_layer_num  = propose_config.layer_num;
 
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
-
-    const size_t score_layers = static_cast<size_t>(main_layer_num);
-    RTP_LLM_CHECK_WITH_INFO(score_config.layer_to_block_stride_bytes.size() == score_layers,
-                            "score_config.layer_to_block_stride_bytes size mismatch, got=%zu need=%zu",
-                            score_config.layer_to_block_stride_bytes.size(),
-                            score_layers);
-    for (size_t l = 0; l < score_layers; ++l) {
-        config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
-    }
-
     for (int m = 0; m < num_mtp_modules; ++m) {
-        RTP_LLM_CHECK_WITH_INFO(propose_config.layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
-                                "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
-                                propose_config.layer_to_block_stride_bytes.size(),
-                                mtp_layer_num);
         auto sub_cfg = config.mergeMTPModule(propose_config, m, main_layer_num);
         sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
         config.mtp_sub_configs.push_back(sub_cfg);
     }
 
     config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
-    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
@@ -366,9 +343,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                      block_num,
                      kv_cache_seq_len,
                      total_block_size_bytes,
-                     score_config.block_size_bytes,
+                     score_config.blockSizeBytes(),
                      num_mtp_modules,
-                     propose_config.block_size_bytes);
+                     propose_config.blockSizeBytes());
 
     RTP_LLM_LOG_INFO("CacheConfig debugString(main_score_model):\n%s", score_config.debugString().c_str());
     for (size_t i = 0; i < config.mtp_sub_configs.size(); ++i) {

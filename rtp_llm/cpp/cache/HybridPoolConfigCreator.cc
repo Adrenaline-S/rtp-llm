@@ -132,56 +132,18 @@ void setupIndependentPoolSizes(CacheConfig&           config,
                                bool                   is_mtp) {
     config.use_independent_block_pools = true;
 
-    size_t   max_kv_stride           = 0;
-    size_t   max_scale_stride        = 0;
-    size_t   total_kv_block_bytes    = 0;
-    size_t   total_scale_block_bytes = 0;
-    uint32_t max_group_layers        = 0;
-
-    config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
     for (auto& group : groups) {
         const auto& spec = group.spec;
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec tag=%s is null", group.tag.c_str());
-        const auto   layer_count    = static_cast<uint32_t>(group.layer_ids.size());
         const size_t kv_stride      = spec->block_size_bytes();
         const size_t scale_stride   = spec->scale_block_size_bytes();
         group.block_num             = 0;
         group.kv_block_stride_bytes = kv_stride;
         group.kv_scale_stride_bytes = scale_stride;
-        const auto type             = group.policy.group_type;
-        const bool is_paged_group   = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
-        if (is_paged_group && group.policy.explicit_block_num == 0) {
-            total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
-            total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
-        }
-        max_kv_stride    = std::max(max_kv_stride, kv_stride);
-        max_scale_stride = std::max(max_scale_stride, scale_stride);
-        max_group_layers = std::max(max_group_layers, layer_count);
-
-        for (int layer_id : group.layer_ids) {
-            auto& layer_stride = config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)];
-            layer_stride       = std::max(layer_stride, static_cast<int>(kv_stride + scale_stride));
-        }
     }
-
-    config.group_layer_num         = static_cast<int>(std::max<uint32_t>(1, max_group_layers));
-    config.kv_block_stride_bytes   = max_kv_stride;
-    config.kv_scale_stride_bytes   = max_scale_stride;
-    config.kv_block_size_bytes     = total_kv_block_bytes;
-    config.kv_scale_size_bytes     = total_scale_block_bytes;
-    const size_t paged_block_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    if (paged_block_bytes == 0) {
-        RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,
-                                "hybrid-pool paged groups produced zero block bytes");
-        config.kv_block_size_bytes = 1;
-        config.kv_scale_size_bytes = 0;
-        config.block_size_bytes    = 1;
-    } else {
-        config.block_size_bytes = paged_block_bytes;
-    }
-    config.explicitly_sized_pool_reserve_bytes = 0;
     config.setTopology(std::move(groups), std::move(layers));
-    config.group_block_layout_initialized = true;
+    RTP_LLM_CHECK_WITH_INFO(config.blockSizeBytes() > 0 || (is_mtp && config.usesTypedCacheRegions()),
+                            "hybrid-pool paged groups produced zero block bytes");
 }
 
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
@@ -194,13 +156,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
 
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(model_config.num_layers);
-    config.layer_all_num      = config.layer_num;
-    config.block_num          = 0;
     config.seq_size_per_block = physical_tokens_per_block;
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.dtype              = dtype;
     config.linear_step        = 1;
-    config.is_sparse          = model_config.attn_config.is_sparse;
 
     if (!model_config.kv_cache_spec_descs.empty()) {
         validateHybridPoolDescs(model_config, gen_num_per_cycle);
@@ -214,21 +171,6 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         auto refreshed_specs        = CacheConfigCreator::buildLayerSpecsFromDescs(
             model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
         auto [groups, layers] = buildGroupsFromLayerSpecs(refreshed_specs, model_config, parallelism_config);
-        for (const auto& group : groups) {
-            const auto& spec               = group.spec;
-            config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
-                                             || spec->type == KVCacheSpecType::OpaqueState;
-            config.use_opaque_kv_cache_store = config.use_opaque_kv_cache_store
-                                               || spec->type == KVCacheSpecType::OpaqueKV
-                                               || spec->type == KVCacheSpecType::OpaqueState;
-        }
-        for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
-            for (const auto& desc : layer_descs) {
-                config.is_sparse = config.is_sparse || desc.cache_type == KVCacheSpecType::OpaqueKV;
-            }
-        }
-        config.disable_decode_first_malloc_device_reuse =
-            config.disable_decode_first_malloc_device_reuse || config.use_opaque_kv_cache_store;
         setupIndependentPoolSizes(config, std::move(groups), std::move(layers), is_mtp);
     } else {
         RTP_LLM_CHECK_WITH_INFO(false, "HybridPoolConfigCreator requires kv_cache_spec_descs");

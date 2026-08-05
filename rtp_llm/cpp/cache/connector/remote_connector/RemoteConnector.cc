@@ -283,8 +283,8 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
 
     // ModelDeployment
     const auto& model_name   = init_params_->runtime_config.model_name;
-    const auto& dtype_str    = getDataTypeStr(init_params_->cache_config.dtype);  // TODO(zhoushipei.zsp) is this right?
-    bool        use_mla      = init_params_->cache_config.use_mla;
+    const auto& dtype_str    = getDataTypeStr(init_params_->cache_config.cacheDType());
+    bool        use_mla      = init_params_->cache_config.usesMla();
     int64_t     tp_size      = init_params_->parallelism_config.tp_size;
     int64_t     dp_size      = init_params_->parallelism_config.dp_size;
     int         fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;

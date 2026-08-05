@@ -21,17 +21,18 @@ public:
         RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0, "cache groups must not be empty");
         BlockPoolConfig config;
         config.pool_name       = "default";
-        config.block_num       = cache_config.block_num;
+        config.block_num       = cache_config.blockNum();
         const bool  is_hybrid  = cache_config.groupNums() > 1;
-        auto        layer_num  = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
+        auto        layer_num  = is_hybrid ? cache_config.groupLayerNum() : cache_config.layer_num;
         const auto& main_group = requireSharedPoolLayoutGroup(cache_config);
         const auto& main_spec  = main_group.spec;
         // linear block size is same with full block block size
         MemoryLayoutConfig main_layout =
             createMemoryLayoutConfig(is_hybrid,
                                      layer_num,
-                                     cache_config.kv_block_stride_bytes,
-                                     cache_config.kv_scale_stride_bytes,
+                                     cache_config.kvBlockStrideBytes(),
+                                     cache_config.kvScaleStrideBytes(),
+                                     config.block_num,
                                      main_spec,
                                      cache_config,
                                      main_group.local_kv_head_num,
@@ -65,6 +66,7 @@ public:
                                          mtp_layer_num,
                                          mtp_sub_config->kvBlockStrideBytesForGroup(mtp_group.tag),
                                          mtp_sub_config->kvScaleStrideBytesForGroup(mtp_group.tag),
+                                         config.block_num,
                                          mtp_spec,
                                          cache_config,
                                          mtp_group.local_kv_head_num,
@@ -100,16 +102,12 @@ public:
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec tag=%s is null", group.tag.c_str());
 
         BlockPoolConfig config;
-        config.pool_name            = group.tag;
-        config.block_num            = group.block_num;
-        const bool has_group_blocks = config.block_num != cache_config.block_num;
-        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s block_num=%d (has_group_blocks=%d, "
-                         "groupNums=%d, global_block_num=%d)",
+        config.pool_name = group.tag;
+        config.block_num = group.block_num;
+        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s block_num=%d groupNums=%d",
                          config.pool_name.c_str(),
                          config.block_num,
-                         has_group_blocks,
-                         cache_config.groupNums(),
-                         cache_config.block_num);
+                         cache_config.groupNums());
 
         const uint32_t layer_num = static_cast<uint32_t>(group.layer_ids.size());
         RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group tag=%s has no layers", group.tag.c_str());
@@ -117,15 +115,13 @@ public:
         const size_t kv_stride    = group.kv_block_stride_bytes;
         const size_t scale_stride = group.kv_scale_stride_bytes;
 
-        CacheConfig group_cache_config = cache_config;
-        group_cache_config.block_num   = config.block_num;
-
         MemoryLayoutConfig layout    = createMemoryLayoutConfig(false,
                                                              layer_num,
                                                              kv_stride,
                                                              scale_stride,
+                                                             config.block_num,
                                                              spec,
-                                                             group_cache_config,
+                                                             cache_config,
                                                              group.local_kv_head_num,
                                                              group.spec->seq_size_per_block,
                                                              cache_config.kernelBlocksPerKvBlockForGroup(group.tag));
@@ -180,8 +176,8 @@ private:
     static const GroupBase& requireSharedPoolLayoutGroup(const CacheConfig& cache_config) {
         const GroupBase* layout_group = nullptr;
         for (const auto& group : cache_config.topology().groups()) {
-            if (group.spec == nullptr || group.kv_block_stride_bytes != cache_config.kv_block_stride_bytes
-                || group.kv_scale_stride_bytes != cache_config.kv_scale_stride_bytes) {
+            if (group.spec == nullptr || group.kv_block_stride_bytes != cache_config.kvBlockStrideBytes()
+                || group.kv_scale_stride_bytes != cache_config.kvScaleStrideBytes()) {
                 continue;
             }
             if (layout_group == nullptr || group.tag < layout_group->tag) {
@@ -190,8 +186,8 @@ private:
         }
         RTP_LLM_CHECK_WITH_INFO(layout_group != nullptr,
                                 "BlockPoolConfigHelper has no group matching shared pool strides kv=%zu scale=%zu",
-                                cache_config.kv_block_stride_bytes,
-                                cache_config.kv_scale_stride_bytes);
+                                cache_config.kvBlockStrideBytes(),
+                                cache_config.kvScaleStrideBytes());
         return *layout_group;
     }
 
@@ -199,14 +195,15 @@ private:
                                                        uint32_t                           layer_num,
                                                        size_t                             kv_block_stride_bytes,
                                                        size_t                             kv_scale_stride_bytes,
+                                                       uint32_t                           block_num,
                                                        std::shared_ptr<const KVCacheSpec> spec,
-                                                       CacheConfig                        cache_config,
+                                                       const CacheConfig&                 cache_config,
                                                        uint32_t                           local_kv_head_num,
                                                        size_t                             seq_size_per_block,
                                                        size_t                             kernel_blocks_per_kv_block) {
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
-        cfg.block_num             = cache_config.block_num;
+        cfg.block_num             = block_num;
         cfg.kv_block_stride_bytes = kv_block_stride_bytes;
         cfg.k_block_stride_bytes  = spec->k_block_size_bytes();
         cfg.v_block_stride_bytes  = spec->v_block_size_bytes();
@@ -219,8 +216,8 @@ private:
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla                    = cache_config.use_mla;
+        cfg.is_mla                     = cache_config.usesMla() || cache_config.isSparse();
+        cfg.use_mla                    = cache_config.usesMla();
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
 
