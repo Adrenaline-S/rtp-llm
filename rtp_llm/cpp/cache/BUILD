@@ -237,14 +237,12 @@ cc_library(
     srcs = [
         "HybridKVCacheAllocator.cc",
         "HybridPoolKVCacheAllocator.cc",
-        "HybridTypeKVCacheAllocator.cc",
         "KVCacheAllocator.cc",
         "SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
         "HybridKVCacheAllocator.h",
         "HybridPoolKVCacheAllocator.h",
-        "HybridTypeKVCacheAllocator.h",
         "KVCacheAllocator.h",
         "SingleTypeKVCacheAllocator.h",
     ],
