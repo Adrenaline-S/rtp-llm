@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <algorithm>
 #include <functional>
+#include <limits>
 
 namespace rtp_llm {
 
@@ -15,19 +16,20 @@ size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
         return 0;
     }
 
-    for (const auto& group_block_ids : resource_->groupBlocks()) {
-        if (group_block_ids && group_block_ids->blocksNum() > 0) {
-            return group_block_ids->blocksNum();
+    // The count is the exclusive upper bound of the block range read for every participating group, so
+    // only blocks present in all of them count. Groups that keep just a bounded tail (LINEAR holds one
+    // block, SWA holds two) would pin the result at that tail size, so they do not participate.
+    size_t matched_blocks = std::numeric_limits<size_t>::max();
+    for (const auto& [tag, block_ids] : resource_->groupBlocks()) {
+        if (block_ids->blocksNum() == 0 || resource_->maintainsTailBlocksOnly(tag)) {
+            continue;
         }
+        matched_blocks = std::min(matched_blocks, block_ids->blocksNum());
     }
-    for (const auto& layer_groups : resource_->layerGroupBlocks()) {
-        for (const auto& group_block_ids : layer_groups) {
-            if (group_block_ids && group_block_ids->blocksNum() > 0) {
-                return group_block_ids->blocksNum();
-            }
-        }
+    if (matched_blocks == std::numeric_limits<size_t>::max()) {
+        return 0;
     }
-    return 0;
+    return std::min(matched_blocks, resource_->cacheKeys().size());
 }
 
 bool P2PConnectorAsyncMatchContext::done() const {

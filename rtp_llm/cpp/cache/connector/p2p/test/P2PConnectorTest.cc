@@ -85,8 +85,9 @@ protected:
         resource->initGroups(test::makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
+            const std::string tag = "group" + std::to_string(layer_id);
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer_id).add({i});
+                resource->mutableBlockIds(tag).add({i});
             }
         }
 
@@ -202,13 +203,45 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
     EXPECT_NE(response.error_message().find("cancelled"), std::string::npos);
 }
 
-TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups) {
+TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountIsMinOverGroupsAndCacheKeys) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->setCacheKeys({1000, 1001, 1002});
     resource->initGroups(test::makeTestCacheTopology(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}}));
-    resource->mutableBlockIds(1).assign({10, 11, 12});
-    resource->mutableBlockIds(3).assign({30, 31, 32});
+    resource->mutableBlockIds("group1").assign({10, 11, 12});
+    resource->mutableBlockIds("group3").assign({30, 31, 32, 33, 34});
     ASSERT_GT(resource->groupNums(), 1);
+
+    P2PConnectorAsyncMatchContext ctx(resource);
+    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+
+    // 组间块数不等时取最小值：group1 只有 3 块，放宽 cacheKeys 也不能声称有 5 块
+    resource->setCacheKeys({1000, 1001, 1002, 1003, 1004, 1005});
+    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+
+    resource->mutableBlockIds("group3").assign({30, 31});
+    EXPECT_EQ(ctx.matchedBlockCount(), 2u);
+
+    // 空组不参与，min 由剩余非空组决定
+    resource->mutableBlockIds("group3").assign({});
+    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+
+    resource->mutableBlockIds("group1").assign({});
+    EXPECT_EQ(ctx.matchedBlockCount(), 0u);
+
+    P2PConnectorAsyncMatchContext empty_ctx(nullptr);
+    EXPECT_EQ(empty_ctx.matchedBlockCount(), 0u);
+}
+
+TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountIgnoresLinearGroups) {
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1000, 1001, 1002, 1003});
+    resource->initGroups(test::makeTestCacheTopology(/*group_num=*/2,
+                                                     /*layer_num=*/2,
+                                                     {{0}, {1}},
+                                                     /*kernel_blocks_per_kv_block=*/1,
+                                                     {CacheGroupType::FULL, CacheGroupType::LINEAR}));
+    resource->mutableBlockIds("group0").assign({10, 11, 12});
+    resource->mutableBlockIds("group1").assign({20});
 
     P2PConnectorAsyncMatchContext ctx(resource);
     EXPECT_EQ(ctx.matchedBlockCount(), 3u);
