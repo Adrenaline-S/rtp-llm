@@ -147,10 +147,10 @@ public:
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {
         return;
     }
-    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                       const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
-                       std::vector<TaggedBlockIdPair>& block_update_mapping) override {
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<GroupBlockIdPair>& block_update_mapping) override {
         return false;
     }
     int seqSizePerBlock() const override {
@@ -325,11 +325,11 @@ public:
 
 private:
     void setResourceBlocks(KVCacheResource&                                                     resource,
-                           std::initializer_list<std::pair<std::string_view, BlockIndicesType>> blocks_by_tag) {
+                           std::initializer_list<std::pair<std::string_view, BlockIndicesType>> group_blocks) {
         const auto allocator = std::dynamic_pointer_cast<FakeKVCacheAllocator>(allocator_);
         ASSERT_NE(allocator, nullptr);
         resource.initGroups(allocator->topology());
-        for (const auto& [tag, blocks] : blocks_by_tag) {
+        for (const auto& [tag, blocks] : group_blocks) {
             resource.mutableBlockIds(tag).assign(blocks);
         }
     }

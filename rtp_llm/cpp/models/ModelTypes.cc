@@ -27,12 +27,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths.defined() ? inputs.prefix_lengths.numel() : 0;
     int32_t max_kernel_blocks_hint = 0;
     int32_t max_blocks_hint        = 0;
-    RTP_LLM_CHECK_WITH_INFO(inputs.block_tables_by_tag.size() <= kMaxCacheGroups,
+    RTP_LLM_CHECK_WITH_INFO(inputs.group_block_tables.size() <= kMaxCacheGroups,
                             "too many tagged KV cache groups: %zu > %zu",
-                            inputs.block_tables_by_tag.size(),
+                            inputs.group_block_tables.size(),
                             kMaxCacheGroups);
     size_t group_hint_offset = GptModelInputIndex::gptModelInputLength;
-    for (const auto& [tag, table] : inputs.block_tables_by_tag) {
+    for (const auto& [tag, table] : inputs.group_block_tables) {
         RTP_LLM_CHECK_WITH_INFO(table.tag == tag, "block table key/tag mismatch for tag=%s", tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
             tag.size() <= kMaxCacheTagSize, "KV cache tag is too long: tag=%s length=%zu", tag.c_str(), tag.size());
@@ -53,7 +53,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]       = max_blocks_hint;
     shape_hints_ptr[GptModelInputIndex::cacheKeysWidth] =
         inputs.cache_keys.defined() && inputs.cache_keys.dim() >= 2 ? inputs.cache_keys.size(1) : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] = inputs.block_tables_by_tag.size();
+    shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] = inputs.group_block_tables.size();
     // Kept as a reserved zero-valued slot for shape-hint wire compatibility.
     shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen] = 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen]   = 0;
@@ -207,7 +207,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             auto   kernel_backing   = allocBuf(rtp_llm::DataType::TYPE_INT32, {kernel_numel});
             size_t physical_offset  = 0;
             size_t kernel_offset    = 0;
-            inputs.block_tables_by_tag.clear();
+            inputs.group_block_tables.clear();
             for (const auto& [tag, type] : group_types) {
                 const auto      width        = group_widths.at(tag);
                 const auto      kernel_width = group_kernel_widths.at(tag);
@@ -221,7 +221,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                         .view({static_cast<int64_t>(batch_size), static_cast<int64_t>(kernel_width)});
                 physical_offset += batch_size * width;
                 kernel_offset += batch_size * kernel_width;
-                const auto [it, inserted] = inputs.block_tables_by_tag.emplace(tag, std::move(table));
+                const auto [it, inserted] = inputs.group_block_tables.emplace(tag, std::move(table));
                 (void)it;
                 RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate broadcast KV cache tag=%s", tag.c_str());
             }
@@ -316,7 +316,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
     if (max_kernel_blocks || max_blocks) {
-        for (auto& [tag, table] : inputs.block_tables_by_tag) {
+        for (auto& [tag, table] : inputs.group_block_tables) {
             (void)tag;
             collect(table.kernel_block_ids);
             collect(table.block_ids);
@@ -444,10 +444,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.kv_cache_update_mapping.reserve(update_count);
         const auto* wire = update_wire.defined() ? update_wire.data_ptr<uint8_t>() : nullptr;
         for (size_t i = 0; i < update_count; ++i) {
-            const auto*       record   = wire + i * kUpdateWireRecordSize;
-            const auto*       end      = static_cast<const uint8_t*>(std::memchr(record, '\0', kMaxCacheTagSize));
-            const size_t      tag_size = end ? static_cast<size_t>(end - record) : kMaxCacheTagSize;
-            TaggedBlockIdPair mapping;
+            const auto*      record   = wire + i * kUpdateWireRecordSize;
+            const auto*      end      = static_cast<const uint8_t*>(std::memchr(record, '\0', kMaxCacheTagSize));
+            const size_t     tag_size = end ? static_cast<size_t>(end - record) : kMaxCacheTagSize;
+            GroupBlockIdPair mapping;
             mapping.tag.assign(reinterpret_cast<const char*>(record), tag_size);
             std::memcpy(&mapping.src, record + kMaxCacheTagSize, sizeof(mapping.src));
             std::memcpy(&mapping.dst, record + kMaxCacheTagSize + sizeof(mapping.src), sizeof(mapping.dst));

@@ -11,7 +11,7 @@ namespace rtp_llm {
 
 class DecodeRpcServer: public RemoteRpcServer {
 public:
-    using BlockIdsByTag = std::map<std::string, std::shared_ptr<BlockIds>>;
+    using GroupBlockIds = std::map<std::string, std::shared_ptr<BlockIds>>;
     DecodeRpcServer() {}
     ~DecodeRpcServer();
     grpc::Status init(const EngineInitParams&                                maga_init_params,
@@ -30,7 +30,7 @@ public:
                            const std::string&               request_key,
                            const std::vector<std::string>&  peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
-                           BlockIdsByTag                    block_ids_by_tag,
+                           GroupBlockIds                    group_block_ids,
                            int64_t                          reuse_block_size,
                            int64_t                          timeout_ms,
                            int                              partition_count,
@@ -41,7 +41,7 @@ public:
             request_key(request_key),
             peer_addrs(peer_addrs),
             cache_keys(cache_keys),
-            block_ids_by_tag(std::move(block_ids_by_tag)),
+            group_block_ids(std::move(group_block_ids)),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
             partition_count(partition_count),
@@ -52,7 +52,7 @@ public:
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
-        BlockIdsByTag                    block_ids_by_tag;
+        GroupBlockIds                    group_block_ids;
         int64_t                          reuse_block_size;
         int64_t                          timeout_ms;
         int                              partition_count;
@@ -86,7 +86,7 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static BlockIdsByTag   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
     static std::string     makeGroupRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);

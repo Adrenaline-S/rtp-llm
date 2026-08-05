@@ -16,7 +16,7 @@ HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
 
 
-class TaggedBlockTableModel:
+class GroupedBlockTableModel:
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -30,7 +30,7 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedSequenceLengthModel:
+class GroupedSequenceLengthModel:
     """Expose the cumulative lengths used by a tagged captured graph."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -221,7 +221,7 @@ def _build_target_verify_inputs(
     )
 
 
-class TestCudaGraphTaggedCache(unittest.TestCase):
+class TestCudaGraphGroupedCache(unittest.TestCase):
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:
@@ -234,7 +234,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_decode_tag_validation_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -269,10 +269,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             )
         )
 
-    def test_prefill_tagged_capture_and_replay_updates(self) -> None:
+    def test_prefill_grouped_capture_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
         runner.init_prefill(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             2,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -299,7 +299,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             RuntimeError, "duplicate CUDA graph KV cache tag=full"
         ):
             runner.init_decode(
-                TaggedBlockTableModel(),
+                GroupedBlockTableModel(),
                 HIDDEN_SIZE,
                 TOKENS_PER_BLOCK,
                 TOKENS_PER_BLOCK,
@@ -311,7 +311,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_target_verify_validates_exact_tag_set(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -359,7 +359,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         prefix_len = 11
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedSequenceLengthModel(),
+            GroupedSequenceLengthModel(),
             HIDDEN_SIZE,
             64,
             TOKENS_PER_BLOCK,

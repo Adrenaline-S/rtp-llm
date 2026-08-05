@@ -11,14 +11,14 @@ namespace {
 DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&                    request_key,
                                                     const std::vector<std::string>&       peer_addrs,
                                                     const std::vector<CacheKeyType>&      cache_keys,
-                                                    const DecodeRpcServer::BlockIdsByTag& block_ids_by_tag,
+                                                    const DecodeRpcServer::GroupBlockIds& group_block_ids,
                                                     int32_t                               prefill_cp_size,
                                                     int64_t                               reuse_block_size = 0) {
     return {/*request_id=*/42,
             request_key,
             peer_addrs,
             cache_keys,
-            block_ids_by_tag,
+            group_block_ids,
             reuse_block_size,
             /*timeout_ms=*/1000,
             /*partition_count=*/1,
@@ -73,9 +73,9 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     const std::string                    request_key = "request";
     const std::vector<std::string>       peer_addrs  = {"prefill-0", "prefill-1"};
     const std::vector<CacheKeyType>      cache_keys  = {101, 102};
-    const DecodeRpcServer::BlockIdsByTag block_ids_by_tag;
+    const DecodeRpcServer::GroupBlockIds group_block_ids;
     const auto                           load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_tag, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, group_block_ids, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
@@ -98,9 +98,9 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     const std::string                    request_key = "request";
     const std::vector<std::string>       peer_addrs  = {"prefill-0", "prefill-1"};
     const std::vector<CacheKeyType>      cache_keys  = {101};
-    const DecodeRpcServer::BlockIdsByTag block_ids_by_tag;
+    const DecodeRpcServer::GroupBlockIds group_block_ids;
     const auto                           load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_tag, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, group_block_ids, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
 
