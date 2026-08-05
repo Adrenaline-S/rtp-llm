@@ -311,8 +311,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    if (!load_context.block_ids_by_tag.empty()) {
-        for (const auto& [tag, group_block] : load_context.block_ids_by_tag) {
+    if (!load_context.group_block_ids.empty()) {
+        for (const auto& [tag, group_block] : load_context.group_block_ids) {
             RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block for tag=%s", tag.c_str());
             auto* tagged_row = request.add_tagged_group_block_ids();
             tagged_row->set_tag(tag);
@@ -372,8 +372,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
         request.add_cache_keys(cache_key);
     }
     // Prefer per-group block ids if available (hybrid KV cache).
-    if (!load_context.block_ids_by_tag.empty()) {
-        for (const auto& [tag, group_block] : load_context.block_ids_by_tag) {
+    if (!load_context.group_block_ids.empty()) {
+        for (const auto& [tag, group_block] : load_context.group_block_ids) {
             RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block for tag=%s", tag.c_str());
             auto* tagged_row = request.add_tagged_group_block_ids();
             tagged_row->set_tag(tag);
@@ -391,9 +391,9 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     RTP_LLM_PROFILE_FUNCTION();
     auto*         generate_stream = decode_context.getStream().get();
     auto&         cache_keys      = generate_stream->cacheKeys(0);
-    BlockIdsByTag block_ids_by_tag;
+    GroupBlockIds group_block_ids;
     for (const auto& [tag, block_ids] : generate_stream->kvCachePtr()->groupBlocks(0)) {
-        block_ids_by_tag.emplace(tag, block_ids);
+        group_block_ids.emplace(tag, block_ids);
     }
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
@@ -417,7 +417,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
                                     cache_keys,
-                                    std::move(block_ids_by_tag),
+                                    std::move(group_block_ids),
                                     generate_stream->reuseBlockSize(),
                                     min_timeout_ms,
                                     1,
@@ -824,10 +824,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto load_layer_cache =
                     std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
 
-                const auto group_it = load_context.block_ids_by_tag.find(tag);
-                RTP_LLM_CHECK_WITH_INFO(group_it != load_context.block_ids_by_tag.end(),
-                                        "missing RPC cache blocks for tag=%s",
-                                        tag.c_str());
+                const auto group_it = load_context.group_block_ids.find(tag);
+                RTP_LLM_CHECK_WITH_INFO(
+                    group_it != load_context.group_block_ids.end(), "missing RPC cache blocks for tag=%s", tag.c_str());
                 RTP_LLM_CHECK_WITH_INFO(group_it->second != nullptr, "null group_block for tag=%s", tag.c_str());
                 const auto& block_ids = group_it->second->blocks();
                 auto        block_num = block_ids.size();
@@ -955,8 +954,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto load_layer_cache = std::make_shared<RequestBlockBuffer>(
                                 std::to_string(load_context.request_id), request_key);
 
-                            const auto group_it = load_context.block_ids_by_tag.find(tag);
-                            RTP_LLM_CHECK_WITH_INFO(group_it != load_context.block_ids_by_tag.end(),
+                            const auto group_it = load_context.group_block_ids.find(tag);
+                            RTP_LLM_CHECK_WITH_INFO(group_it != load_context.group_block_ids.end(),
                                                     "missing MTP RPC cache blocks for tag=%s",
                                                     tag.c_str());
                             RTP_LLM_CHECK_WITH_INFO(
@@ -1123,9 +1122,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    BlockIdsByTag             block_ids_by_tag = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology        = cache_config.topology();
+    GroupBlockIds             group_block_ids = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1134,7 +1133,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->request_key(),
                                  peer_addrs,
                                  cache_keys,
-                                 std::move(block_ids_by_tag),
+                                 std::move(group_block_ids),
                                  request->reuse_block_size(),
                                  request->timeout_ms(),
                                  request->partition_count(),
@@ -1148,24 +1147,24 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     return grpc::Status::OK;
 }
 
-DecodeRpcServer::BlockIdsByTag DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
+DecodeRpcServer::GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
                                                                     const CacheTopology&          topology) {
-    BlockIdsByTag block_ids_by_tag;
+    GroupBlockIds group_block_ids;
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
         (void)topology.group(tagged_row.tag());
         RTP_LLM_CHECK_WITH_INFO(
-            block_ids_by_tag.count(tagged_row.tag()) == 0, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
+            group_block_ids.count(tagged_row.tag()) == 0, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
         auto holder = std::make_shared<BlockIds>();
         holder->assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
-        block_ids_by_tag.emplace(tagged_row.tag(), std::move(holder));
+        group_block_ids.emplace(tagged_row.tag(), std::move(holder));
     }
-    RTP_LLM_CHECK_WITH_INFO(block_ids_by_tag.size() == topology.groups().size(),
+    RTP_LLM_CHECK_WITH_INFO(group_block_ids.size() == topology.groups().size(),
                             "RPC cache tag set does not match local topology");
     for (const auto& group : topology.groups()) {
         RTP_LLM_CHECK_WITH_INFO(
-            block_ids_by_tag.count(group.tag) != 0, "RPC cache is missing local tag=%s", group.tag.c_str());
+            group_block_ids.count(group.tag) != 0, "RPC cache is missing local tag=%s", group.tag.c_str());
     }
-    return block_ids_by_tag;
+    return group_block_ids;
 }
 
 grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode_context) {

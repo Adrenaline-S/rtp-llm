@@ -213,17 +213,17 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 }
 
 // Helper function to setup KV cache for attention inputs
-torch_ext::AttentionInputsByTag
+torch_ext::GroupAttentionInputs
 PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                const GptModelInputs&         inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.setupKVCacheForAttentionInputs");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model setupKVCacheForAttentionInputs");
-    if (inputs.block_tables_by_tag.empty()) {
+    if (inputs.group_block_tables.empty()) {
         return {};
     }
 
-    torch_ext::AttentionInputsByTag by_group;
-    for (const auto& [tag, table] : inputs.block_tables_by_tag) {
+    torch_ext::GroupAttentionInputs by_group;
+    for (const auto& [tag, table] : inputs.group_block_tables) {
         RTP_LLM_CHECK_WITH_INFO(table.tag == tag, "block table key/tag mismatch for tag=%s", tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
             table.kernel_block_ids.dim() == 2, "kernel block table must be two-dimensional for tag=%s", tag.c_str());
@@ -320,7 +320,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     PyCacheStoreInputs cache_store_inputs;
     cache_store_inputs.input_lengths_host    = inputs.input_lengths;
     cache_store_inputs.prefix_lengths_host   = inputs.prefix_lengths;
-    cache_store_inputs.host_kv_cache_offset  = inputs.kv_cache_block_id;
     cache_store_inputs.request_id            = inputs.request_id;
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
     cache_store_inputs.cache_keys            = inputs.cache_keys;
@@ -359,7 +358,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     input_list.reserve(split_inputs.size());
 
     for (size_t i = 0; i < split_inputs.size(); ++i) {
-        const bool  is_real_micro_input   = !split_inputs[i].block_tables_by_tag.empty();
+        const bool  is_real_micro_input   = !split_inputs[i].group_block_tables.empty();
         const auto& micro_inputs          = is_real_micro_input ? split_inputs[i] : split_inputs[0];
         auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto        embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
@@ -376,7 +375,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                                torch::empty({0});
         calculatePaddingOffset(py_attn_inputs);
         py_attn_inputs.padding_offset = tensorHoldHostAndToCuda(py_attn_inputs.padding_offset);
-        auto attention_inputs_by_tag  = setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs);
+        auto group_attention_inputs   = setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs);
 
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
@@ -387,7 +386,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               embedding_inputs,
                                               multimodal_inputs,
                                               py_attn_inputs,
-                                              attention_inputs_by_tag,
+                                              group_attention_inputs,
                                               bert_embedding_inputs});
     }
 
@@ -533,7 +532,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
-        auto attention_inputs_by_tag    = setupKVCacheForAttentionInputs(attention_inputs, inputs);
+        auto group_attention_inputs     = setupKVCacheForAttentionInputs(attention_inputs, inputs);
 
         // launch fused copy
         fusedCopy(d2d_copies_);
@@ -544,7 +543,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         embedding_inputs,
                                                         multimodal_inputs,
                                                         attention_inputs,
-                                                        attention_inputs_by_tag,
+                                                        group_attention_inputs,
                                                         bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
@@ -848,8 +847,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.sequence_lengths =
                     inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
-                micro_model_inputs.block_tables_by_tag =
-                    sliceBlockTablesByBatch(inputs.block_tables_by_tag, sliced_batch_idx, total_batch_size);
+                micro_model_inputs.group_block_tables =
+                    sliceBlockTablesByBatch(inputs.group_block_tables, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
                 micro_model_inputs.attention_mask =
@@ -908,8 +907,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.attention_mask.defined() ?
                         inputs.attention_mask.narrow(0, sliced_batch_idx, d_micro_batch_size) :
                         torch::Tensor();
-                micro_model_inputs.block_tables_by_tag =
-                    sliceBlockTablesByBatch(inputs.block_tables_by_tag, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.group_block_tables =
+                    sliceBlockTablesByBatch(inputs.group_block_tables, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.prefix_lengths =
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
                 micro_model_inputs.lm_output_indexes =
@@ -931,8 +930,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size);
-                micro_model_inputs.block_tables_by_tag =
-                    sliceBlockTablesByBatch(inputs.block_tables_by_tag, sliced_batch_idx, p_micro_batch_size);
+                micro_model_inputs.group_block_tables =
+                    sliceBlockTablesByBatch(inputs.group_block_tables, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
                 micro_model_inputs.attention_mask =
@@ -996,7 +995,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.last_hidden_states);
 
     buffer_holder_.hold_host(inputs.attention_mask);
-    for (const auto& [tag, table] : inputs.block_tables_by_tag) {
+    for (const auto& [tag, table] : inputs.group_block_tables) {
         (void)tag;
         buffer_holder_.hold_host(table.block_ids);
         buffer_holder_.hold_host(table.kernel_block_ids);
