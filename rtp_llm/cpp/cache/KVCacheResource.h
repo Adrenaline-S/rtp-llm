@@ -119,19 +119,16 @@ public:
     const LayerAttnBlockIds& layerGroupBlocks() const;
     int                      groupId(int layer_id, int group_id) const;
 
-    CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
-    void                 setCacheKeys(const CacheKeysType& keys);
-    void                 setCacheKeys(CacheKeysType&& keys);
+    void                 setCacheKeysAndBlockDependencies(CacheKeysType keys, BlockDependenciesType dependencies);
+    void                 setCacheKeys(CacheKeysType keys);
     bool                 cacheKeysAreCpCanonical() const;
     void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
+    void                 appendCacheKey(CacheKeyType key);
+    void                 popBackCacheKey();
+    void                 clearCacheKeys();
 
-    BlockDependenciesType&       blockDependencies();
     const BlockDependenciesType& blockDependencies() const;
-    void                         setBlockDependencies(const BlockDependenciesType& dependencies);
-    void                         setBlockDependencies(BlockDependenciesType&& dependencies);
-    void                         rebuildLinearBlockDependencies();
-    void                         ensureLinearBlockDependencies();
 
     // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
     // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
@@ -173,6 +170,7 @@ private:
     int  groupIdForTag(std::string_view tag) const;
     int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
     bool hasOneGroupPerLayer() const;
+    void rebuildLinearBlockDependencies();
 
     std::unordered_map<std::string, int>  tag_to_group_id_;
     std::vector<std::vector<std::string>> layer_group_tags_;
