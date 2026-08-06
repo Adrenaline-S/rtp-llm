@@ -214,6 +214,13 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
+#ifdef USE_REMOTE_KV_CACHE
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
+        RTP_LLM_CHECK_WITH_INFO(config_.groupNums() == 1,
+                                "remote connector supports exactly one KV cache group, got %d",
+                                config_.groupNums());
+    }
+#endif
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);

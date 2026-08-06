@@ -90,8 +90,7 @@ std::optional<std::string> resolveDefaultMTPGroupAlias(const CacheConfig& target
             && target_config.kernelSeqSizePerBlockForGroup(target_group.tag)
                    == propose_config.kernelSeqSizePerBlockForGroup(source_group.tag)
             && target_group.kv_block_stride_bytes == source_group.kv_block_stride_bytes
-            && target_group.kv_scale_stride_bytes == source_group.kv_scale_stride_bytes
-            && target_group.uses_sparse_indexer_scale_layout == source_group.uses_sparse_indexer_scale_layout) {
+            && target_group.kv_scale_stride_bytes == source_group.kv_scale_stride_bytes) {
             candidates.push_back(target_group.tag);
         }
     }
@@ -315,9 +314,7 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
         }
         if (group.spec->type == KVCacheSpecType::MultiHeadAttention) {
             RTP_LLM_CHECK_WITH_INFO(group.kv_block_stride_bytes == expected_kv_stride
-                                        && (group.uses_sparse_indexer_scale_layout ?
-                                                group.kv_scale_stride_bytes >= expected_scale_stride :
-                                                group.kv_scale_stride_bytes == expected_scale_stride),
+                                        && group.kv_scale_stride_bytes == expected_scale_stride,
                                     "MHA cache group %zu tag=%s does not support padded rows: "
                                     "kv=%zu/%zu scale=%zu/%zu",
                                     gid,
@@ -326,11 +323,6 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
                                     expected_kv_stride,
                                     group.kv_scale_stride_bytes,
                                     expected_scale_stride);
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(!group.uses_sparse_indexer_scale_layout,
-                                    "non-MHA cache group %zu tag=%s cannot use sparse indexer scale layout",
-                                    gid,
-                                    group.tag.c_str());
         }
     }
 
@@ -402,9 +394,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
                                         && kernelSeqSizePerBlockForGroup(target_group.tag)
                                                == propose_config.kernelSeqSizePerBlockForGroup(source_group.tag)
                                         && target_group.kv_block_stride_bytes == source_group.kv_block_stride_bytes
-                                        && target_group.kv_scale_stride_bytes == source_group.kv_scale_stride_bytes
-                                        && target_group.uses_sparse_indexer_scale_layout
-                                               == source_group.uses_sparse_indexer_scale_layout,
+                                        && target_group.kv_scale_stride_bytes == source_group.kv_scale_stride_bytes,
                                     "CacheConfig::mergeMTPModule incompatible group tag=%s",
                                     tag.c_str());
             RTP_LLM_CHECK_WITH_INFO(
