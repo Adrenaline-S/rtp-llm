@@ -5,10 +5,8 @@
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
-#include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -178,29 +176,8 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
     validateModelBlockGranularity(model_config);
-    const auto  requires_independent_pools = std::any_of(model_config.kv_cache_spec_descs.begin(),
-                                                        model_config.kv_cache_spec_descs.end(),
-                                                        [](const auto& descs) { return descs.size() > 1; });
-    CacheConfig config;
-    if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools || requires_independent_pools) {
-        config = HybridPoolConfigCreator::createConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
-    } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
-        config = HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
-    } else {
-        config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
-    }
-
-    if (!model_config.hybrid_attention_config.enable_independent_kv_cache_pools && !requires_independent_pools) {
-        const auto full_group_num = std::count_if(
-            config.topology().groups().begin(), config.topology().groups().end(), [](const GroupBase& group) {
-                return group.policy.group_type == CacheGroupType::FULL && group.spec
-                       && (group.spec->type == KVCacheSpecType::MultiHeadAttention
-                           || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
-            });
-        RTP_LLM_CHECK_WITH_INFO(full_group_num == 1,
-                                "cache config requires exactly one FULL MHA/MLA cache group, got %zu",
-                                static_cast<size_t>(full_group_num));
-    }
+    CacheConfig config =
+        HybridPoolConfigCreator::createConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     for (const auto& group : config.topology().groups()) {
         if (group.policy.group_type == CacheGroupType::FULL) {
             RTP_LLM_CHECK_WITH_INFO(

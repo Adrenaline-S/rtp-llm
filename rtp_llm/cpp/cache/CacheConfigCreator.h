@@ -52,16 +52,6 @@ public:
     static LayerKVCacheSpecBuildResults buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
                                                                  const SpecBuildContext&      ctx,
                                                                  int64_t                      expected_layer_num);
-
-private:
-    // Removed functions moved to MemoryEvaluationHelper:
-    // getDefaultRuntimeMemorySize
-    // getKVCacheMemorySize
-
-    // Removed functions moved to dedicated creators:
-    // createSingleConfig
-    // createHybridConfig
-    // splitIntoGroups (moved to HybridConfigCreator)
 };
 
 }  // namespace rtp_llm
