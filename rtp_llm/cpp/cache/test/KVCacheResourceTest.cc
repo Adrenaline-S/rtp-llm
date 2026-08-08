@@ -13,11 +13,11 @@ namespace test {
 
 namespace {
 
-GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
+GroupTopology makeResourceGroup(std::string tag, CacheGroupType type) {
     auto spec = std::make_shared<MHAKVCacheSpec>(8, type == CacheGroupType::FULL ? 2 : 8);
     spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag       = std::move(tag);
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(type);

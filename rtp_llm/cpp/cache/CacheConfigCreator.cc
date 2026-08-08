@@ -128,7 +128,7 @@ buildLayerSpecs(const ModelConfig& model_config, const ParallelismConfig& parall
     return layer_specs;
 }
 
-std::pair<std::vector<GroupBase>, std::vector<LayerBase>>
+std::pair<std::vector<GroupTopology>, std::vector<LayerTopology>>
 buildTopology(const ModelConfig& model_config, const ParallelismConfig& parallelism_config, int gen_num_per_cycle) {
     validateModelBlockGranularity(model_config);
     const auto layer_specs = buildLayerSpecs(model_config, parallelism_config, gen_num_per_cycle);
@@ -175,15 +175,15 @@ buildTopology(const ModelConfig& model_config, const ParallelismConfig& parallel
         }
     }
 
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers(layer_specs.size());
+    std::vector<GroupTopology> groups;
+    std::vector<LayerTopology> layers(layer_specs.size());
     for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
         layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
     groups.reserve(ordered_tags.size());
     for (const auto& tag : ordered_tags) {
-        const auto& state = group_by_tag.at(tag);
-        GroupBase   group;
+        const auto&   state = group_by_tag.at(tag);
+        GroupTopology group;
         group.tag                   = tag;
         group.spec                  = state.spec;
         group.policy                = state.policy;
@@ -209,18 +209,19 @@ buildTopology(const ModelConfig& model_config, const ParallelismConfig& parallel
     return {std::move(groups), std::move(layers)};
 }
 
-const GroupBase* findGroup(const std::vector<GroupBase>& groups, const std::string& tag) {
+const GroupTopology* findGroup(const std::vector<GroupTopology>& groups, const std::string& tag) {
     const auto it =
-        std::find_if(groups.begin(), groups.end(), [&tag](const GroupBase& group) { return group.tag == tag; });
+        std::find_if(groups.begin(), groups.end(), [&tag](const GroupTopology& group) { return group.tag == tag; });
     return it == groups.end() ? nullptr : &*it;
 }
 
-std::pair<std::vector<GroupBase>, std::vector<LayerBase>> mergeMtpModule(std::vector<GroupBase>&       target_groups,
-                                                                         std::vector<LayerBase>&       target_layers,
-                                                                         const std::vector<GroupBase>& propose_groups,
-                                                                         uint32_t                      mtp_layer_num,
-                                                                         int                           module_index,
-                                                                         uint32_t                      main_layer_num) {
+std::pair<std::vector<GroupTopology>, std::vector<LayerTopology>>
+mergeMtpModule(std::vector<GroupTopology>&       target_groups,
+               std::vector<LayerTopology>&       target_layers,
+               const std::vector<GroupTopology>& propose_groups,
+               uint32_t                          mtp_layer_num,
+               int                               module_index,
+               uint32_t                          main_layer_num) {
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "invalid MTP module_index=%d", module_index);
     const size_t total_layers =
         static_cast<size_t>(main_layer_num) + static_cast<size_t>(module_index + 1) * mtp_layer_num;
@@ -234,16 +235,16 @@ std::pair<std::vector<GroupBase>, std::vector<LayerBase>> mergeMtpModule(std::ve
                                 propose_group.tag.c_str());
     }
 
-    std::vector<GroupBase> sub_groups;
-    std::vector<LayerBase> sub_layers(mtp_layer_num);
+    std::vector<GroupTopology> sub_groups;
+    std::vector<LayerTopology> sub_layers(mtp_layer_num);
     sub_groups.reserve(target_groups.size());
     for (size_t layer_id = 0; layer_id < sub_layers.size(); ++layer_id) {
         sub_layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
 
     for (auto& target_group : target_groups) {
-        const GroupBase* source_group = findGroup(propose_groups, target_group.tag);
-        GroupBase        sub_group    = source_group == nullptr ? target_group : *source_group;
+        const GroupTopology* source_group = findGroup(propose_groups, target_group.tag);
+        GroupTopology        sub_group    = source_group == nullptr ? target_group : *source_group;
         sub_group.layer_ids.clear();
         if (source_group != nullptr) {
             RTP_LLM_CHECK_WITH_INFO(target_group.spec->layoutFingerprint() == source_group->spec->layoutFingerprint()

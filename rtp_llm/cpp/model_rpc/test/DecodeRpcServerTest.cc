@@ -27,12 +27,12 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             prefill_cp_size};
 }
 
-GroupBase
+GroupTopology
 makeRpcGroup(std::string tag, std::vector<int> layer_ids, uint32_t physical_tokens = 8, uint32_t kernel_tokens = 8) {
     auto spec = std::make_shared<MHAKVCacheSpec>(physical_tokens, kernel_tokens);
     spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag                       = std::move(tag);
     group.spec                      = std::move(spec);
     group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);

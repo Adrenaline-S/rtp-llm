@@ -15,7 +15,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
@@ -147,7 +147,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         add_tag(layer, "swa_kv", 6);
     }
 
-    std::vector<GroupBase> groups;
+    std::vector<GroupTopology> groups;
     groups.reserve(kDsv4PoolNum);
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
         auto group                      = makeTestGroupForConfig(config,
@@ -178,7 +178,7 @@ CacheConfig makeCanonicalCompositeMemoryCopyConfig() {
         return group;
     };
 
-    std::vector<GroupBase> groups;
+    std::vector<GroupTopology> groups;
     groups.push_back(make_group("zeta", 32, {0}, CacheGroupType::FULL));
     groups.push_back(make_group("beta", 24, {1, 2}, CacheGroupType::FULL));
     groups.push_back(make_group("alpha", 16, {0, 2}, CacheGroupType::FULL));
@@ -191,8 +191,8 @@ void initResourceGroupsForConfig(KVCacheResource& resource, const CacheConfig& c
 }
 
 void setGroupStridesForConfig(CacheConfig& config, size_t kv_block_stride_bytes, size_t kv_scale_stride_bytes) {
-    const auto             topology_groups = config.topology().groups();
-    std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
+    const auto                 topology_groups = config.topology().groups();
+    std::vector<GroupTopology> groups(topology_groups.begin(), topology_groups.end());
     for (auto& group : groups) {
         group.kv_block_stride_bytes = kv_block_stride_bytes;
         group.kv_scale_stride_bytes = kv_scale_stride_bytes;
@@ -252,12 +252,12 @@ void verifyBlockInfosContent(const std::vector<BlockInfo>& infos, char c) {
     }
 }
 
-class FakeTypedKVCacheAllocator: public KVCacheAllocator {
+class FakeTypedCoordinatorKVCacheManager: public CoordinatorKVCacheManager {
 public:
-    explicit FakeTypedKVCacheAllocator(const CacheConfig&    config,
-                                       size_t                payload_gap_bytes = 0,
-                                       std::set<std::string> host_groups       = {}):
-        KVCacheAllocator(config, AllocationType::DEVICE),
+    explicit FakeTypedCoordinatorKVCacheManager(const CacheConfig&    config,
+                                                size_t                payload_gap_bytes = 0,
+                                                std::set<std::string> host_groups       = {}):
+        CoordinatorKVCacheManager(config, AllocationType::DEVICE),
         host_groups_(std::move(host_groups)),
         payload_gap_bytes_(payload_gap_bytes) {
         const auto cuda_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
@@ -419,7 +419,7 @@ TEST(KVCacheBatchedMemoryCopyTest, CanonicalCompositeSlotsAreSortedAndSizedBySlo
     kv_config.memory_cache_sync_timeout_ms = 1000;
 
     auto connector = std::make_shared<KVCacheMemoryConnector>(
-        config, kv_config, std::shared_ptr<KVCacheAllocator>(), std::vector<std::string>{"127.0.0.1:1"});
+        config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), std::vector<std::string>{"127.0.0.1:1"});
     const auto& slots = connector->layerGroupSlots();
 
     ASSERT_EQ(slots.size(), 5u);
@@ -448,7 +448,7 @@ TEST(KVCacheBatchedMemoryCopyTest, CanonicalCompositeMemoryRoundTripPreservesNul
     kv_config.memory_cache_size_mb         = 1;
     kv_config.memory_cache_sync_timeout_ms = 1000;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(
         config, /*payload_gap_bytes=*/0, std::set<std::string>{"alpha", "beta", "zeta"});
     auto connector =
         std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, std::vector<std::string>{"127.0.0.1:1"});
@@ -525,7 +525,7 @@ TEST(KVCacheBatchedMemoryCopyTest, CanonicalCompositeDiskRoundTripUsesSlotSumBlo
     kv_config.memory_cache_size_mb         = 1;
     kv_config.memory_cache_sync_timeout_ms = 1000;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(
         config, /*payload_gap_bytes=*/0, std::set<std::string>{"alpha", "beta", "zeta"});
     auto connector =
         std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, std::vector<std::string>{"127.0.0.1:1"});
@@ -593,8 +593,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     kv_config.memory_cache_sync_timeout_ms = 1000;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto                     connector =
-        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector    = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), server_addrs);
     const auto slots = connector->layerGroupSlots();
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
@@ -640,8 +640,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     kv_config.enable_legacy_memory_connector_fallback = false;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto                     connector =
-        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector    = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
 
@@ -715,7 +715,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
@@ -770,7 +770,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
@@ -829,7 +829,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
@@ -947,7 +947,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
@@ -1040,7 +1040,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesDisjointSlotMas
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
@@ -1142,7 +1142,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesOverlappingSlot
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
@@ -1245,7 +1245,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitCoveredMaskReleasesRejectedBa
     kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
-    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+    auto allocator = std::make_shared<FakeTypedCoordinatorKVCacheManager>(config);
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
@@ -1310,8 +1310,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     kv_config.enable_legacy_memory_connector_fallback = false;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto                     connector =
-        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector    = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<CoordinatorKVCacheManager>(), server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
     ASSERT_EQ(connector->compressed_pool_->totalBlocksNum(), 1u);

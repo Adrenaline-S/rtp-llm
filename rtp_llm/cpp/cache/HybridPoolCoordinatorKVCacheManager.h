@@ -6,23 +6,23 @@
 #include <unordered_set>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullKVCacheManager.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheManager.h"
+#include "rtp_llm/cpp/cache/SWAKVCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
-class HybridPoolKVCacheAllocator:
-    public KVCacheAllocator,
-    public std::enable_shared_from_this<HybridPoolKVCacheAllocator> {
+class HybridPoolCoordinatorKVCacheManager:
+    public CoordinatorKVCacheManager,
+    public std::enable_shared_from_this<HybridPoolCoordinatorKVCacheManager> {
 public:
-    HybridPoolKVCacheAllocator(const CacheConfig&                 config,
-                               AllocationType                     allocation_type     = AllocationType::DEVICE,
-                               const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                               int64_t                            reserve_block_ratio = 0,
-                               RoleType                           role_type           = RoleType::PDFUSION);
+    HybridPoolCoordinatorKVCacheManager(const CacheConfig&                 config,
+                                        AllocationType                     allocation_type     = AllocationType::DEVICE,
+                                        const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                                        int64_t                            reserve_block_ratio = 0,
+                                        RoleType                           role_type           = RoleType::PDFUSION);
 
     void free(const FreeInfo& free_info) override;
     void insertIntoCache(const InsertInfo& insert_info) override;
@@ -113,9 +113,9 @@ private:
                             const std::vector<std::unordered_map<std::string, size_t>>& original_sizes,
                             int                                                         failed_batch);
     void copyBlockMappingForGroup(std::string_view tag, const std::vector<BlockIdPair>& block_update_mapping) const;
-    MemoryType             memoryTypeForGroup(std::string_view tag) const;
-    const KVCacheGroupPtr& cacheGroupForTag(std::string_view tag, const char* context) const;
-    const BlockPoolPtr&    blockPoolForTag(std::string_view tag, const char* context) const;
+    MemoryType                         memoryTypeForGroup(std::string_view tag) const;
+    const SingleTypeKVCacheManagerPtr& singleTypeManagerForTag(std::string_view tag, const char* context) const;
+    const BlockPoolPtr&                blockPoolForTag(std::string_view tag, const char* context) const;
 
     size_t maxSequenceLengthForGroups(bool full_groups_only) const;
     size_t minPoolTokens(bool use_available_blocks) const;
@@ -123,14 +123,14 @@ private:
     size_t
     reserveBlocksForPool(std::string_view tag, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
 
-    std::unordered_map<std::string, KVCacheGroupPtr> kv_cache_groups_;
-    std::vector<std::string>                         full_group_tags_;
-    std::vector<std::string>                         linear_group_tags_;
-    std::vector<std::string>                         swa_group_tags_;
-    std::unordered_map<std::string, BlockPoolPtr>    group_block_pools_;
-    RoleType                                         role_type_{RoleType::PDFUSION};
+    std::unordered_map<std::string, SingleTypeKVCacheManagerPtr> single_type_managers_;
+    std::vector<std::string>                                     full_group_tags_;
+    std::vector<std::string>                                     linear_group_tags_;
+    std::vector<std::string>                                     swa_group_tags_;
+    std::unordered_map<std::string, BlockPoolPtr>                group_block_pools_;
+    RoleType                                                     role_type_{RoleType::PDFUSION};
 };
 
-using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;
+using HybridPoolCoordinatorKVCacheManagerPtr = std::shared_ptr<HybridPoolCoordinatorKVCacheManager>;
 
 }  // namespace rtp_llm
