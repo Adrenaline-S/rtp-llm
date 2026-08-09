@@ -171,37 +171,22 @@ uint32_t CacheConfig::blockNum() const {
         return *finalized_global_block_num_;
     }
     const GroupBase* canonical = nullptr;
-    if (use_independent_block_pools) {
-        for (const auto& group : topology().groups()) {
-            const bool global_paged_group = group.policy.explicit_block_num == 0
-                                            && (group.policy.group_type == CacheGroupType::FULL
-                                                || group.policy.group_type == CacheGroupType::LINEAR);
-            if (!global_paged_group) {
-                continue;
-            }
-            if (canonical == nullptr) {
-                canonical = &group;
-            } else {
-                RTP_LLM_CHECK_WITH_INFO(canonical->block_num == group.block_num,
-                                        "global paged cache groups have inconsistent block counts: %s=%u %s=%u",
-                                        canonical->tag.c_str(),
-                                        canonical->block_num,
-                                        group.tag.c_str(),
-                                        group.block_num);
-            }
+    for (const auto& group : topology().groups()) {
+        const bool global_paged_group =
+            group.policy.explicit_block_num == 0
+            && (group.policy.group_type == CacheGroupType::FULL || group.policy.group_type == CacheGroupType::LINEAR);
+        if (!global_paged_group) {
+            continue;
         }
-    } else {
-        for (const auto& group : topology().groups()) {
-            if (canonical == nullptr) {
-                canonical = &group;
-            } else {
-                RTP_LLM_CHECK_WITH_INFO(canonical->block_num == group.block_num,
-                                        "shared-pool cache groups have inconsistent block counts: %s=%u %s=%u",
-                                        canonical->tag.c_str(),
-                                        canonical->block_num,
-                                        group.tag.c_str(),
-                                        group.block_num);
-            }
+        if (canonical == nullptr) {
+            canonical = &group;
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(canonical->block_num == group.block_num,
+                                    "global paged cache groups have inconsistent block counts: %s=%u %s=%u",
+                                    canonical->tag.c_str(),
+                                    canonical->block_num,
+                                    group.tag.c_str(),
+                                    group.block_num);
         }
     }
     if (canonical != nullptr) {
@@ -214,15 +199,6 @@ size_t CacheConfig::groupLayerNum() const {
     size_t result = 0;
     for (const auto& group : topology().groups()) {
         result = std::max(result, group.layer_ids.size());
-    }
-    return result;
-}
-
-size_t CacheConfig::layerBlockStrideBytes(int layer_id) const {
-    size_t result = 0;
-    for (const auto& group_ref : groupsForLayer(layer_id)) {
-        const auto& group = group_ref.get();
-        result            = std::max(result, group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
     }
     return result;
 }
@@ -546,14 +522,7 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         }
     }
 
-    if (!use_independent_block_pools || groupNums() == 0) {
-        if (groupNums() > 0) {
-            auto groups = copyGroups(topology());
-            for (auto& group : groups) {
-                group.block_num = global_block_num;
-            }
-            setTopology(std::move(groups), topology().layers());
-        }
+    if (groupNums() == 0) {
         return;
     }
 

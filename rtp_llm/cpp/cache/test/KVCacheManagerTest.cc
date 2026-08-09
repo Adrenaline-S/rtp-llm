@@ -302,14 +302,15 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
-TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
+TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearGroup) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
-    EXPECT_THROW(cache_manager->init(), std::runtime_error);
+    ASSERT_TRUE(cache_manager->init());
     ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->getBlockPool(), nullptr);
+    EXPECT_NE(cache_manager->allocator_->getBlockPool("linear"), nullptr);
+    EXPECT_NE(cache_manager->convertIndexToAddr(1, 0, "linear").kv_addr, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
@@ -1123,7 +1124,7 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
-    const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
+    const size_t physical_capacity = hybrid_allocator->totalTokensNum();
     auto         cp_slot_mapper =
         std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, static_cast<int>(cache_config.seq_size_per_block));
     kv_cache_manager->cp_slot_mapper_ = cp_slot_mapper;
@@ -1140,8 +1141,8 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
                      pool->totalBlocksNum() * static_cast<size_t>(cache_config.seq_size_per_block * 2));
     }
 
-    EXPECT_EQ(kv_cache_manager->maxAvailableTokensNum(), expected_logical_capacity);
-    EXPECT_GT(kv_cache_manager->maxAvailableTokensNum(), physical_capacity);
+    EXPECT_EQ(kv_cache_manager->maxSequenceLength(), expected_logical_capacity);
+    EXPECT_GT(kv_cache_manager->maxSequenceLength(), physical_capacity);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailable) {

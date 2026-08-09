@@ -58,11 +58,11 @@ int64_t FIFOSchedulerBase::lastScheduleTime() {
 }
 
 bool FIFOSchedulerBase::checkInputLength(const GenerateStreamPtr& stream) {
-    if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
+    if (stream->inputLength() > cache_manager_->maxSequenceLength()) {
         stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                             autil::StringUtil::formatString("input len " + std::to_string(stream->inputLength())
                                                             + " is greater than kv cache max available tokens num "
-                                                            + std::to_string(cache_manager_->maxAvailableTokensNum())));
+                                                            + std::to_string(cache_manager_->maxSequenceLength())));
         return false;
     }
     return true;

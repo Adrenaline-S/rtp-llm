@@ -235,16 +235,11 @@ cc_library(
 cc_library(
     name = "kv_cache_allocator",
     srcs = [
-        "HybridKVCacheAllocator.cc",
         "HybridPoolKVCacheAllocator.cc",
-        "KVCacheAllocator.cc",
-        "SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
-        "HybridKVCacheAllocator.h",
         "HybridPoolKVCacheAllocator.h",
         "KVCacheAllocator.h",
-        "SingleTypeKVCacheAllocator.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -295,7 +290,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":batch_kv_cache_resource",
-        ":block_pool",
         ":cache_types",
         ":kv_cache_allocator",
         "//rtp_llm/cpp/config:model_config",

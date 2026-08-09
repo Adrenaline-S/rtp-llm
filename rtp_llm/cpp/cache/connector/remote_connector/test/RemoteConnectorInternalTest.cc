@@ -139,9 +139,6 @@ public:
                                bool                   enable_reuse_cache) const override {
         return 0;
     }
-    int getNeedBlocks(const MallocInfo& malloc_info) const override {
-        return 0;
-    }
     int estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                            int  common_seq_len,
                                            int  remaining_tokens,
@@ -167,6 +164,9 @@ public:
     int seqSizePerBlock() const override {
         return 0;
     }
+    BlockPoolPtr getBlockPool(std::string_view) const override {
+        return nullptr;
+    }
 
     bool doInit() override {
         return true;
@@ -179,9 +179,6 @@ public:
         return 0;
     }
     size_t availableBlocksNum() const {
-        return 0;
-    }
-    size_t availableTokensNum() const {
         return 0;
     }
     size_t totalBlocksNum() const {
