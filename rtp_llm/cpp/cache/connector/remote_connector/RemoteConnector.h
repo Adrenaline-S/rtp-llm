@@ -27,6 +27,8 @@ class RemoteConnectorAsyncContext;
 
 class RemoteConnector: public KVCacheConnector {
 public:
+    static void validateConfig(const CacheConfig& cache_config);
+
     RemoteConnector(const CacheConfig&                        cache_config,
                     const KVCacheConfig&                      kv_cache_config,
                     const RuntimeConfig&                      runtime_config,

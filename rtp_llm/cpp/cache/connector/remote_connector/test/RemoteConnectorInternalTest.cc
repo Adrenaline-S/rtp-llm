@@ -231,16 +231,12 @@ public:
     void SetUp() override {
         rtp_llm::initLogger();
         auto mha_spec           = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
-        auto linear_spec_1      = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
-        auto linear_spec_2      = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
         cache_config_.layer_num = layer_num_;
         byte_size_per_block_    = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
         setTestTopology(cache_config_,
-                        {makeTestGroupForConfig(cache_config_, mha_spec, layers, CacheGroupType::FULL, "0"),
-                         makeTestGroupForConfig(cache_config_, linear_spec_1, layers, CacheGroupType::LINEAR, "1"),
-                         makeTestGroupForConfig(cache_config_, linear_spec_2, layers, CacheGroupType::LINEAR, "2")});
+                        {makeTestGroupForConfig(cache_config_, mha_spec, layers, CacheGroupType::FULL, "0")});
         const auto             topology_groups = cache_config_.topology().groups();
         std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
         for (auto& group : groups) {
@@ -254,11 +250,10 @@ public:
     void TearDown() override {}
 
 private:
-    std::shared_ptr<RemoteConnector> getFullLinearPolicyConnector() const {
+    std::shared_ptr<RemoteConnector> getFullPolicyConnector() const {
         std::vector<std::string> full_group_tags({"0"});
-        std::vector<std::string> linear_group_tags({"1", "2"});
-        auto                     allocator =
-            std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_tags, linear_group_tags, layer_num_);
+        auto                     allocator = std::make_shared<FakeKVCacheAllocator>(
+            cache_config_, full_group_tags, std::vector<std::string>{}, layer_num_);
         return std::shared_ptr<RemoteConnector>(new RemoteConnector(
             cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
     }
@@ -274,13 +269,13 @@ private:
 
 TEST_F(RemoteConnectorInternalTest, test_genClientConfig) {
     {
-        auto connector = getFullLinearPolicyConnector();
+        auto connector = getFullPolicyConnector();
         ASSERT_TRUE(connector->group_policy_->init());
         auto config_map = connector->genClientConfig();
         ASSERT_EQ(1, config_map.size());
     }
     {
-        auto connector = getFullLinearPolicyConnector();
+        auto connector = getFullPolicyConnector();
         ASSERT_TRUE(connector->group_policy_->init());
 
         auto config_map_1 = connector->genClientConfig();
@@ -291,68 +286,33 @@ TEST_F(RemoteConnectorInternalTest, test_genClientConfig) {
 }
 
 TEST_F(RemoteConnectorInternalTest, test_genLocationSpecInfoMapAndGroups) {
-    auto connector = getFullLinearPolicyConnector();
+    auto connector = getFullPolicyConnector();
     ASSERT_TRUE(connector->group_policy_->init());
 
     auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(2);
-    ASSERT_EQ((std::map<std::string, int64_t>({{"tp0_F0", byte_size_per_block_},
-                                               {"tp0_L1", byte_size_per_block_},
-                                               {"tp0_L2", byte_size_per_block_},
-                                               {"tp1_F0", byte_size_per_block_},
-                                               {"tp1_L1", byte_size_per_block_},
-                                               {"tp1_L2", byte_size_per_block_}})),
+    ASSERT_EQ((std::map<std::string, int64_t>({{"tp0_F0", byte_size_per_block_}, {"tp1_F0", byte_size_per_block_}})),
               *spec_info_map);
-    EXPECT_EQ((std::map<std::string, std::vector<std::string>>(
-                  {{"F0", {"tp0_F0", "tp1_F0"}},
-                   {"F0L1L2", {"tp0_F0", "tp1_F0", "tp0_L1", "tp1_L1", "tp0_L2", "tp1_L2"}},
-                   {"L1", {"tp0_L1", "tp1_L1"}},
-                   {"L2", {"tp0_L2", "tp1_L2"}}})),
-              *spec_groups);
-    EXPECT_EQ(
-        (std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"}, {0b100, "L2"}, {0b010, "L1"}, {0b001, "F0"}})),
-        connector->group_policy_->location_spec_group_map_);
-    EXPECT_EQ((GroupPolicy::SpecInfoMap({{"tp0_F0", GroupPolicy::SpecInfo({0, "0"})},
-                                         {"tp0_L1", GroupPolicy::SpecInfo({0, "1"})},
-                                         {"tp0_L2", GroupPolicy::SpecInfo({0, "2"})},
-                                         {"tp1_F0", GroupPolicy::SpecInfo({1, "0"})},
-                                         {"tp1_L1", GroupPolicy::SpecInfo({1, "1"})},
-                                         {"tp1_L2", GroupPolicy::SpecInfo({1, "2"})}})),
+    EXPECT_EQ((std::map<std::string, std::vector<std::string>>({{"F0", {"tp0_F0", "tp1_F0"}}})), *spec_groups);
+    EXPECT_EQ((std::unordered_map<uint64_t, std::string>({{0b1, "F0"}})),
+              connector->group_policy_->location_spec_group_map_);
+    EXPECT_EQ((GroupPolicy::SpecInfoMap(
+                  {{"tp0_F0", GroupPolicy::SpecInfo({0, "0"})}, {"tp1_F0", GroupPolicy::SpecInfo({1, "0"})}})),
               connector->group_policy_->spec_name_to_info_);
 }
 
-TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSizes) {
-    auto                   heterogeneous_config = cache_config_;
-    const auto             per_layer_bytes      = byte_size_per_block_ / layer_num_;
-    const auto             topology_groups      = heterogeneous_config.topology().groups();
-    std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
-    for (auto& group : groups) {
-        group.block_num             = 8;
-        group.kv_block_stride_bytes = group.tag == "1" ? per_layer_bytes / 2 : per_layer_bytes;
-        group.kv_scale_stride_bytes = 0;
-    }
-    heterogeneous_config.setTopology(std::move(groups), heterogeneous_config.topology().layers());
-
+TEST_F(RemoteConnectorInternalTest, PublishesFullGroupBlockSizeFromTopology) {
     std::vector<std::string> full_group_tags({"0"});
-    std::vector<std::string> linear_group_tags({"1", "2"});
     auto                     allocator =
-        std::make_shared<FakeKVCacheAllocator>(heterogeneous_config, full_group_tags, linear_group_tags, layer_num_);
-    auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(heterogeneous_config,
-                                                                          kv_cache_config_,
-                                                                          runtime_config_,
-                                                                          parallelism_config_,
-                                                                          sp_config_,
-                                                                          nullptr,
-                                                                          0,
-                                                                          allocator));
+        std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_tags, std::vector<std::string>{}, layer_num_);
+    auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(
+        cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
     ASSERT_TRUE(connector->group_policy_->init());
     auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(/*tp_size=*/1);
     EXPECT_EQ(spec_info_map->at("tp0_F0"), byte_size_per_block_);
-    EXPECT_EQ(spec_info_map->at("tp0_L1"), byte_size_per_block_ / 2);
-    EXPECT_EQ(spec_info_map->at("tp0_L2"), byte_size_per_block_);
-    EXPECT_EQ(spec_groups->at("F0L1L2"), (std::vector<std::string>{"tp0_F0", "tp0_L1", "tp0_L2"}));
+    EXPECT_EQ(spec_groups->at("F0"), (std::vector<std::string>{"tp0_F0"}));
 }
 
-TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
+TEST_F(RemoteConnectorInternalTest, FullLinearPolicyInitializationScalesLinearly) {
     constexpr size_t linear_group_count = 19;
     constexpr size_t group_count        = linear_group_count + 1;
 
@@ -384,14 +344,11 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
 
     auto allocator =
         std::make_shared<FakeKVCacheAllocator>(config, full_group_tags, linear_group_tags, /*per_group_layer_num=*/1);
-    auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(
-        config, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
-    ASSERT_TRUE(connector->group_policy_->init());
-
-    auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(/*tp_size=*/1);
-    EXPECT_EQ(spec_info_map->size(), group_count);
-    EXPECT_EQ(spec_groups->size(), group_count + 1);
-    EXPECT_EQ(connector->group_policy_->location_spec_group_map_.size(), group_count + 1);
+    auto policy = std::make_shared<FullLinearLayerGroupPolicy>(
+        allocator, full_group_tags, linear_group_tags, /*write_interval=*/1);
+    ASSERT_TRUE(policy->init());
+    EXPECT_EQ(policy->groups().size(), group_count);
+    EXPECT_EQ(policy->reachableAggregateMasks().size(), 2u);
 }
 
 TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
@@ -520,7 +477,7 @@ TEST(RemoteConnectorBlockBufferValidationTest, RejectsMisalignedOrInvalidTagsWit
 }
 
 TEST_F(RemoteConnectorInternalTest, CopyCacheRejectsMisalignedOrInvalidRequestColumns) {
-    auto connector = getFullLinearPolicyConnector();
+    auto connector = getFullPolicyConnector();
     ASSERT_TRUE(connector->group_policy_->init());
 
     RemoteOperationResponsePB response;
