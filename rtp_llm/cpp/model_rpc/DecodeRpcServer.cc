@@ -58,7 +58,7 @@ ErrorInfo DecodeRpcServer::validatePrefillCpPeerCount(int32_t prefill_cp_size, s
 }
 
 bool DecodeRpcServer::requiresWholeBlockTransfer(const CacheConfig& cache_config, bool page_level_routing) {
-    return cache_config.use_mla || cache_config.use_opaque_kv_cache_store || cache_config.groupNums() > 1
+    return cache_config.use_mla || cache_config.usesOpaqueKVCacheStore() || cache_config.groupNums() > 1
            || page_level_routing;
 }
 
@@ -799,7 +799,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     const bool use_mla             = cache_config.use_mla;
     const bool use_hybrid          = cache_config.groupNums() > 1;
-    const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
+    const bool use_opaque_kv_store = cache_config.usesOpaqueKVCacheStore();
     const bool is_page_level_rr    = isPageLevelRouting(load_context.prefill_cp_size, load_context.peer_addrs.size());
     const bool use_whole_kv_block  = requiresWholeBlockTransfer(cache_config, is_page_level_rr);
     if (!use_whole_kv_block && peer_cnt > 1) {
@@ -1056,7 +1056,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
                 for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                     const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
-                    const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
+                    const bool mtp_use_opaque_kv_store = mtp_cache_cfg.usesOpaqueKVCacheStore();
 
                     // Same multi-group iteration as the main path.
                     const auto global_layer_id =

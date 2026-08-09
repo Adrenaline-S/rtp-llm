@@ -82,7 +82,6 @@ private:
 };
 
 using GroupBlockIds = std::map<std::string, std::shared_ptr<BlockIds>, std::less<>>;
-using BlockIdsByTag = GroupBlockIds;
 
 class KVCacheResource {
 public:
