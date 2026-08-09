@@ -666,7 +666,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     const bool use_mla             = cache_config.use_mla;
     const bool use_hybrid          = cache_config.groupNums() > 1;
-    const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
+    const bool use_opaque_kv_store = cache_config.usesOpaqueKVCacheStore();
     if (!use_mla && !use_opaque_kv_store && peer_cnt > 1) {
         for (const auto& group : cache_config.topology().groups()) {
             const size_t k_total_bytes = group.spec->k_block_size_bytes();
@@ -931,7 +931,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
-                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
+                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.usesOpaqueKVCacheStore();
 
                         // Same multi-group iteration as the main path.
                         auto mtp_layer_tags = layerGroupTags(mtp_cache_cfg, layer_id);

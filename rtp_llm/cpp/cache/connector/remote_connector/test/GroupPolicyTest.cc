@@ -65,8 +65,7 @@ public:
         const auto group_count = full_group_tags.size() + other_group_tags.size();
         if (group_count > 0) {
             CacheConfig fake_config;
-            fake_config.layer_num     = static_cast<uint32_t>(group_count * per_group_layer_num);
-            fake_config.layer_all_num = fake_config.layer_num;
+            fake_config.layer_num = static_cast<uint32_t>(group_count * per_group_layer_num);
             std::vector<GroupBase> groups;
             int                    next_layer_id = 0;
             const auto             append_group  = [&](const std::string& tag) {
