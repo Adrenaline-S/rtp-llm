@@ -35,7 +35,7 @@ public:
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_groups_(graph_params.kv_cache_groups),
+        kv_cache_block_table_capacities_(graph_params.kv_cache_block_table_capacities),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
@@ -70,16 +70,19 @@ public:
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
-    void           captureDecode();
-    void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
-    void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
-    bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
-    void           replayGraph(int key);
-    void           replayDecode(int bs);
-    void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphBs(const CudaGraphState& state) const;
+    void     captureDecode();
+    void     capturePrefill();
+    void     captureDecodeOneBatchSize(int bs);
+    void     capturePrefillOneSeqLen(int seq_len);
+    void     prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    bool     canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void     replayGraph(int key);
+    void     replayDecode(int bs);
+    void     replayPrefill(int seq_len);
+    int      getCurrentRealGraphBs(const CudaGraphState& state) const;
+    uint64_t groupedCacheFallbackCount() const {
+        return grouped_cache_fallback_count_.load(std::memory_order_relaxed);
+    }
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
 
@@ -121,6 +124,7 @@ private:
                                                      const torch::Tensor&  captured_position_ids,
                                                      size_t&               copy_numel) const;
     bool                    canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
+    bool                    groupedCacheFallback(const std::string& reason) const;
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
@@ -155,9 +159,10 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::map<std::string, CacheGroupType> kv_cache_groups_;
-    int                                   position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
-    mutable std::atomic<uint64_t>         combo_position_fallback_count_{0};
+    std::map<std::string, CacheBlockTableCapacity> kv_cache_block_table_capacities_;
+    int                                            position_id_len_factor_ = 0;  // 0 = no combo_position_ids
+    mutable std::atomic<uint64_t>                  combo_position_fallback_count_{0};
+    mutable std::atomic<uint64_t>                  grouped_cache_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

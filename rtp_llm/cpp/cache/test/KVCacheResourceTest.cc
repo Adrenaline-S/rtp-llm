@@ -22,7 +22,6 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(type);
     group.layer_ids = {0};
-    group.block_num = 16;
     return group;
 }
 

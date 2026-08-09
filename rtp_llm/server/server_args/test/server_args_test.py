@@ -20,6 +20,27 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_linear_step_only_accepts_one(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        config = KVCacheConfig()
+        self.assertEqual(config.linear_step, 1)
+        with self.assertRaises(ValueError):
+            config.linear_step = 2
+
+        state = list(config.__getstate__())
+        state[8] = 2
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        with self.assertRaises(RuntimeError):
+            restored.__setstate__(tuple(state))
+
+        sys.argv = ["prog", "--linear_step", "2"]
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

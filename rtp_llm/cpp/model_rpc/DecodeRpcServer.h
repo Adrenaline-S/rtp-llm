@@ -5,13 +5,11 @@
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include <map>
 
 namespace rtp_llm {
 
 class DecodeRpcServer: public RemoteRpcServer {
 public:
-    using GroupBlockIds = std::map<std::string, std::shared_ptr<BlockIds>>;
     DecodeRpcServer() {}
     ~DecodeRpcServer();
     grpc::Status init(const EngineInitParams&                                maga_init_params,

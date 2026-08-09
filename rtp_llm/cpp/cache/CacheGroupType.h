@@ -41,11 +41,13 @@ enum class CpBlockSliceMode : int8_t {
 };
 
 struct CacheGroupPolicy {
-    CacheGroupType     group_type             = CacheGroupType::FULL;
-    bool               enable_prefix_reuse    = true;
-    CacheEvictPolicy   evict_policy           = CacheEvictPolicy::CHAIN;
-    bool               reservable             = true;
-    uint32_t           explicit_block_num     = 0;
+    CacheGroupType   group_type          = CacheGroupType::FULL;
+    bool             enable_prefix_reuse = true;
+    CacheEvictPolicy evict_policy        = CacheEvictPolicy::CHAIN;
+    bool             reservable          = true;
+    uint32_t         explicit_block_num  = 0;
+    // Compatibility metadata only. Every explicitly-sized device pool is
+    // charged to the HBM budget regardless of this value.
     bool               charge_to_paged_budget = false;
     uint32_t           active_tail_blocks     = 0;
     bool               validate_tail_blocks   = true;

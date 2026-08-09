@@ -237,11 +237,11 @@ public:
         const auto             topology_groups = cache_config_.topology().groups();
         std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
         for (auto& group : groups) {
-            group.block_num             = 8;
             group.kv_block_stride_bytes = mha_spec->block_size_bytes();
             group.kv_scale_stride_bytes = 0;
         }
         cache_config_.setTopology(std::move(groups), cache_config_.topology().layers());
+        cache_config_.finalizeBlockNums(8, RuntimeConfig{});
     }
 
     void TearDown() override {}
@@ -333,11 +333,11 @@ TEST_F(RemoteConnectorInternalTest, FullLinearPolicyInitializationScalesLinearly
     const auto             topology_groups = config.topology().groups();
     std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
     for (auto& group : groups) {
-        group.block_num             = 8;
         group.kv_block_stride_bytes = full_spec->block_size_bytes();
         group.kv_scale_stride_bytes = 0;
     }
     config.setTopology(std::move(groups), config.topology().layers());
+    config.finalizeBlockNums(8, RuntimeConfig{});
 
     auto allocator =
         std::make_shared<FakeKVCacheAllocator>(config, full_group_tags, linear_group_tags, /*per_group_layer_num=*/1);

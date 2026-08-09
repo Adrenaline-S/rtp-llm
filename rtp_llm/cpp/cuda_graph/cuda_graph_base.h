@@ -3,8 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <string>
 #include <vector>
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
 
@@ -17,6 +17,11 @@ struct CudaGraphState {
     int current_real_graph_bs{1};       // for decode
     int current_real_graph_seq_len{1};  // for prefill
     int seq_len_sum{0};
+};
+
+struct CacheBlockTableCapacity {
+    int64_t physical_block_table_capacity = 0;
+    int64_t kernel_block_table_capacity   = 0;
 };
 
 struct GraphParams {
@@ -34,8 +39,8 @@ struct GraphParams {
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
-    // Golden cache-group identity and metadata for CUDA graph capture/replay.
-    std::map<std::string, CacheGroupType> kv_cache_groups;
+    // Per-group block-table capacities used to allocate fixed capture buffers.
+    std::map<std::string, CacheBlockTableCapacity> kv_cache_block_table_capacities;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from

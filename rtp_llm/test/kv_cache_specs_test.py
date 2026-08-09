@@ -537,6 +537,25 @@ class HybridKVCacheSpecTest(TestCase):
         with self.assertRaisesRegex(RuntimeError, "Invalid CacheCpPolicyDesc state"):
             pickle.loads(legacy_five_field_state)
 
+    def test_kv_cache_spec_desc_pickle_schema_v1_round_trip(self):
+        desc = KVCacheSpecDesc()
+        desc.tag = "indexer_kv"
+        desc.cache_type = KVCacheSpecType.OPAQUE_KV
+        desc.entry_dtype = DataType.TYPE_UINT8
+        desc.entry_elems = 132
+        desc.explicit_entry_count = 64
+        desc.kernel_seq_size_per_block = 16
+
+        restored = pickle.loads(pickle.dumps(desc))
+        self.assertEqual(restored.tag, desc.tag)
+        self.assertEqual(restored.cache_type, desc.cache_type)
+        self.assertEqual(restored.entry_dtype, desc.entry_dtype)
+        self.assertEqual(restored.entry_elems, desc.entry_elems)
+        self.assertEqual(restored.explicit_entry_count, desc.explicit_entry_count)
+        self.assertEqual(
+            restored.kernel_seq_size_per_block, desc.kernel_seq_size_per_block
+        )
+
 
 if __name__ == "__main__":
     main()

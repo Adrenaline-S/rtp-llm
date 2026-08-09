@@ -208,11 +208,11 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
     resource->setCacheKeys({1000, 1001, 1002});
     resource->initGroups(test::makeTestCacheTopology(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}}));
     resource->mutableBlockIds("group1").assign({10, 11, 12});
-    resource->mutableBlockIds("group3").assign({30, 31, 32});
+    resource->mutableBlockIds("group3").assign({30, 31, 32, 33, 34});
     ASSERT_GT(resource->groupNums(), 1);
 
     P2PConnectorAsyncMatchContext ctx(resource);
-    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+    EXPECT_EQ(ctx.matchedBlockCount(), 5u);
 }
 
 // 测试: scheduler_->sendKVCache 失败，返回 INTERNAL 错误

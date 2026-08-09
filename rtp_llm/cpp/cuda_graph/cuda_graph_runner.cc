@@ -19,37 +19,34 @@ bool validateGroupedBlockTable(const torch::Tensor& source,
                                int                  capture_batch_size,
                                bool                 expect_cuda,
                                const std::string&   tag,
-                               const char*          table_name) {
-    const auto logAndFail = [&](const char* reason) {
-        RTP_LLM_LOG_WARNING("Grouped kv cache tag=%s %s is incompatible with CUDA graph capture: %s; "
-                            "fallback to normal run.",
-                            tag.c_str(),
-                            table_name,
-                            reason);
+                               const char*          table_name,
+                               std::string&         error) {
+    const auto fail = [&](const char* reason) {
+        error = "tag=" + tag + " " + table_name + ": " + reason;
         return false;
     };
 
     if (!source.defined() || !captured.defined()) {
-        return logAndFail("source or capture tensor is undefined");
+        return fail("source or capture tensor is undefined");
     }
     if (source.scalar_type() != torch::kInt32 || captured.scalar_type() != torch::kInt32) {
-        return logAndFail("source and capture tensors must be int32");
+        return fail("source and capture tensors must be int32");
     }
     if (source.dim() != 2 || captured.dim() != 2) {
-        return logAndFail("source and capture tensors must be two-dimensional");
+        return fail("source and capture tensors must be two-dimensional");
     }
     if (source.is_cuda() != expect_cuda || captured.is_cuda() != expect_cuda) {
-        return logAndFail(expect_cuda ? "source and capture tensors must be CUDA tensors" :
-                                        "source and capture tensors must be CPU tensors");
+        return fail(expect_cuda ? "source and capture tensors must be CUDA tensors" :
+                                  "source and capture tensors must be CPU tensors");
     }
     if (expect_cuda && source.device() != captured.device()) {
-        return logAndFail("source and capture tensors must be on the same CUDA device");
+        return fail("source and capture tensors must be on the same CUDA device");
     }
     if (source.size(0) != source_batch_size || captured.size(0) != capture_batch_size) {
-        return logAndFail("source or capture rows do not match the selected replay geometry");
+        return fail("source or capture rows do not match the selected replay geometry");
     }
     if (source.size(1) > captured.size(1)) {
-        return logAndFail("source columns exceed capture capacity");
+        return fail("source columns exceed capture capacity");
     }
     return true;
 }
@@ -483,6 +480,17 @@ bool CudaGraphRunner::validateComboPositionIds(const PyModelInputs&  inputs,
         position_id_len_factor_, token_count, inputs.combo_position_ids, captured_position_ids, copy_numel);
 }
 
+bool CudaGraphRunner::groupedCacheFallback(const std::string& reason) const {
+    const uint64_t count = grouped_cache_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((count & (count - 1)) == 0) {
+        RTP_LLM_LOG_WARNING("Grouped kv cache is incompatible with CUDA graph capture: %s; fallback to normal run "
+                            "(fallback_count=%llu)",
+                            reason.c_str(),
+                            static_cast<unsigned long long>(count));
+    }
+    return false;
+}
+
 bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const {
     const int  graph_key = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     const auto graph_it  = graph_instances_.find(graph_key);
@@ -517,40 +525,43 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
         for (const auto& [tag, source] : inputs.group_attention_inputs) {
             const auto captured_it = captured_groups.find(tag);
             if (captured_it == captured_groups.end()) {
-                RTP_LLM_LOG_WARNING(
-                    "Grouped kv cache tag=%s is absent from CUDA graph capture, fallback to normal run.", tag.c_str());
-                return false;
+                return groupedCacheFallback("tag=" + tag + " is absent from CUDA graph capture");
             }
             const auto& captured = captured_it->second;
+            std::string error;
             if (!validateGroupedBlockTable(source.kv_cache_kernel_block_id,
                                            captured.kv_cache_kernel_block_id,
                                            state.current_batch_size,
                                            capture_batch_size,
                                            false,
                                            tag,
-                                           "kernel host block table")
+                                           "kernel host block table",
+                                           error)
                 || !validateGroupedBlockTable(source.kv_cache_kernel_block_id_device,
                                               captured.kv_cache_kernel_block_id_device,
                                               state.current_batch_size,
                                               capture_batch_size,
                                               true,
                                               tag,
-                                              "kernel device block table")
+                                              "kernel device block table",
+                                              error)
                 || !validateGroupedBlockTable(source.kv_cache_block_id,
                                               captured.kv_cache_block_id,
                                               state.current_batch_size,
                                               capture_batch_size,
                                               false,
                                               tag,
-                                              "physical host block table")
+                                              "physical host block table",
+                                              error)
                 || !validateGroupedBlockTable(source.kv_cache_block_id_device,
                                               captured.kv_cache_block_id_device,
                                               state.current_batch_size,
                                               capture_batch_size,
                                               true,
                                               tag,
-                                              "physical device block table")) {
-                return false;
+                                              "physical device block table",
+                                              error)) {
+                return groupedCacheFallback(error);
             }
         }
     }
@@ -559,23 +570,20 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
-    if (kv_cache_groups_.size() > 1) {
-        if (inputs.group_attention_inputs.size() != kv_cache_groups_.size()) {
-            RTP_LLM_LOG_WARNING("Grouped kv cache size mismatch: inputs=%zu, captured=%zu, fallback to normal run.",
-                                inputs.group_attention_inputs.size(),
-                                kv_cache_groups_.size());
-            return false;
+    if (kv_cache_block_table_capacities_.size() > 1) {
+        if (inputs.group_attention_inputs.size() != kv_cache_block_table_capacities_.size()) {
+            return groupedCacheFallback("group count mismatch: inputs="
+                                        + std::to_string(inputs.group_attention_inputs.size())
+                                        + ", captured=" + std::to_string(kv_cache_block_table_capacities_.size()));
         }
-        for (const auto& [tag, type] : kv_cache_groups_) {
-            (void)type;
+        for (const auto& [tag, capacity] : kv_cache_block_table_capacities_) {
+            (void)capacity;
             if (inputs.group_attention_inputs.find(tag) == inputs.group_attention_inputs.end()) {
-                RTP_LLM_LOG_WARNING("Grouped kv cache is missing tag=%s, fallback to normal run.", tag.c_str());
-                return false;
+                return groupedCacheFallback("input is missing tag=" + tag);
             }
         }
     } else if (!inputs.group_attention_inputs.empty()) {
-        RTP_LLM_LOG_WARNING("Grouped kv cache input does not match a single-group CUDA graph, fallback to normal run.");
-        return false;
+        return groupedCacheFallback("grouped input does not match a single-group CUDA graph");
     }
 
     // Check if this is speculative sampling:
@@ -706,20 +714,24 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.decode_cu_seqlens = torch::arange(0, max_bs_ + 1, 1, options_cpu_int32_).pin_memory();
 
     inputs.group_attention_inputs.clear();
-    if (kv_cache_groups_.size() > 1) {
-        for (const auto& [tag, type] : kv_cache_groups_) {
-            (void)type;
+    if (kv_cache_block_table_capacities_.size() > 1) {
+        for (const auto& [tag, capacity] : kv_cache_block_table_capacities_) {
+            RTP_LLM_CHECK_WITH_INFO(capacity.physical_block_table_capacity > 0,
+                                    "CUDA graph KV cache tag=%s physical block-table capacity must be positive",
+                                    tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(capacity.kernel_block_table_capacity > 0,
+                                    "CUDA graph KV cache tag=%s kernel block-table capacity must be positive",
+                                    tag.c_str());
             auto group_inputs = inputs.attention_inputs;
             group_inputs.kv_cache_kernel_block_id_device =
-                torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+                torch::zeros({int(max_bs_), capacity.kernel_block_table_capacity}, options_cuda_int32_);
             group_inputs.kv_cache_kernel_block_id =
-                torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
-            group_inputs.kv_cache_block_id_device = torch::zeros({int(max_bs_), max_kv_blocks}, options_cuda_int32_);
+                torch::zeros({int(max_bs_), capacity.kernel_block_table_capacity}, options_cpu_int32_).pin_memory();
+            group_inputs.kv_cache_block_id_device =
+                torch::zeros({int(max_bs_), capacity.physical_block_table_capacity}, options_cuda_int32_);
             group_inputs.kv_cache_block_id =
-                torch::zeros({int(max_bs_), max_kv_blocks}, options_cpu_int32_).pin_memory();
-            const auto [it, inserted] = inputs.group_attention_inputs.emplace(tag, std::move(group_inputs));
-            (void)it;
-            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate CUDA graph KV cache tag=%s", tag.c_str());
+                torch::zeros({int(max_bs_), capacity.physical_block_table_capacity}, options_cpu_int32_).pin_memory();
+            inputs.group_attention_inputs.emplace(tag, std::move(group_inputs));
         }
     }
 }

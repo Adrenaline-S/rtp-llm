@@ -471,21 +471,35 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
             physical_block_count=3,
         )
         self.assertFalse(runner.canRun(over_capacity))
+        self.assertEqual(runner.groupedCacheFallbackCount(), 4)
 
-    def test_duplicate_capture_tag_is_rejected(self) -> None:
+    def test_groups_have_independent_capture_capacity(self) -> None:
         runner = CudaGraphRunner()
-        with self.assertRaisesRegex(
-            RuntimeError, "duplicate CUDA graph KV cache tag=full"
-        ):
-            runner.init_decode(
-                GroupedBlockTableModel(),
-                HIDDEN_SIZE,
-                TOKENS_PER_BLOCK,
-                TOKENS_PER_BLOCK,
-                TOKENS_PER_BLOCK,
-                [1],
-                ["full", "full"],
-            )
+        runner.init_decode(
+            GroupedBlockTableModel(),
+            HIDDEN_SIZE,
+            2 * TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+            group_capacities={"full": (2, 2), "aux": (4, 8)},
+        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        aux = inputs.attention_inputs["aux"]
+        aux.kv_cache_kernel_block_id = torch.ones(
+            (2, 8), dtype=torch.int32
+        ).pin_memory()
+        aux.kv_cache_kernel_block_id_device = aux.kv_cache_kernel_block_id.cuda()
+        aux.kv_cache_block_id = torch.ones((2, 4), dtype=torch.int32).pin_memory()
+        aux.kv_cache_block_id_device = aux.kv_cache_block_id.cuda()
+        self.assertTrue(runner.canRun(inputs))
+
+        full = inputs.attention_inputs["full"]
+        full.kv_cache_block_id = torch.ones((2, 3), dtype=torch.int32).pin_memory()
+        full.kv_cache_block_id_device = full.kv_cache_block_id.cuda()
+        self.assertFalse(runner.canRun(inputs))
+        self.assertEqual(runner.groupedCacheFallbackCount(), 1)
 
     def test_target_verify_validates_exact_tag_set(self) -> None:
         runner = CudaGraphRunner()

@@ -163,7 +163,6 @@ public:
 
 private:
     void initConnectorCoordinator();
-    void allocateAndSync();
     void reportMetricsLoop();
 
     // 成员变量

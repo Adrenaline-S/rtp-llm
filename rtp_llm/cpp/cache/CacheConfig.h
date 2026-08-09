@@ -21,10 +21,26 @@
 
 namespace rtp_llm {
 
+class CacheConfigCreator;
+class KVCacheManager;
+
 struct CacheConfig {
 private:
     std::shared_ptr<const CacheTopology> cache_topology;
     std::optional<uint32_t>              finalized_global_block_num_;
+
+    CacheConfig(uint32_t               main_layer_num,
+                uint32_t               total_layer_num,
+                bool                   mla,
+                bool                   sparse,
+                size_t                 block_seq_size,
+                std::vector<GroupBase> groups,
+                std::vector<LayerBase> layers);
+
+    void publishSentinelOnlyBlockNum();
+
+    friend class CacheConfigCreator;
+    friend class KVCacheManager;
 
 public:
     uint32_t layer_num     = 0;  // the number of main model layers
@@ -67,7 +83,9 @@ public:
     }
 
     // Attention-specific configuration
-    int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
+    // Retained for configuration compatibility. Production and compatibility
+    // finalization currently accept only 1.
+    int linear_step = 1;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -133,9 +151,7 @@ public:
         return group(tag).layer_ids;
     }
 
-    uint32_t blockNumForGroup(std::string_view tag) const {
-        return group(tag).block_num;
-    }
+    uint32_t blockNumForGroup(std::string_view tag) const;
 
     size_t kvBlockStrideBytesForGroup(std::string_view tag) const {
         return group(tag).kv_block_stride_bytes;
@@ -159,9 +175,6 @@ public:
     }
 
     void setGroupPolicies(const std::unordered_map<std::string, CacheGroupPolicy>& policies);
-
-    std::shared_ptr<CacheConfig>
-    mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
     uint32_t explicitIndependentBlocks(std::string_view tag) const {
         return policyForGroup(tag).explicit_block_num;
