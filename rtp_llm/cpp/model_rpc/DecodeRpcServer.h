@@ -85,6 +85,8 @@ private:
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
     static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static bool            isPageLevelRouting(int32_t prefill_cp_size, size_t peer_addr_count);
+    static bool            requiresWholeBlockTransfer(const CacheConfig& cache_config, bool page_level_routing);
     static std::string     makeGroupRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);

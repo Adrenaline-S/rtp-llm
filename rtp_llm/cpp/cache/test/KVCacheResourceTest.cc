@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -119,6 +120,14 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
 
     ASSERT_EQ(resource.blocks("group1"), (BlockIndicesType{1}));
     ASSERT_EQ(resource.kernelBlocks("group1"), (BlockIndicesType{1}));
+}
+
+TEST(CacheTopologyTest, StoredKernelBlocksPerKvBlockUsesGroupPolicy) {
+    const auto full   = makeResourceGroup("full", CacheGroupType::FULL);
+    const auto linear = makeResourceGroup("linear", CacheGroupType::LINEAR);
+
+    EXPECT_EQ(storedKernelBlocksPerKvBlock(full), 4u);
+    EXPECT_EQ(storedKernelBlocksPerKvBlock(linear), 1u);
 }
 
 TEST(KVCacheResourceTest, LayerTagEnumerationReturnsAllGroupsForOneLayer) {
@@ -238,6 +247,32 @@ TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
     auto group                = makeResourceGroup("full", CacheGroupType::FULL);
     config.setTopology({std::move(group)}, {{0, {"full"}}});
     ASSERT_EQ(config.kernelBlocksPerKvBlockForGroup("full"), 4u);
+}
+
+TEST(CacheConfigTest, SetTopologyDerivesSparseFromOpaqueKv) {
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+    config.layer_num          = 1;
+    auto spec                 = std::make_shared<OpaqueKVCacheSpec>(8, 2);
+    spec->tag                 = "opaque";
+
+    GroupTopology group;
+    group.tag       = spec->tag;
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids = {0};
+
+    ASSERT_FALSE(config.is_sparse);
+    config.setTopology({std::move(group)}, {{0, {"opaque"}}});
+    EXPECT_TRUE(config.is_sparse);
+}
+
+TEST(CacheConfigTest, SamePolicyIgnoresPagedBudgetCompatibilityField) {
+    auto lhs                   = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto rhs                   = lhs;
+    rhs.charge_to_paged_budget = !lhs.charge_to_paged_budget;
+
+    EXPECT_TRUE(CacheConfig::samePolicy(lhs, rhs));
 }
 
 TEST(CacheConfigTest, RejectsInvalidDerivedBlockSubdivision) {

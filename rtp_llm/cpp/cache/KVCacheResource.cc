@@ -12,19 +12,8 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
 
     group_block_ids_.clear();
     for (const auto& group : topology_->groups()) {
-        const size_t physical_seq_size = group.spec->seq_size_per_block;
-        const size_t kernel_seq_size   = group.spec->kernel_seq_size_per_block;
-        RTP_LLM_CHECK_WITH_INFO(kernel_seq_size > 0 && physical_seq_size >= kernel_seq_size
-                                    && physical_seq_size % kernel_seq_size == 0,
-                                "invalid block subdivision for tag=%s: physical=%zu kernel=%zu",
-                                group.tag.c_str(),
-                                physical_seq_size,
-                                kernel_seq_size);
-        const size_t blocks_per_kv_block = physical_seq_size / kernel_seq_size;
-        const size_t stored_blocks_per_kv_block =
-            group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
         RTP_LLM_CHECK_WITH_INFO(
-            group_block_ids_.emplace(group.tag, std::make_shared<BlockIds>(stored_blocks_per_kv_block)).second,
+            group_block_ids_.emplace(group.tag, std::make_shared<BlockIds>(storedKernelBlocksPerKvBlock(group))).second,
             "KVCacheResource has duplicate tag=%s",
             group.tag.c_str());
     }

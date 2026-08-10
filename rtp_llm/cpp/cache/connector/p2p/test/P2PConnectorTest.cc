@@ -203,7 +203,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
     EXPECT_NE(response.error_message().find("cancelled"), std::string::npos);
 }
 
-TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups) {
+TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountIsCappedByCacheKeys) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->setCacheKeys({1000, 1001, 1002});
     resource->initGroups(test::makeTestCacheTopology(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}}));
@@ -212,7 +212,10 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
     ASSERT_GT(resource->groupNums(), 1);
 
     P2PConnectorAsyncMatchContext ctx(resource);
-    EXPECT_EQ(ctx.matchedBlockCount(), 5u);
+    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+
+    P2PConnectorAsyncMatchContext empty_ctx(nullptr);
+    EXPECT_EQ(empty_ctx.matchedBlockCount(), 0u);
 }
 
 // 测试: scheduler_->sendKVCache 失败，返回 INTERNAL 错误

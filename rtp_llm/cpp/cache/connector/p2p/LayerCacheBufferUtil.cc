@@ -60,6 +60,9 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
 std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
     KVCacheResource& resource, int batch_id, int start_block_idx, int block_count, int cp_rank, int cp_size) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    if (resource.groupNums() == 0) {
+        return layer_cache_buffers;
+    }
 
     for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
         for (const auto& tag : resource.groupTagsForLayer(layer_id)) {

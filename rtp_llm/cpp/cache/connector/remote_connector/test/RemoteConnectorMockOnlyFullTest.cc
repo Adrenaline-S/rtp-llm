@@ -156,12 +156,12 @@ private:
 // 初始reuse_len = 0
 TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu_reuse_len_zero) {
     // match
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
-    kv_cache_resouce->cache_keys = {1, 2, 3, 4};
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
+    kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     initializeResourceTopology(*kv_cache_resouce, cache_config_, "default", {1, 2, 3, 4});
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
-    Locations expected_locations = genFullotherLocations({1, 2, 3});
+    Locations expected_locations = genFullLocations({1, 2, 3});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 MatchLocation(Eq("match_trace_1"),                    // trace_id
                               _,                                      // query_type
@@ -180,7 +180,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     // read
     {
         // 没有其他connector
-        UriStrVec          expected_uris        = genUris({1, 2, 3});
+        UriStrVec          expected_uris        = genFullUris({1, 2, 3});
         BlockBuffersExpect block_buffers_expect = {
             3, kFakeLayerNum, cache_config_.specForGroup("default")->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"1", "2", "3"});
@@ -207,7 +207,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
 
     {
         // 其他connector也命中了部分
-        UriStrVec          expected_uris        = genUris({2, 3});
+        UriStrVec          expected_uris        = genFullUris({2, 3});
         BlockBuffersExpect block_buffers_expect = {
             2, kFakeLayerNum, cache_config_.specForGroup("default")->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"2", "3"});
@@ -248,13 +248,13 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
 // 初始reuse_len = 1
 TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu_reuse_len_not_zero) {
     // match
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
-    kv_cache_resouce->cache_keys = {1, 2, 3, 4};
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
+    kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     initializeResourceTopology(*kv_cache_resouce, cache_config_, "default", {1, 2, 3, 4});
     kv_cache_resouce->setDeviceReuseBlockNum(1);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
-    Locations expected_locations = genFullotherLocations({2, 3});
+    Locations expected_locations = genFullLocations({2, 3});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 MatchLocation(Eq("match_trace_1"),                    // trace_id
                               _,                                      // query_type
@@ -273,7 +273,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     // read
     {
         // 没有其他connector
-        UriStrVec          expected_uris        = genUris({2, 3});
+        UriStrVec          expected_uris        = genFullUris({2, 3});
         BlockBuffersExpect block_buffers_expect = {
             2, kFakeLayerNum, cache_config_.specForGroup("default")->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"2", "3"});
@@ -297,7 +297,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     }
     {
         // 有其他connector
-        UriStrVec          expected_uris        = genUris({3});
+        UriStrVec          expected_uris        = genFullUris({3});
         BlockBuffersExpect block_buffers_expect = {
             1, kFakeLayerNum, cache_config_.specForGroup("default")->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"3"});
@@ -341,12 +341,12 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
 TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_actual_locations_different) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3};
+    kv_cache_resouce->setCacheKeys({1, 2, 3});
     initializeResourceTopology(*kv_cache_resouce, cache_config_, "default", {1, 2, 3});
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
-    Locations     expected_write_locations = genFullotherLocations({1, 2, 3});
+    Locations     expected_write_locations = genFullLocations({1, 2, 3});
     WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 StartWrite(Eq("start_write_trace_1"),        // trace_id
@@ -357,8 +357,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
-    UriStrVec expected_uris = genUris({1, 2, 3});
-    UriStrVec actual_uris   = genUris({1, 2, 3}, {}, "actual_");
+    UriStrVec expected_uris = genFullUris({1, 2, 3});
+    UriStrVec actual_uris   = genFullUris({1, 2, 3}, "actual_");
 
     BlockBuffersExpect block_buffers_expect = {
         3, kFakeLayerNum, cache_config_.specForGroup("default")->block_size_bytes()};
@@ -369,7 +369,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
                              TransferTraceInfoMatcher(expect_block_ids)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
-    Locations expected_actual_locations = genFullotherLocations({1, 2, 3}, {}, "actual_");
+    Locations expected_actual_locations = genFullLocations({1, 2, 3}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_1"),             // trace_id
                             write_session_id,                       // write_session_id
@@ -387,13 +387,13 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
        test_write_success_broadcast_success_actual_locations_different_with_block_mask) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3};
+    kv_cache_resouce->setCacheKeys({1, 2, 3});
     initializeResourceTopology(*kv_cache_resouce, cache_config_, "default", {1, 2, 3});
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
-    Locations     expected_write_locations = genFullotherLocations({2, 3});
+    Locations     expected_write_locations = genFullLocations({2, 3});
     WriteLocation write_location({write_session_id, static_cast<size_t>(1), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 StartWrite(Eq("start_write_trace_1"),        // trace_id
@@ -404,8 +404,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
-    UriStrVec expected_uris = genUris({2, 3});
-    UriStrVec actual_uris   = genUris({2, 3}, {}, "actual_");
+    UriStrVec expected_uris = genFullUris({2, 3});
+    UriStrVec actual_uris   = genFullUris({2, 3}, "actual_");
 
     BlockBuffersExpect block_buffers_expect = {
         2, kFakeLayerNum, cache_config_.specForGroup("default")->block_size_bytes()};
@@ -416,7 +416,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                              TransferTraceInfoMatcher(expect_block_ids)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
-    Locations expected_actual_locations = genFullotherLocations({2, 3}, {}, "actual_");
+    Locations expected_actual_locations = genFullLocations({2, 3}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_1"),             // trace_id
                             write_session_id,                       // write_session_id
@@ -434,13 +434,13 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
        test_write_success_broadcast_success_actual_locations_different_with_block_mask_vec) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3, 4};
+    kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     initializeResourceTopology(*kv_cache_resouce, cache_config_, "default", {1, 2, 3, 4});
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
-    Locations     expected_write_locations = genFullotherLocations({2, 4});
+    Locations     expected_write_locations = genFullLocations({2, 4});
     WriteLocation write_location(
         {write_session_id, std::vector<bool>({true, false, true, false}), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -452,8 +452,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
-    UriStrVec expected_uris = genUris({2, 4});
-    UriStrVec actual_uris   = genUris({2, 4}, {}, "actual_");
+    UriStrVec expected_uris = genFullUris({2, 4});
+    UriStrVec actual_uris   = genFullUris({2, 4}, "actual_");
 
     BlockBuffersExpect block_buffers_expect = {
         2, kFakeLayerNum, cache_config_.specForGroup("default")->block_size_bytes()};
@@ -464,7 +464,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                              TransferTraceInfoMatcher(expect_block_ids)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
-    Locations expected_actual_locations = genFullotherLocations({2, 4}, {}, "actual_");
+    Locations expected_actual_locations = genFullLocations({2, 4}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_1"),             // trace_id
                             write_session_id,                       // write_session_id
@@ -482,13 +482,13 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
        test_write_success_broadcast_success_actual_locations_different_with_empty_write_locations) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3};
+    kv_cache_resouce->setCacheKeys({1, 2, 3});
     initializeResourceTopology(*kv_cache_resouce, cache_config_, "default", {1, 2, 3});
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
-    Locations     expected_write_locations = genFullotherLocations({}, {});
+    Locations     expected_write_locations = genFullLocations({});
     WriteLocation write_location({write_session_id, static_cast<size_t>(3), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 StartWrite(Eq("start_write_trace_1"),        // trace_id
@@ -510,12 +510,12 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
 TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_actual_locations_same) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3};
+    kv_cache_resouce->setCacheKeys({1, 2, 3});
     initializeResourceTopology(*kv_cache_resouce, cache_config_, "default", {1, 2, 3});
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_2");
-    Locations     expected_locations = genFullotherLocations({1, 2, 3});
+    Locations     expected_locations = genFullLocations({1, 2, 3});
     WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 StartWrite(Eq("start_write_trace_2"),        // trace_id
@@ -526,7 +526,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
-    UriStrVec expected_uris = genUris({1, 2, 3});
+    UriStrVec expected_uris = genFullUris({1, 2, 3});
 
     BlockBuffersExpect block_buffers_expect = {
         3, kFakeLayerNum, cache_config_.specForGroup("default")->block_size_bytes()};
@@ -553,21 +553,21 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
 TEST_F(RemoteConnectorMockOnlyFullTest, test_write_last_block_not_aligned) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->setLastBlockAligned(false);
-    resource->cache_keys = {1, 2, 3};
+    resource->setCacheKeys({1, 2, 3});
     initializeResourceTopology(*resource, cache_config_, "default", {1, 2, 3});
 
     auto        meta             = std::make_shared<MetaImpl>(false, true, "trace_1");
     const auto  tp_rank          = size_t{0};
     std::string write_session_id = "write_session_id_1";
-    Locations   write_locations  = genFullotherLocations({2});
+    Locations   write_locations  = genFullLocations({2});
     EXPECT_CALL(
         *meta_clients_[tp_rank],
         StartWrite(Eq("start_write_trace_1"), std::vector<int64_t>({1, 2}), _, Eq(std::vector<std::string>()), _))
         .WillOnce(Return(StartWriteReturnType(
             {ClientErrorCode::ER_OK, WriteLocation({write_session_id, size_t{1}, write_locations})})));
 
-    const auto expected_uris = genUris({2});
-    const auto actual_uris   = genUris({2}, {}, "actual_");
+    const auto expected_uris = genFullUris({2});
+    const auto actual_uris   = genFullUris({2}, "actual_");
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
                              BlockBuffersMatcher(BlockBuffersExpect{
@@ -578,7 +578,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_last_block_not_aligned) {
                 FinishWrite(Eq("finish_write_trace_1"),
                             write_session_id,
                             Eq(BlockMask(size_t{1})),
-                            Eq(genFullotherLocations({2}, {}, "actual_"))))
+                            Eq(genFullLocations({2}, "actual_"))))
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
     auto context = remote_connectors_[tp_rank]->asyncWrite(resource, meta);
@@ -587,8 +587,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_last_block_not_aligned) {
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_match_fail) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {1, 2, 3, 4};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1, 2, 3, 4});
     initializeResourceTopology(*resource, cache_config_, "default", {1, 2, 3, 4});
     auto meta = std::make_shared<MetaImpl>(false, true, "trace_1");
 
@@ -607,14 +607,14 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_match_fail) {
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_match_success_load_fail) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {1, 2, 3, 4};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1, 2, 3, 4});
     initializeResourceTopology(*resource, cache_config_, "default", {1, 2, 3, 4});
     auto meta = std::make_shared<MetaImpl>(false, true, "trace_1");
 
     EXPECT_CALL(*meta_clients_[0], MatchLocation(_, _, _, _, _, _, _))
-        .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, genFullotherLocations({1, 2, 3})})));
-    const auto expected_uris = genUris({1, 2, 3});
+        .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, genFullLocations({1, 2, 3})})));
+    const auto expected_uris = genFullUris({1, 2, 3});
     EXPECT_CALL(*transfer_client_,
                 LoadKvCaches(Eq(expected_uris),
                              BlockBuffersMatcher(BlockBuffersExpect{
@@ -634,8 +634,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_match_success_load_fail) {
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_start_write_fail) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {1, 2, 3};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1, 2, 3});
     resource->setLastBlockAligned(true);
     initializeResourceTopology(*resource, cache_config_, "default", {1, 2, 3});
     auto meta = std::make_shared<MetaImpl>(false, true, "trace_1");
@@ -654,8 +654,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_start_write_fail) {
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_write_invalid_block_ids) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {1, 2, 3};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1, 2, 3});
     resource->setLastBlockAligned(true);
     initializeResourceTopology(*resource, cache_config_, "default", {1, -1, 3});
     auto meta = std::make_shared<MetaImpl>(false, true, "trace_1");
@@ -670,17 +670,17 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_invalid_block_ids) {
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_start_write_success_broadcast_success_finish_write_fail) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {1, 2, 3};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1, 2, 3});
     resource->setLastBlockAligned(true);
     initializeResourceTopology(*resource, cache_config_, "default", {1, 2, 3});
     auto        meta             = std::make_shared<MetaImpl>(false, true, "trace_2");
     std::string write_session_id = "write_session_id_2";
-    const auto  locations        = genFullotherLocations({1, 2, 3});
+    const auto  locations        = genFullLocations({1, 2, 3});
     EXPECT_CALL(*meta_clients_[0], StartWrite(_, _, _, _, _))
         .WillOnce(Return(
             StartWriteReturnType({ClientErrorCode::ER_OK, WriteLocation({write_session_id, size_t{0}, locations})})));
-    const auto uris = genUris({1, 2, 3});
+    const auto uris = genFullUris({1, 2, 3});
     EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(uris), _, _))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, uris})));
     EXPECT_CALL(*meta_clients_[0], FinishWrite(_, write_session_id, Eq(BlockMask(size_t{3})), Eq(Locations({}))))
@@ -692,16 +692,16 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_start_write_success_broadcast_succe
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_start_write_success_broadcast_success_save_fail) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {1, 2, 3};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1, 2, 3});
     resource->setLastBlockAligned(true);
     initializeResourceTopology(*resource, cache_config_, "default", {1, 2, 3});
     auto        meta             = std::make_shared<MetaImpl>(false, true, "trace_2");
     std::string write_session_id = "write_session_id_2";
     EXPECT_CALL(*meta_clients_[0], StartWrite(_, _, _, _, _))
         .WillOnce(Return(StartWriteReturnType(
-            {ClientErrorCode::ER_OK, WriteLocation({write_session_id, size_t{0}, genFullotherLocations({1, 2, 3})})})));
-    EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(genUris({1, 2, 3})), _, _))
+            {ClientErrorCode::ER_OK, WriteLocation({write_session_id, size_t{0}, genFullLocations({1, 2, 3})})})));
+    EXPECT_CALL(*transfer_client_, SaveKvCaches(Eq(genFullUris({1, 2, 3})), _, _))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_SDK_TIMEOUT, {}})));
     EXPECT_CALL(*meta_clients_[0], FinishWrite(_, write_session_id, Eq(BlockMask(size_t{0})), Eq(Locations({}))))
         .WillOnce(Return(ClientErrorCode::ER_OK));
@@ -712,15 +712,15 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_start_write_success_broadcast_succe
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_start_write_success_broadcast_grpc_fail) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {1, 2, 3};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1, 2, 3});
     resource->setLastBlockAligned(true);
     initializeResourceTopology(*resource, cache_config_, "default", {1, 2, 3});
     auto        meta             = std::make_shared<MetaImpl>(false, true, "trace_2");
     std::string write_session_id = "write_session_id_2";
     EXPECT_CALL(*meta_clients_[0], StartWrite(_, _, _, _, _))
         .WillOnce(Return(StartWriteReturnType(
-            {ClientErrorCode::ER_OK, WriteLocation({write_session_id, size_t{0}, genFullotherLocations({1, 2, 3})})})));
+            {ClientErrorCode::ER_OK, WriteLocation({write_session_id, size_t{0}, genFullLocations({1, 2, 3})})})));
     EXPECT_CALL(*transfer_client_, SaveKvCaches(_, _, _)).Times(0);
     EXPECT_CALL(*meta_clients_[0], FinishWrite(_, write_session_id, Eq(BlockMask(size_t{0})), Eq(Locations({}))))
         .WillOnce(Return(ClientErrorCode::ER_OK));
@@ -732,8 +732,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_start_write_success_broadcast_grpc_
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, test_threadpool_ec) {
-    auto resource        = std::make_shared<KVCacheResource>();
-    resource->cache_keys = {1, 2, 3, 4};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1, 2, 3, 4});
     initializeResourceTopology(*resource, cache_config_, "default", {1, 2, 3, 4});
     auto meta = std::make_shared<MetaImpl>(false, true, "trace");
 

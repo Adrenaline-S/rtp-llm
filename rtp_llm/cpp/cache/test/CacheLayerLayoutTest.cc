@@ -99,14 +99,13 @@ TEST(CacheLayerLayoutTest, InvalidTagSlotAndLayerFailFast) {
     EXPECT_ANY_THROW(layout.at("missing", 0));
 }
 
-TEST(CacheLayerLayoutTest, LayerTagEnumerationSupportsZeroGroupsWithoutAllocatingACollection) {
-    auto topology = CacheTopology::create({makeLayoutGroup("full", {1})}, {{0, {}}, {1, {"full"}}});
-    GroupedCacheLayerLayout::GroupLayouts groups;
-    groups.emplace("full", makeLayerLayout(2, {1}, 1));
-    GroupedCacheLayerLayout layout(topology, std::move(groups));
-
-    const auto& tags = layout.groupTagsForLayer(0);
-    EXPECT_TRUE(tags.empty());
+TEST(CacheLayerLayoutTest, RejectsLayerWithoutCacheGroups) {
+    try {
+        CacheTopology::create({makeLayoutGroup("full", {1})}, {{0, {}}, {1, {"full"}}});
+        FAIL() << "expected empty layer group membership to be rejected";
+    } catch (const std::exception& e) {
+        EXPECT_NE(std::string(e.what()).find("layer_id=0"), std::string::npos);
+    }
 }
 
 TEST(CacheLayerLayoutTest, TagAccessIsIndependentOfTopologyTraversalOrder) {

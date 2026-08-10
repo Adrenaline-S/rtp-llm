@@ -104,12 +104,14 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+        self.entry_elems = (
+            self.index_head_dim + self.index_head_dim // self.block_size * 4
+        )
+        self.page_elems = self.blocksize * self.entry_elems
 
     def _indexer_cache_view(self, kv_cache: LayerKVCache) -> torch.Tensor:
         """Return the token-addressable 3D view required by indexer kernels."""
         cache = kv_cache.kv_cache_base
-        entry_elems = self.index_head_dim + self.index_head_dim // self.block_size * 4
-        page_elems = self.blocksize * entry_elems
         if not isinstance(cache, torch.Tensor) or not cache.is_contiguous():
             raise RuntimeError("indexer_kv cache must be a contiguous tensor")
         if kv_cache.seq_size_per_block != self.blocksize:
@@ -118,12 +120,12 @@ class IndexerOp(nn.Module):
                 f"cache_seq_size_per_block={kv_cache.seq_size_per_block} "
                 f"kernel_page_size={self.blocksize}"
             )
-        if cache.dim() != 2 or cache.size(0) <= 0 or cache.size(1) != page_elems:
+        if cache.dim() != 2 or cache.size(0) <= 0 or cache.size(1) != self.page_elems:
             raise RuntimeError(
-                "indexer_kv cache must have exact 2D physical-page layout: "
-                f"shape={tuple(cache.shape)} expected_row_width={page_elems}"
+                "indexer_kv cache must have exact 2D kernel-page layout: "
+                f"shape={tuple(cache.shape)} expected_row_width={self.page_elems}"
             )
-        return cache.view(cache.size(0), self.blocksize, entry_elems)
+        return cache.view(cache.size(0), self.blocksize, self.entry_elems)
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -394,11 +396,8 @@ class IndexerOp(nn.Module):
         kv_cache_fp8 = self._indexer_cache_view(kv_cache)
 
         num_heads_kv = 1
-        head_dim_with_sf = (
-            self.index_head_dim + self.index_head_dim // self.block_size * 4
-        )
         kv_cache_fp8 = kv_cache_fp8.view(
-            kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
+            kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, self.entry_elems
         ).view(dtype=torch.uint8)
 
         max_seq_len = (
@@ -473,7 +472,7 @@ class IndexerOp(nn.Module):
             device=q_fp8.device,
         )
         k_scale = torch.empty(
-            (num_tokens, self.index_head_dim // self.block_size * 4),
+            (num_tokens, self.entry_elems - self.index_head_dim),
             dtype=torch.uint8,
             device=q_fp8.device,
         )
@@ -584,7 +583,7 @@ class IndexerOp(nn.Module):
             device=device,
         )
         k_scale = torch.empty(
-            (total_kv_tokens, self.index_head_dim // self.block_size * 4),
+            (total_kv_tokens, self.entry_elems - self.index_head_dim),
             dtype=torch.uint8,
             device=device,
         )

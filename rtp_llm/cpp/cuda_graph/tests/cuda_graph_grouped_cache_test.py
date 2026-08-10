@@ -77,6 +77,14 @@ class GroupedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class SingleBlockTableModel:
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        return PyModelOutputs(inputs.input_hiddens)
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs,
     tags: list[str],
@@ -471,7 +479,31 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
             physical_block_count=3,
         )
         self.assertFalse(runner.canRun(over_capacity))
-        self.assertEqual(runner.groupedCacheFallbackCount(), 4)
+
+        non_unit_host_stride = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        host_base = torch.ones((2, 2), dtype=torch.int32).pin_memory()
+        non_unit_host_stride.attention_inputs["full"].kv_cache_block_id = host_base[
+            :, ::2
+        ]
+        self.assertEqual(
+            non_unit_host_stride.attention_inputs["full"].kv_cache_block_id.stride(1),
+            2,
+        )
+        self.assertFalse(runner.canRun(non_unit_host_stride))
+
+        non_unit_device_stride = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        device_base = torch.ones((2, 2), dtype=torch.int32, device="cuda")
+        non_unit_device_stride.attention_inputs[
+            "aux"
+        ].kv_cache_kernel_block_id_device = device_base[:, ::2]
+        self.assertEqual(
+            non_unit_device_stride.attention_inputs[
+                "aux"
+            ].kv_cache_kernel_block_id_device.stride(1),
+            2,
+        )
+        self.assertFalse(runner.canRun(non_unit_device_stride))
+        self.assertEqual(runner.groupedCacheFallbackCount(), 6)
 
     def test_groups_have_independent_capture_capacity(self) -> None:
         runner = CudaGraphRunner()
@@ -498,6 +530,44 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
         full = inputs.attention_inputs["full"]
         full.kv_cache_block_id = torch.ones((2, 3), dtype=torch.int32).pin_memory()
         full.kv_cache_block_id_device = full.kv_cache_block_id.cuda()
+        self.assertFalse(runner.canRun(inputs))
+        self.assertEqual(runner.groupedCacheFallbackCount(), 1)
+
+    def test_group_capture_capacities_must_be_positive(self) -> None:
+        for capacity_name, capacities in (
+            ("physical", {"full": (0, 2), "aux": (2, 2)}),
+            ("kernel", {"full": (2, 0), "aux": (2, 2)}),
+        ):
+            with self.subTest(capacity_name=capacity_name):
+                runner = CudaGraphRunner()
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    rf"{capacity_name} block-table capacity must be positive",
+                ):
+                    runner.init_decode(
+                        GroupedBlockTableModel(),
+                        HIDDEN_SIZE,
+                        2 * TOKENS_PER_BLOCK,
+                        TOKENS_PER_BLOCK,
+                        TOKENS_PER_BLOCK,
+                        [2],
+                        GROUP_TAGS,
+                        group_capacities=capacities,
+                    )
+
+    def test_single_group_runner_rejects_grouped_inputs(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            SingleBlockTableModel(),
+            HIDDEN_SIZE,
+            2 * TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            ["full"],
+        )
+
+        inputs = _build_decode_inputs(["full"], {"full": 1})
         self.assertFalse(runner.canRun(inputs))
         self.assertEqual(runner.groupedCacheFallbackCount(), 1)
 

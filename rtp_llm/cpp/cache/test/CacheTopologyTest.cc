@@ -74,9 +74,13 @@ TEST(CacheTopologyTest, RejectsDuplicateAndEmptyTags) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("", {0})}, {{0, {""}}}));
 }
 
-TEST(CacheTopologyTest, AllowsLayerWithoutAGroup) {
-    auto topology = CacheTopology::create({makeGroup("full", {1})}, {{0, {}}, {1, {"full"}}});
-    EXPECT_EQ(topology->groupsForLayer(0).size(), 0u);
+TEST(CacheTopologyTest, RejectsLayerWithoutAGroup) {
+    try {
+        CacheTopology::create({makeGroup("full", {1})}, {{0, {}}, {1, {"full"}}});
+        FAIL() << "expected empty layer group membership to be rejected";
+    } catch (const std::exception& e) {
+        EXPECT_NE(std::string(e.what()).find("layer_id=0"), std::string::npos);
+    }
 }
 
 TEST(CacheTopologyTest, RejectsInconsistentReverseMembership) {

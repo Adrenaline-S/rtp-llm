@@ -1,7 +1,9 @@
 import importlib
+import io
 import json
 import os
 import sys
+from contextlib import redirect_stderr
 from unittest import TestCase, main
 
 
@@ -20,7 +22,7 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
-    def test_linear_step_only_accepts_one(self):
+    def test_linear_step_setter_rejects_two(self):
         from rtp_llm.config.kv_cache_config import KVCacheConfig
 
         config = KVCacheConfig()
@@ -28,18 +30,40 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaises(ValueError):
             config.linear_step = 2
 
+    def test_linear_step_pickle_restore_rejects_two(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        config = KVCacheConfig()
         state = list(config.__getstate__())
         state[8] = 2
         restored = KVCacheConfig.__new__(KVCacheConfig)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "pickle linear_step only supports 1"):
             restored.__setstate__(tuple(state))
 
-        sys.argv = ["prog", "--linear_step", "2"]
+    def _assert_setup_rejects_linear_step_two(self):
         import rtp_llm.server.server_args.server_args
 
         importlib.reload(rtp_llm.server.server_args.server_args)
-        with self.assertRaises(SystemExit):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
+        error = stderr.getvalue()
+        self.assertIn("--linear_step", error)
+        self.assertIn("invalid choice: 2", error)
+
+    def test_linear_step_pure_env_rejects_two(self):
+        os.environ["LINEAR_STEP"] = "2"
+        sys.argv = ["prog"]
+        self._assert_setup_rejects_linear_step_two()
+
+    def test_linear_step_pure_cli_rejects_two(self):
+        sys.argv = ["prog", "--linear_step", "2"]
+        self._assert_setup_rejects_linear_step_two()
+
+    def test_linear_step_mixed_cli_env_rejects_two(self):
+        os.environ["LINEAR_STEP"] = "2"
+        sys.argv = ["prog", "--model_type", "qwen"]
+        self._assert_setup_rejects_linear_step_two()
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""

@@ -20,7 +20,7 @@ size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
         (void)tag;
         matched_blocks = std::max(matched_blocks, block_ids->blocksNum());
     }
-    return matched_blocks;
+    return std::min(matched_blocks, resource_->cacheKeys().size());
 }
 
 bool P2PConnectorAsyncMatchContext::done() const {

@@ -156,6 +156,8 @@ private:
             servers_.push_back(std::move(server));
         }
     }
+
+protected:
     void resetToHybridCacheConfig() {
         cache_config_ = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
                                                        /*block_num=*/10,
@@ -171,6 +173,8 @@ private:
             cache_config_, kv_cache_config_, coordinator_cache_manager_, server_addrs_);
         ASSERT_TRUE(connector_->init());
     }
+
+private:
     // BlockInfo helpers: convertIndexToBuffer() now returns std::vector<BlockInfo>.
     size_t sumBlockInfosBytes(const std::vector<BlockInfo>& infos) const {
         size_t total = 0;

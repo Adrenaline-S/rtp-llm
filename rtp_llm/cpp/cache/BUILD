@@ -239,7 +239,6 @@ cc_library(
     ],
     hdrs = [
         "HybridPoolCoordinatorKVCacheManager.h",
-        "CoordinatorKVCacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

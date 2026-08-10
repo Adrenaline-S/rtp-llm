@@ -24,9 +24,6 @@ CacheConfig::CacheConfig(uint32_t                   main_layer_num,
     is_sparse(sparse),
     seq_size_per_block(block_seq_size) {
     setTopology(std::move(groups), std::move(layers));
-    for (const auto& group : topology().groups()) {
-        is_sparse = is_sparse || group.spec->type == KVCacheSpecType::OpaqueKV;
-    }
 }
 
 namespace {
@@ -45,10 +42,9 @@ std::vector<GroupTopology> copyGroups(const CacheTopology& topology) {
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
-           && lhs.explicit_block_num == rhs.explicit_block_num
-           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget
-           && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
-           && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;
+           && lhs.explicit_block_num == rhs.explicit_block_num && lhs.active_tail_blocks == rhs.active_tail_blocks
+           && lhs.validate_tail_blocks == rhs.validate_tail_blocks && lhs.cp_mapping == rhs.cp_mapping
+           && lhs.cp_slice == rhs.cp_slice;
 }
 
 std::optional<std::string> CacheConfig::kernelAddressedFullGroupTag() const {
@@ -228,6 +224,9 @@ void CacheConfig::setTopology(std::vector<GroupTopology> new_groups, std::vector
     }
 
     cache_topology = CacheTopology::create(std::move(new_groups), std::move(new_layers));
+    for (const auto& group : topology().groups()) {
+        is_sparse = is_sparse || group.spec->type == KVCacheSpecType::OpaqueKV;
+    }
     finalized_global_block_num_.reset();
 }
 

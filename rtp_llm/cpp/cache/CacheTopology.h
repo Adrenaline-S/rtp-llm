@@ -26,6 +26,8 @@ struct GroupTopology {
     size_t   kv_scale_stride_bytes = 0;
 };
 
+size_t storedKernelBlocksPerKvBlock(const GroupTopology& group);
+
 // Order is deterministic but carries no business meaning.
 struct LayerTopology {
     int                      layer_id = -1;

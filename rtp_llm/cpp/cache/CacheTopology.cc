@@ -7,6 +7,23 @@
 
 namespace rtp_llm {
 
+size_t storedKernelBlocksPerKvBlock(const GroupTopology& group) {
+    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache group tag=%s has null spec", group.tag.c_str());
+    if (group.policy.group_type != CacheGroupType::FULL) {
+        return 1;
+    }
+
+    const size_t physical_seq_size = group.spec->seq_size_per_block;
+    const size_t kernel_seq_size   = group.spec->kernel_seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size > 0 && physical_seq_size >= kernel_seq_size
+                                && physical_seq_size % kernel_seq_size == 0,
+                            "invalid block subdivision for tag=%s: physical=%zu kernel=%zu",
+                            group.tag.c_str(),
+                            physical_seq_size,
+                            kernel_seq_size);
+    return physical_seq_size / kernel_seq_size;
+}
+
 std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupTopology> groups,
                                                            std::vector<LayerTopology> layers) {
     return std::shared_ptr<const CacheTopology>(new CacheTopology(std::move(groups), std::move(layers)));
@@ -59,6 +76,8 @@ void CacheTopology::validateAndBuildIndex() {
                                 "CacheTopology layer index=%zu has layer_id=%d",
                                 layer_index,
                                 layer.layer_id);
+        RTP_LLM_CHECK_WITH_INFO(
+            !layer.group_tags.empty(), "CacheTopology layer_id=%d requires at least one cache group", layer.layer_id);
         std::unordered_set<std::string> seen_tags;
         for (const auto& tag : layer.group_tags) {
             RTP_LLM_CHECK_WITH_INFO(tag_to_group_idx_.find(tag) != tag_to_group_idx_.end(),

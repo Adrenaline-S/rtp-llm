@@ -220,6 +220,8 @@ class PyModelInputsCompatTest(unittest.TestCase):
         indexer_op.block_size = 128
         indexer_op.blocksize = 64
         entry_elems = 132
+        indexer_op.entry_elems = entry_elems
+        indexer_op.page_elems = indexer_op.blocksize * entry_elems
         base = torch.empty((3, 64 * entry_elems), dtype=torch.uint8)
         layer = LayerKVCache(base, 64, layer_id=0, tag="indexer_kv")
 
@@ -234,6 +236,8 @@ class PyModelInputsCompatTest(unittest.TestCase):
         indexer_op.block_size = 128
         indexer_op.blocksize = 64
         row_width = 64 * 132
+        indexer_op.entry_elems = 132
+        indexer_op.page_elems = row_width
 
         with self.assertRaisesRegex(RuntimeError, "contiguous tensor"):
             indexer_op._indexer_cache_view(
@@ -250,7 +254,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
                     torch.empty((2, row_width), dtype=torch.uint8), 128, 0, "indexer_kv"
                 )
             )
-        with self.assertRaisesRegex(RuntimeError, "exact 2D physical-page layout"):
+        with self.assertRaisesRegex(RuntimeError, "exact 2D kernel-page layout"):
             indexer_op._indexer_cache_view(
                 LayerKVCache(
                     torch.empty((2, row_width - 1), dtype=torch.uint8),

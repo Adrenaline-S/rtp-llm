@@ -353,17 +353,22 @@ BlockPlan planBlocks(const CacheConfig& config, size_t total_budget_bytes, int t
 
 uint32_t
 convergeBlockNum(const BlockPlan& local_plan, const ParallelismConfig& parallelism_config, bool sentinel_only) {
-    const size_t world_size = parallelism_config.tp_size * parallelism_config.dp_size;
+    const int64_t world_size = parallelism_config.world_size;
+    const int64_t world_rank = parallelism_config.world_rank;
+    RTP_LLM_CHECK_WITH_INFO(world_size > 0, "invalid world_size=%ld", static_cast<long>(world_size));
+    RTP_LLM_CHECK_WITH_INFO(world_rank >= 0 && world_rank < world_size,
+                            "invalid world_rank=%ld for world_size=%ld",
+                            static_cast<long>(world_rank),
+                            static_cast<long>(world_size));
     if (world_size == 1) {
         return local_plan.local_block_num;
     }
 
-    const size_t local_rank = parallelism_config.tp_size * parallelism_config.dp_rank + parallelism_config.tp_rank;
-    auto         block_nums = torch::empty({static_cast<int64_t>(world_size)}, torch::kInt32).pin_memory();
-    auto*        data       = block_nums.data_ptr<int>();
+    auto  block_nums = torch::full({world_size}, std::numeric_limits<int>::max(), torch::kInt32).pin_memory();
+    auto* data       = block_nums.data_ptr<int>();
     // FFN-service ranks only publish the reserved sentinel slot locally. They must still participate in the
     // collective, but their synthetic block count must not reduce the capacity selected for attention ranks.
-    data[local_rank] = sentinel_only ? std::numeric_limits<int>::max() : static_cast<int>(local_plan.local_block_num);
+    data[world_rank] = sentinel_only ? std::numeric_limits<int>::max() : static_cast<int>(local_plan.local_block_num);
     execAllGather({{block_nums}, ParallelMode::DP_AND_TP});
     execSyncCommunication(false);
     cudaSyncAndCheck();

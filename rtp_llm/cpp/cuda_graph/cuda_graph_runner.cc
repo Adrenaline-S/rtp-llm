@@ -35,6 +35,9 @@ bool validateGroupedBlockTable(const torch::Tensor& source,
     if (source.dim() != 2 || captured.dim() != 2) {
         return fail("source and capture tensors must be two-dimensional");
     }
+    if (source.stride(1) != 1 || captured.stride(1) != 1) {
+        return fail("source and capture tensors must have unit stride in the last dimension");
+    }
     if (source.is_cuda() != expect_cuda || captured.is_cuda() != expect_cuda) {
         return fail(expect_cuda ? "source and capture tensors must be CUDA tensors" :
                                   "source and capture tensors must be CPU tensors");

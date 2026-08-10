@@ -42,14 +42,14 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 
 namespace rtp_llm {
 
-namespace {
+bool DecodeRpcServer::isPageLevelRouting(int32_t prefill_cp_size, size_t peer_addr_count) {
+    return prefill_cp_size > 1 && peer_addr_count == static_cast<size_t>(prefill_cp_size);
+}
 
-bool requiresWholeBlockTransfer(const CacheConfig& cache_config, bool page_level_routing) {
+bool DecodeRpcServer::requiresWholeBlockTransfer(const CacheConfig& cache_config, bool page_level_routing) {
     return cache_config.use_mla || cache_config.usesOpaqueKVCacheStore() || cache_config.groupNums() > 1
            || page_level_routing;
 }
-
-}  // namespace
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
@@ -72,6 +72,8 @@ std::string DecodeRpcServer::makeGroupRequestKey(int64_t request_id, size_t laye
 
 std::vector<DecodeRpcServer::MTPModuleLoadPlan>
 DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params) {
+    // Eagle engine initialization guarantees that active MTP parameters contain module 0.
+    // Keep this defensive branch for non-Eagle callers without changing its unreachable runtime semantics.
     if (propose_params == nullptr || propose_params->mtp_model_params_ == nullptr
         || propose_params->mtp_model_params_->empty() || propose_params->mtp_model_params_->front() == nullptr) {
         return {};
@@ -294,6 +296,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
 
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     const LoadKVCacheContext& load_context, int index, const std::vector<std::string>& peer_addrs) const {
+    RTP_LLM_CHECK_WITH_INFO(!load_context.group_block_ids.empty(),
+                            "remote load request requires non-empty group_block_ids");
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
@@ -320,14 +324,12 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    if (!load_context.group_block_ids.empty()) {
-        for (const auto& [tag, group_block] : load_context.group_block_ids) {
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block for tag=%s", tag.c_str());
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(tag);
-            for (const auto& block_id : group_block->blocks()) {
-                tagged_row->add_block_ids(block_id);
-            }
+    for (const auto& [tag, group_block] : load_context.group_block_ids) {
+        RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block for tag=%s", tag.c_str());
+        auto* tagged_row = request.add_tagged_group_block_ids();
+        tagged_row->set_tag(tag);
+        for (const auto& block_id : group_block->blocks()) {
+            tagged_row->add_block_ids(block_id);
         }
     }
     request.set_reuse_block_size(load_context.reuse_block_size);
@@ -338,6 +340,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                                    int                             index,
                                                                    const std::vector<std::string>& peer_addrs) const {
+    RTP_LLM_CHECK_WITH_INFO(!load_context.group_block_ids.empty(),
+                            "remote load request requires non-empty group_block_ids");
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
@@ -380,15 +384,12 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    // Prefer per-group block ids if available (hybrid KV cache).
-    if (!load_context.group_block_ids.empty()) {
-        for (const auto& [tag, group_block] : load_context.group_block_ids) {
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block for tag=%s", tag.c_str());
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(tag);
-            for (const auto& block_id : group_block->blocks()) {
-                tagged_row->add_block_ids(block_id);
-            }
+    for (const auto& [tag, group_block] : load_context.group_block_ids) {
+        RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block for tag=%s", tag.c_str());
+        auto* tagged_row = request.add_tagged_group_block_ids();
+        tagged_row->set_tag(tag);
+        for (const auto& block_id : group_block->blocks()) {
+            tagged_row->add_block_ids(block_id);
         }
     }
     request.set_reuse_block_size(load_context.reuse_block_size);
@@ -492,7 +493,8 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         // Opaque KV stores keep TP-replicated latent blocks like MLA, so both
         // must use the single-peer load layout instead of the split-KV one.
         const auto& load_cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-        if (requiresWholeBlockTransfer(load_cache_config, load_context.prefill_cp_size > 1)) {
+        if (requiresWholeBlockTransfer(
+                load_cache_config, isPageLevelRouting(load_context.prefill_cp_size, load_context.peer_addrs.size()))) {
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -618,7 +620,9 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
 
             // Same MLA-style single-peer layout for opaque KV stores as above.
             const auto& load_cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-            if (requiresWholeBlockTransfer(load_cache_config, load_context.prefill_cp_size > 1)) {
+            if (requiresWholeBlockTransfer(
+                    load_cache_config,
+                    isPageLevelRouting(load_context.prefill_cp_size, load_context.peer_addrs.size()))) {
                 load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
             } else {
                 load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -681,9 +685,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const bool use_mla             = cache_config.use_mla;
     const bool use_hybrid          = cache_config.groupNums() > 1;
     const bool use_opaque_kv_store = cache_config.usesOpaqueKVCacheStore();
-    const bool is_page_level_rr    = load_context.prefill_cp_size > 1
-                                  && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    const bool use_whole_kv_block = requiresWholeBlockTransfer(cache_config, is_page_level_rr);
+    const bool is_page_level_rr    = isPageLevelRouting(load_context.prefill_cp_size, load_context.peer_addrs.size());
+    const bool use_whole_kv_block  = requiresWholeBlockTransfer(cache_config, is_page_level_rr);
     if (!use_whole_kv_block && peer_cnt > 1) {
         for (const auto& group : cache_config.topology().groups()) {
             const size_t k_total_bytes = group.spec->k_block_size_bytes();
@@ -1139,31 +1142,42 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         return grpc::Status::OK;
     }
 
-    ErrorInfo error_info = ErrorInfo::OkStatus();
+    std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+    std::vector<std::string>  peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
+    GroupBlockIds             group_block_ids;
+    ErrorInfo                 error_info = ErrorInfo::OkStatus();
     try {
-        std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-        const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
-        GroupBlockIds             group_block_ids = decodeGroupBlockIds(*request, cache_config.topology());
-        std::vector<std::string>  peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
-
-        // TODO(xinfei.sxf) add retry
-        error_info = loadCache({request->request_id(),
-                                request->request_key(),
-                                peer_addrs,
-                                cache_keys,
-                                std::move(group_block_ids),
-                                request->reuse_block_size(),
-                                request->timeout_ms(),
-                                request->partition_count(),
-                                request->partition_id(),
-                                server_context,
-                                request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
+        const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+        group_block_ids          = decodeGroupBlockIds(*request, cache_config.topology());
     } catch (const std::exception& e) {
         error_info = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
                                std::string("invalid remote load cache topology or block ids: ") + e.what());
     } catch (...) {
         error_info = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
                                "invalid remote load cache topology or block ids: unknown exception");
+    }
+
+    if (error_info.ok()) {
+        try {
+            // TODO(xinfei.sxf) add retry
+            error_info = loadCache({request->request_id(),
+                                    request->request_key(),
+                                    peer_addrs,
+                                    cache_keys,
+                                    std::move(group_block_ids),
+                                    request->reuse_block_size(),
+                                    request->timeout_ms(),
+                                    request->partition_count(),
+                                    request->partition_id(),
+                                    server_context,
+                                    request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
+        } catch (const std::exception& e) {
+            error_info = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                   std::string("remote load cache execution failed: ") + e.what());
+        } catch (...) {
+            error_info =
+                ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "remote load cache execution failed: unknown exception");
+        }
     }
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
@@ -1178,17 +1192,8 @@ GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB&
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
         RTP_LLM_CHECK_WITH_INFO(
             group_block_ids.count(tagged_row.tag()) == 0, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
-        const auto& group           = topology.group(tagged_row.tag());
-        const auto  physical_tokens = group.spec->seq_size_per_block;
-        const auto  kernel_tokens   = group.spec->kernel_seq_size_per_block;
-        RTP_LLM_CHECK_WITH_INFO(kernel_tokens > 0 && physical_tokens % kernel_tokens == 0,
-                                "invalid RPC cache block geometry for tag=%s physical=%u kernel=%u",
-                                tagged_row.tag().c_str(),
-                                physical_tokens,
-                                kernel_tokens);
-        const size_t kernel_blocks_per_kv_block =
-            group.policy.group_type == CacheGroupType::FULL ? physical_tokens / kernel_tokens : 1;
-        auto holder = std::make_shared<BlockIds>(kernel_blocks_per_kv_block);
+        const auto& group  = topology.group(tagged_row.tag());
+        auto        holder = std::make_shared<BlockIds>(storedKernelBlocksPerKvBlock(group));
         holder->assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
         group_block_ids.emplace(tagged_row.tag(), std::move(holder));
     }

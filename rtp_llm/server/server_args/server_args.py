@@ -192,9 +192,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
     def _register_config_binding(
         self,
         action: argparse.Action,
-        bind_to: Union[
-            Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]
-        ],
+        bind_to: Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]],
     ) -> None:
         """注册参数到配置对象的绑定关系"""
         binding = ConfigBinding(action, bind_to)
@@ -366,6 +364,21 @@ class EnvArgumentParser(argparse.ArgumentParser):
                             else:
                                 # No type converter, use as string
                                 setattr(parsed_args, dest, env_value)
+
+        # Values injected from the environment after argparse's normal CLI pass
+        # must honor the same choices contract as values parsed from argv.
+        for action in self._actions:
+            if action.choices is None or not hasattr(parsed_args, action.dest):
+                continue
+            value = getattr(parsed_args, action.dest)
+            if value is None:
+                continue
+            values = value if isinstance(value, list) else [value]
+            for choice_value in values:
+                try:
+                    self._check_value(action, choice_value)
+                except argparse.ArgumentError as error:
+                    self.error(str(error))
 
         # 应用所有配置绑定
         if self._root_config is not None:

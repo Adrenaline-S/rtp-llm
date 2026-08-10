@@ -539,16 +539,19 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
     EXPECT_EQ(config.blockNumForGroup("linear"), 23u);
 }
 
-TEST(CacheConfigTest, SetTopologyAllowsLayerWithoutCacheGroups) {
+TEST(CacheConfigTest, SetTopologyRejectsLayerWithoutCacheGroups) {
     CacheConfig config;
     config.layer_num = 2;
 
     auto spec                         = std::make_shared<MHAKVCacheSpec>();
     spec->tag                         = "default";
     std::vector<LayerTopology> layers = {{0, {"default"}}, {1, {}}};
-    EXPECT_NO_THROW(config.setTopology({makeTestGroup(spec, CacheGroupType::FULL, {0})}, std::move(layers)));
-    EXPECT_EQ(config.groupsForLayer(0).size(), 1u);
-    EXPECT_TRUE(config.groupsForLayer(1).empty());
+    try {
+        config.setTopology({makeTestGroup(spec, CacheGroupType::FULL, {0})}, std::move(layers));
+        FAIL() << "expected empty layer group membership to be rejected";
+    } catch (const std::exception& e) {
+        EXPECT_NE(std::string(e.what()).find("layer_id=1"), std::string::npos);
+    }
 }
 
 TEST(CacheConfigTest, SetTopologyRejectsEmptyTag) {
