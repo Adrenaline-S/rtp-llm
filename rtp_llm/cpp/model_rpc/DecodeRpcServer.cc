@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
+#include "autil/StringUtil.h"
 
 using namespace std;
 using namespace autil::legacy;

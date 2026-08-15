@@ -554,6 +554,40 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(legacy.explicit_block_num, 23)
         self.assertFalse(hasattr(legacy, "charge_to_paged_budget"))
 
+    def test_kv_cache_spec_desc_pickle_schema_v1_round_trip(self):
+        desc = KVCacheSpecDesc()
+        desc.tag = "indexer_kv"
+        desc.cache_type = KVCacheSpecType.OPAQUE_KV
+        desc.entry_dtype = DataType.TYPE_UINT8
+        desc.entry_elems = 132
+        desc.explicit_entry_count = 64
+        desc.kernel_seq_size_per_block = 16
+
+        restored = pickle.loads(pickle.dumps(desc))
+        self.assertEqual(restored.tag, desc.tag)
+        self.assertEqual(restored.cache_type, desc.cache_type)
+        self.assertEqual(restored.entry_dtype, desc.entry_dtype)
+        self.assertEqual(restored.entry_elems, desc.entry_elems)
+        self.assertEqual(restored.explicit_entry_count, desc.explicit_entry_count)
+        self.assertEqual(
+            restored.kernel_seq_size_per_block, desc.kernel_seq_size_per_block
+        )
+
+        state = desc.__getstate__()
+        self.assertEqual((state[0], len(state)), (1, 21))
+
+        invalid = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "cross-version pickle is unsupported; expected version=1 fields=21 actual version=0 fields=20",
+        ):
+            invalid.__setstate__((None,) * 20)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "expected version=1 actual version=2"
+        ):
+            invalid.__setstate__((2,) + state[1:])
+
 
 if __name__ == "__main__":
     main()
