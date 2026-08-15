@@ -366,11 +366,6 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
-static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
-    model_input.kv_block_stride_bytes = cache_config.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
-}
-
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
                                                             size_t                 reserved_blocks,
                                                             const ModelConfig&     model_config,
@@ -780,10 +775,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
-        int64_t     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
-        draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        draft_model_output    = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1218,11 +1211,8 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
-    const auto& cache_cfg = cache_manager_->cacheConfig();
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
-    auto model_input_copy                  = model_input;
-    model_input_copy.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
+    auto model_input_copy = model_input;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -1304,13 +1294,10 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.
     auto* prefill_model    = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy = model_input;
-    model_input_copy.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
@@ -1364,16 +1351,14 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         // host bytes are ready for the downstream host memcpys.
         if (!useDeviceInput()) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(kv_cache_kernel_block_id_to_host)");
-            for (auto& [tag, table] : model_input.block_tables_by_tag) {
-                (void)tag;
-                if (!table.kernel_block_ids.defined() || !table.kernel_block_ids.is_cuda()) {
+            for (auto& table : model_input.kv_cache_kernel_block_ids_by_group) {
+                if (!table.defined() || !table.is_cuda()) {
                     continue;
                 }
-                auto host_table =
-                    torch::empty(table.kernel_block_ids.sizes(),
-                                 torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-                host_table.copy_(table.kernel_block_ids, /*non_blocking=*/false);
-                table.kernel_block_ids = std::move(host_table);
+                auto host_table = torch::empty(
+                    table.sizes(), torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+                host_table.copy_(table, /*non_blocking=*/false);
+                table = std::move(host_table);
             }
         }
 
@@ -1428,7 +1413,7 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     // Host-check before forward captures NULL slots without GPU coredumps.
     static const bool always_print = debugTargetVerifyInputEnabled();
 
-    if (model_input.block_tables_by_tag.empty() || !model_input.sequence_lengths.defined()) {
+    if (model_input.kv_cache_kernel_block_ids_by_group.empty() || !model_input.sequence_lengths.defined()) {
         return;
     }
     if (cache_manager_ == nullptr) {
@@ -1445,12 +1430,20 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     }
 
     std::map<std::string, torch::Tensor> block_ids_by_group;
-    for (const auto& [tag, table] : model_input.block_tables_by_tag) {
-        auto block_ids = table.kernel_block_ids.to(torch::kCPU);
+    std::vector<std::string>             sorted_tags;
+    for (const auto& group : cache_manager_->cacheConfig().topology().groups()) {
+        sorted_tags.push_back(group.tag);
+    }
+    std::sort(sorted_tags.begin(), sorted_tags.end());
+    if (sorted_tags.size() != model_input.kv_cache_kernel_block_ids_by_group.size()) {
+        return;
+    }
+    for (size_t i = 0; i < sorted_tags.size(); ++i) {
+        auto block_ids = model_input.kv_cache_kernel_block_ids_by_group[i].to(torch::kCPU);
         if (block_ids.scalar_type() != torch::kInt32 || block_ids.dim() != 2) {
             return;
         }
-        block_ids_by_group.emplace(tag, std::move(block_ids));
+        block_ids_by_group.emplace(sorted_tags[i], std::move(block_ids));
     }
 
     const auto all_streams = stream_groups.allStreams();
@@ -1536,7 +1529,6 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
 
 void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     if (parallelism_config_.tp_size > 1) {
         if (useStreamAsync() || useAsyncDeviceState()) {
             // Device-state pipeline keeps the dense (propose_step + 1) layout on
@@ -1557,8 +1549,6 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
             tpSyncModelInputs(model_input, parallelism_config_);
         }
     }
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
 }
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {
@@ -1761,9 +1751,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    int64_t&                    model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
-
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;
     torch::Tensor              spec_prefix_lengths;
@@ -1947,8 +1934,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             }
             execBroadcast({broadcast_tensors, 0});
         }
-
-        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
     }
 }
 

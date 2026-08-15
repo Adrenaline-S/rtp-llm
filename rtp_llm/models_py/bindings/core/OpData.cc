@@ -50,9 +50,12 @@ std::string GptModelInputs::debugString(bool force) const {
     if (combo_position_ids.defined()) {
         debug_string << ", combo_position_ids: " << tb(combo_position_ids);
     }
-    for (const auto& [tag, table] : block_tables_by_tag) {
-        debug_string << ", kv_cache_kernel_block_id[" << tag << "]: " << tb(table.kernel_block_ids);
-        debug_string << ", kv_cache_block_id[" << tag << "]: " << tb(table.block_ids);
+    for (size_t i = 0; i < kv_cache_kernel_block_ids_by_group.size(); ++i) {
+        debug_string << ", kv_cache_kernel_block_id[wire_slot=" << i
+                     << "]: " << tb(kv_cache_kernel_block_ids_by_group[i]);
+    }
+    for (size_t i = 0; i < kv_cache_block_ids_by_group.size(); ++i) {
+        debug_string << ", kv_cache_block_id[wire_slot=" << i << "]: " << tb(kv_cache_block_ids_by_group[i]);
     }
     if (attention_mask.defined()) {
         debug_string << ", attention_mask: " << tb(attention_mask);
@@ -66,7 +69,6 @@ std::string GptModelInputs::debugString(bool force) const {
     if (cache_keys.defined()) {
         debug_string << ", cache_keys: " << tb(cache_keys);
     }
-    debug_string << ", kv_block_stride_bytes: " << kv_block_stride_bytes;
     debug_string << ", pd_separation: " << pd_separation;
     debug_string << "}";
     return debug_string.str();

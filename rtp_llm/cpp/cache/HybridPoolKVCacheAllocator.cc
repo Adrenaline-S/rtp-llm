@@ -299,8 +299,8 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     evicted_keys.reserve(evict_result.evicted_keys.size());
     evicted_dependencies.reserve(evict_result.evicted_keys.size());
     for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
-        const auto  cache_key       = evict_result.evicted_keys[evicted_idx];
-        const auto& group_block_ids = evict_result.evicted_group_block_ids.at(cache_key);
+        const auto  cache_key     = evict_result.evicted_keys[evicted_idx];
+        const auto& blocks_by_tag = evict_result.evicted_group_block_ids.at(cache_key);
         evicted_keys.push_back(cache_key);
         auto dep_it = evict_result.evicted_dependencies.find(cache_key);
         if (dep_it != evict_result.evicted_dependencies.end()) {
@@ -314,7 +314,7 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
             }
             evicted_dependencies.push_back(dependency);
         }
-        for (const auto& [tag, block_id] : group_block_ids) {
+        for (const auto& [tag, block_id] : blocks_by_tag) {
             if (!isNullBlockIdx(block_id)) {
                 batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
             }

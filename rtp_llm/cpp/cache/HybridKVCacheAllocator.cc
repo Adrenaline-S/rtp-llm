@@ -394,7 +394,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             const size_t max_keys = full_keys.size();
             for (size_t pos = max_keys; pos > 0; --pos) {
                 const size_t                                      i = pos - 1;
-                std::vector<std::pair<std::string, BlockIdxType>> group_block_ids;
+                std::vector<std::pair<std::string, BlockIdxType>> blocks_by_tag;
                 for (const auto& [tag, block_ids] : kv_cache_resource->groupBlocks(batch_id)) {
                     if (skipReuseCacheGroup(tag)) {
                         continue;
@@ -404,15 +404,15 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                         continue;
                     }
                     if (!isNullBlockIdx(blocks[i])) {
-                        group_block_ids.push_back({tag, blocks[i]});
+                        blocks_by_tag.push_back({tag, blocks[i]});
                     }
                 }
-                if (!group_block_ids.empty()) {
+                if (!blocks_by_tag.empty()) {
                     const auto dependency = i < full_dependencies.size() ?
                                                 full_dependencies[i] :
                                                 BlockDependency{false, 0, static_cast<uint32_t>(i)};
                     shared_block_cache_->put(full_keys[i],
-                                             group_block_ids,
+                                             blocks_by_tag,
                                              insert_info.is_resident,
                                              SharedBlockCache::kGpuLogicalNamespace,
                                              dependency);
@@ -474,11 +474,10 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 if (isNullBlockIdx(blocks[i])) {
                     continue;
                 }
-                std::vector<std::pair<std::string, BlockIdxType>> group_block_ids{{tag, blocks[i]}};
+                std::vector<std::pair<std::string, BlockIdxType>> blocks_by_tag{{tag, blocks[i]}};
                 const auto                                        dependency =
                     i < dependencies.size() ? dependencies[i] : BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                shared_block_cache_->put(
-                    src_keys[i], group_block_ids, insert_info.is_resident, namespace_id, dependency);
+                shared_block_cache_->put(src_keys[i], blocks_by_tag, insert_info.is_resident, namespace_id, dependency);
             }
         }
     }

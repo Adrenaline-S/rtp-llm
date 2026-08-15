@@ -27,7 +27,7 @@
 
 namespace rtp_llm {
 namespace {
-constexpr int64_t     kSchemaVersion   = 1;
+constexpr int64_t     kSchemaVersion   = 2;
 constexpr size_t      kChunkMaxBytes   = 64ULL * 1024ULL * 1024ULL;
 constexpr size_t      kChunkMaxRecords = 256;
 constexpr size_t      kQueueMaxBytes   = 256ULL * 1024ULL * 1024ULL;
@@ -83,6 +83,12 @@ size_t estimateBytes(const GptModelInputs& inputs) {
     addTensorListBytes(bytes, inputs.multimodal_features);
     addTensorListBytes(bytes, inputs.mm_extra_input);
     addTensorListBytes(bytes, inputs.input_embeddings);
+    for (const auto& tensor : inputs.kv_cache_block_ids_by_group) {
+        addTensorBytes(bytes, tensor);
+    }
+    for (const auto& tensor : inputs.kv_cache_kernel_block_ids_by_group) {
+        addTensorBytes(bytes, tensor);
+    }
     return bytes;
 }
 torch::Tensor snapshotTensor(const torch::Tensor& tensor, std::vector<c10::Device>& devices) {
@@ -129,6 +135,13 @@ void addTensorList(c10::impl::GenericDict&                          payload,
     }
     payload.insert(name, std::move(values));
 }
+void addTensorList(c10::impl::GenericDict&           payload,
+                   const char*                       name,
+                   const std::vector<torch::Tensor>& tensors,
+                   std::vector<c10::Device>&         devices,
+                   c10::impl::GenericDict&           float8_dtypes) {
+    addTensorList(payload, name, std::make_optional(tensors), devices, float8_dtypes);
+}
 c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
                                        ModelInputsModelRole      role,
                                        int64_t                   model_id,
@@ -152,9 +165,13 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     addTensorList(payload, "multimodal_features", inputs.multimodal_features, devices, float8_dtypes);
     addTensorList(payload, "mm_extra_input", inputs.mm_extra_input, devices, float8_dtypes);
     addTensorList(payload, "input_embeddings", inputs.input_embeddings, devices, float8_dtypes);
+    addTensorList(payload, "kv_cache_block_ids_by_group", inputs.kv_cache_block_ids_by_group, devices, float8_dtypes);
+    addTensorList(payload,
+                  "kv_cache_kernel_block_ids_by_group",
+                  inputs.kv_cache_kernel_block_ids_by_group,
+                  devices,
+                  float8_dtypes);
     payload.insert("float8_dtypes", std::move(float8_dtypes));
-    payload.insert("kv_block_stride_bytes", static_cast<int64_t>(inputs.kv_block_stride_bytes));
-    payload.insert("kv_scale_stride_bytes", static_cast<int64_t>(inputs.kv_scale_stride_bytes));
     payload.insert("seq_size_per_block", static_cast<int64_t>(inputs.seq_size_per_block));
     payload.insert("kernel_seq_size_per_block", static_cast<int64_t>(inputs.kernel_seq_size_per_block));
     payload.insert("pd_separation", inputs.pd_separation);

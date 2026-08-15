@@ -330,9 +330,9 @@ message BroadcastLoadRequestPB {
     int32 partition_count = 10;
     int32 partition_id = 11;
     reserved 12;
-    reserved "group_block_ids";
+    reserved "blocks_by_tag";
     int32 prefill_cp_size = 13;
-    repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
+    repeated TaggedBlockIdsPB tagged_blocks_by_tag = 14;
 
 }
 

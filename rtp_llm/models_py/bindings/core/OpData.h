@@ -18,15 +18,6 @@
 
 namespace rtp_llm {
 
-struct GroupBlockTable {
-    std::string    tag;
-    CacheGroupType type = CacheGroupType::FULL;
-    torch::Tensor  block_ids;         // [batch, width]
-    torch::Tensor  kernel_block_ids;  // [batch, kernel_width]
-};
-
-using BlockTablesByGroup = std::map<std::string, GroupBlockTable>;
-
 enum class ParallelMode {
     TP        = 0,
     DP        = 1,
@@ -62,8 +53,12 @@ struct GptModelInputs {
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
-    BlockTablesByGroup             block_tables_by_tag;
-    std::vector<TaggedBlockIdPair> kv_cache_update_mapping;
+    // Both vectors use the local cache-topology tags sorted by std::string as
+    // their temporary wire order. Tags are intentionally not part of the
+    // model-input payload.
+    std::vector<torch::Tensor> kv_cache_block_ids_by_group;         // each [batch, physical_width_i]
+    std::vector<torch::Tensor> kv_cache_kernel_block_ids_by_group;  // each [batch, kernel_width_i]
+    torch::Tensor              kv_cache_update_mapping;             // int32 [N, 3]: wire_slot, src, dst
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
@@ -77,14 +72,11 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
-    // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
-    size_t kv_block_stride_bytes;
-    size_t kv_scale_stride_bytes;
-    size_t seq_size_per_block;
-    size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
-    bool   pd_separation             = false;
-    bool   decode_entrance           = false;
-    bool   use_opaque_kv_cache_store = false;
+    size_t        seq_size_per_block;
+    size_t        kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
+    bool          pd_separation             = false;
+    bool          decode_entrance           = false;
+    bool          use_opaque_kv_cache_store = false;
 
     bool need_all_logits        = false;
     bool need_all_hidden_states = false;
@@ -170,8 +162,8 @@ struct BatchCopyParams {
 struct KvCacheInfo {
     int           layer_num;
     torch::Tensor kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
-    // Only meaningful for hybrid cache; tag -> [batch_size, block_nums].
-    std::map<std::string, torch::Tensor> kv_cache_block_ids_by_tag;
+    // Only meaningful for hybrid cache; ordered by the sorted local topology tags.
+    std::vector<torch::Tensor> kv_cache_block_ids_by_group;
     // Base buffer for kv cache blocks. For current cache layout, this represents the base (K) address of kv blocks.
     // V address can be derived by offset/stride when needed.
     torch::Tensor kv_cache_buffer;

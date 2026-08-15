@@ -33,7 +33,7 @@ struct NormalModelInputGathererConfig {
     size_t                                kernel_seq_size_per_block{};
     bool                                  use_opaque_kv_cache_store = false;
     std::map<std::string, CacheGroupType> kv_cache_group_types;
-    std::map<std::string, size_t>         kernel_blocks_per_kv_block_by_tag;
+    std::map<std::string, size_t>         group_kernel_blocks_per_kv_block;
     bool                                  warm_up{};
     bool                                  enable_detail_log{};
 };
@@ -52,10 +52,13 @@ public:
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
-    absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
-    absl::Status   processContextStreams(GptModelInputs&     model_input,
-                                         const StreamGroups& stream_groups,
-                                         TensorHolder&       host_holder) const;
+    absl::Status   processDecodeStreams(GptModelInputs&                 model_input,
+                                        const StreamGroups&             stream_groups,
+                                        std::vector<TaggedBlockIdPair>& cache_update_mapping) const;
+    absl::Status   processContextStreams(GptModelInputs&                 model_input,
+                                         const StreamGroups&             stream_groups,
+                                         TensorHolder&                   host_holder,
+                                         std::vector<TaggedBlockIdPair>& cache_update_mapping) const;
 
     NormalModelInputGathererConfig config_;
 };

@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
+#include <algorithm>
 #include <string>
 #include <atomic>
 #include <mutex>
@@ -87,6 +88,7 @@ private:
     const size_t                                    layer_num_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
+    std::vector<std::string>                        kv_cache_group_tags_;
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
@@ -138,6 +140,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    if (kv_cache_layer_layout_.has_value()) {
+        for (const auto& group : kv_cache_layer_layout_->topology().groups()) {
+            kv_cache_group_tags_.push_back(group.tag);
+        }
+        std::sort(kv_cache_group_tags_.begin(), kv_cache_group_tags_.end());
+    }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
 #if USING_CUDA
@@ -239,9 +247,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
         if (params.kv_cache_layer_layout.has_value()) {
-            for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
-                const auto physical_tokens_per_block = group.spec->seq_size_per_block;
-                const auto kernel_tokens_per_block   = group.spec->kernel_seq_size_per_block;
+            for (const auto& tag : kv_cache_group_tags_) {
+                const auto& group                     = params.kv_cache_layer_layout->topology().group(tag);
+                const auto  physical_tokens_per_block = group.spec->seq_size_per_block;
+                const auto  kernel_tokens_per_block   = group.spec->kernel_seq_size_per_block;
                 graph_params.kv_cache_kernel_block_table_capacities.emplace(
                     group.tag,
                     calculateKernelBlockTableCapacity(static_cast<int64_t>(params.max_seq_len),

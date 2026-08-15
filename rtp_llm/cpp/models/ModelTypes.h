@@ -8,9 +8,11 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
+#include <map>
+#include <memory>
 #include <string>
 #include <utility>
-#include <memory>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -97,17 +99,6 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitPrefixLengths   = 1u << 3,
     kDeviceBitLmOutputIndexes = 1u << 4,
     kDeviceBitKernelBlockId   = 1u << 5,
-};
-
-struct CacheGroupHintWireFormat {
-    static constexpr size_t kMaxGroups     = 64;
-    static constexpr size_t kMaxTagBytes   = 128;
-    static constexpr size_t kTagWords      = kMaxTagBytes / sizeof(int32_t);
-    static constexpr size_t kWordsPerGroup = 4 + kTagWords;
-
-    static constexpr size_t wordsForGroups(size_t group_count) {
-        return group_count * kWordsPerGroup;
-    }
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);

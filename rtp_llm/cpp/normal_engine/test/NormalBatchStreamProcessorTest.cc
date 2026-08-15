@@ -33,30 +33,31 @@ static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
 static void initFullCacheConfig(CacheConfig& cache_config,
                                 int          layer_num,
                                 uint32_t     seq_size_per_block        = 1,
-                                uint32_t     kernel_seq_size_per_block = 1) {
-    auto spec                       = std::make_shared<MHAKVCacheSpec>(seq_size_per_block, kernel_seq_size_per_block);
-    spec->tag                       = "default";
+                                uint32_t     kernel_seq_size_per_block = 1,
+                                DataType     dtype                     = DataType::TYPE_FP16,
+                                uint32_t     local_head_num_kv         = 1,
+                                uint32_t     size_per_head             = 1) {
+    auto spec = test::makeResolvedMhaSpec(
+        dtype, local_head_num_kv, size_per_head, seq_size_per_block, "default", kernel_seq_size_per_block);
     cache_config.seq_size_per_block = seq_size_per_block;
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.layer_num     = static_cast<uint32_t>(layer_num);
-    cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
+    cache_config.layer_num = static_cast<uint32_t>(layer_num);
     test::setTestTopology(
         cache_config,
         {test::makeTestGroupForConfig(cache_config, spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
 }
 
 static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, const std::vector<std::string>& tags) {
-    std::vector<GroupBase> groups;
-    std::vector<int>       layer_ids(static_cast<size_t>(layer_num));
+    std::vector<GroupTopology> groups;
+    std::vector<int>           layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     for (const auto& tag : tags) {
         auto spec = std::make_shared<MHAKVCacheSpec>();
         spec->tag = tag;
         groups.push_back(test::makeTestGroupForConfig(cache_config, spec, layer_ids, CacheGroupType::FULL, tag));
     }
-    cache_config.layer_num     = static_cast<uint32_t>(layer_num);
-    cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
+    cache_config.layer_num = static_cast<uint32_t>(layer_num);
     test::setTestTopology(cache_config, std::move(groups));
 }
 
@@ -86,13 +87,13 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
 
     EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_group_types.empty());
-    EXPECT_TRUE(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block_by_tag.empty());
+    EXPECT_TRUE(processor.model_input_gatherer_config_.group_kernel_blocks_per_kv_block.empty());
     ASSERT_EQ(stream->kvCache().groupNums(), 1);
     EXPECT_EQ(stream->kvCache().cacheResource().groupTagsForLayer(0), std::vector<std::string>{"__warmup__"});
     TensorHolder holder;
     auto         model_input = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input.ok());
-    EXPECT_TRUE(model_input->block_tables_by_tag.empty());
+    EXPECT_TRUE(model_input->kv_cache_block_ids_by_group.empty());
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testWarmUpUsesConfiguredTagsWithSyntheticResource) {
@@ -124,15 +125,40 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpUsesConfiguredTagsWithSynthetic
     TensorHolder holder;
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input_status.ok());
-    const auto& tables = model_input_status->block_tables_by_tag;
-    ASSERT_EQ(tables.size(), 2u);
-    for (const auto& [tag, table] : tables) {
-        EXPECT_TRUE(tag == "full" || tag == "linear");
-        EXPECT_EQ(table.block_ids.size(0), 1);
-        EXPECT_EQ(table.block_ids.size(1), 1);
-        EXPECT_EQ(toVec<int32_t>(table.block_ids), (std::vector<int32_t>{0}));
-        EXPECT_EQ(toVec<int32_t>(table.kernel_block_ids), (std::vector<int32_t>{0}));
+    const auto& physical_tables = model_input_status->kv_cache_block_ids_by_group;
+    const auto& kernel_tables   = model_input_status->kv_cache_kernel_block_ids_by_group;
+    ASSERT_EQ(physical_tables.size(), 2u);
+    ASSERT_EQ(kernel_tables.size(), 2u);
+    for (size_t i = 0; i < physical_tables.size(); ++i) {
+        EXPECT_EQ(physical_tables[i].size(0), 1);
+        EXPECT_EQ(physical_tables[i].size(1), 1);
+        EXPECT_EQ(toVec<int32_t>(physical_tables[i]), (std::vector<int32_t>{0}));
+        EXPECT_EQ(toVec<int32_t>(kernel_tables[i]), (std::vector<int32_t>{0}));
     }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testPerGroupCacheTopology) {
+    ModelConfig model_config;
+    model_config.num_layers       = 1;
+    model_config.vocab_size       = 2048;
+    model_config.input_vocab_size = 2048;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+
+    CacheConfig cache_config;
+    cache_config.layer_num          = 1;
+    cache_config.seq_size_per_block = 1;
+    const auto full_spec            = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 2, 8, 1, "full");
+    const auto linear_spec          = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 1, "linear");
+    auto       full   = test::makeTestGroupForConfig(cache_config, full_spec, {0}, CacheGroupType::FULL, "full");
+    auto       linear = test::makeTestGroupForConfig(cache_config, linear_spec, {0}, CacheGroupType::LINEAR, "linear");
+    test::setTestTopology(cache_config, {full, linear});
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    const auto& config = processor.model_input_gatherer_config_;
+    EXPECT_EQ(config.kv_cache_group_types.at("full"), CacheGroupType::FULL);
+    EXPECT_EQ(config.kv_cache_group_types.at("linear"), CacheGroupType::LINEAR);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
@@ -244,7 +270,7 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelGeometryUsesKernelAddressedFull
     EXPECT_EQ(processor.model_input_gatherer_config_.kernel_seq_size_per_block, 2u);
     ASSERT_EQ(processor.model_input_gatherer_config_.kv_cache_group_types.count("default"), 1u);
     EXPECT_EQ(processor.model_input_gatherer_config_.kv_cache_group_types.at("default"), CacheGroupType::FULL);
-    EXPECT_EQ(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block_by_tag.at("default"), 4u);
+    EXPECT_EQ(processor.model_input_gatherer_config_.group_kernel_blocks_per_kv_block.at("default"), 4u);
 
     auto query             = make_shared<GenerateInput>();
     query->input_ids       = hostIntBuffer({1, 2});
@@ -266,9 +292,9 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelGeometryUsesKernelAddressedFull
     ASSERT_TRUE(model_input.ok());
     EXPECT_EQ(model_input->seq_size_per_block, 8u);
     EXPECT_EQ(model_input->kernel_seq_size_per_block, 2u);
-    ASSERT_EQ(model_input->block_tables_by_tag.count("default"), 1u);
-    EXPECT_EQ(toVec<int32_t>(model_input->block_tables_by_tag.at("default").block_ids), (std::vector<int32_t>{5, 7}));
-    EXPECT_EQ(toVec<int32_t>(model_input->block_tables_by_tag.at("default").kernel_block_ids),
+    ASSERT_EQ(model_input->kv_cache_block_ids_by_group.size(), 1u);
+    EXPECT_EQ(toVec<int32_t>(model_input->kv_cache_block_ids_by_group[0]), (std::vector<int32_t>{5, 7}));
+    EXPECT_EQ(toVec<int32_t>(model_input->kv_cache_kernel_block_ids_by_group[0]),
               (std::vector<int32_t>{20, 21, 22, 23, 28, 29, 30, 31}));
 }
 
@@ -282,9 +308,13 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
-    cache_config.kv_block_stride_bytes = 4096;
-    cache_config.kv_scale_stride_bytes = 256;
+    initFullCacheConfig(cache_config,
+                        model_config.num_layers,
+                        /*seq_size_per_block=*/1,
+                        /*kernel_seq_size_per_block=*/1,
+                        DataType::TYPE_FP8_E4M3,
+                        /*local_head_num_kv=*/32,
+                        /*size_per_head=*/64);
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -366,12 +396,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
-        const auto& default_table = model_input.block_tables_by_tag.at("default");
-        EXPECT_EQ(kv_cache_block_id, toVec<int>(default_table.block_ids));
-        EXPECT_EQ(default_table.tag, "default");
-        EXPECT_EQ(default_table.type, CacheGroupType::FULL);
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
+        ASSERT_EQ(model_input.kv_cache_block_ids_by_group.size(), 1u);
+        EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_ids_by_group[0]));
     }
     {
         MMModelConfig mm_model_config;
