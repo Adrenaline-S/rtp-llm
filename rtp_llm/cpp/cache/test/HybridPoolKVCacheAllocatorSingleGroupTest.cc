@@ -127,7 +127,7 @@ static int estimateBatchPeakForSingleSequence(const KVCacheAllocator&        all
                                                  /*target_batch_size=*/1);
 }
 
-class SingleTypeKVCacheAllocatorTest: public ::testing::Test {
+class HybridPoolKVCacheAllocatorSingleGroupTest: public ::testing::Test {
 protected:
     void SetUp() override {
         createDevice();
@@ -141,7 +141,7 @@ protected:
 };
 
 // Test init
-TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ConstructorAndInit) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     ASSERT_NE(allocator_, nullptr);
@@ -153,7 +153,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     EXPECT_EQ(allocator_->freeBlocksNum(), config.blockNum() - 1);  // reserve 1 block
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, InitSupportsSingleLinearGroupPool) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, InitSupportsSingleLinearGroupPool) {
     auto config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config);
@@ -162,7 +162,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitSupportsSingleLinearGroupPool) {
     EXPECT_NE(allocator_->getBlockPool("linear"), nullptr);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, InitWithDifferentLayerNum) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, InitWithDifferentLayerNum) {
     auto config = createSingleTypeTestConfig(8, 20, 16);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
 
@@ -173,7 +173,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitWithDifferentLayerNum) {
 }
 
 // Test malloc
-TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MallocSingleBatch) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -196,7 +196,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
     EXPECT_FALSE(result2.success);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/1);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
@@ -234,7 +234,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     EXPECT_EQ(batch_resource_ok->curBlocksNum(), 9);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest,
+       ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
@@ -296,7 +297,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
     }
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MallocMultipleBatches) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -318,7 +319,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
               config.blockNum() - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
 }
 
-// TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithInsufficientBlocks) {
+// TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MallocWithInsufficientBlocks) {
 //     auto config = createSingleTypeTestConfig(4, 5, 8);
 //     allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config);
 //     allocator_->init();
@@ -335,7 +336,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
 // }
 
 // Test free
-TEST_F(SingleTypeKVCacheAllocatorTest, FreeSingleBatch) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, FreeSingleBatch) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -354,7 +355,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeSingleBatch) {
     EXPECT_GT(allocator_->freeBlocksNum(), free_before);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, FreeMultipleBatches) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, FreeMultipleBatches) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -373,7 +374,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeMultipleBatches) {
 }
 
 // Test malloc free cycle
-TEST_F(SingleTypeKVCacheAllocatorTest, MallocFreeCycle) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MallocFreeCycle) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -395,7 +396,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocFreeCycle) {
 }
 
 // Test insert into cache
-TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCache) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, InsertIntoCache) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -411,7 +412,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCache) {
     allocator_->insertIntoCache(insert_info);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, InsertIntoCacheAsResident) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -427,7 +428,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheAsResident) {
     allocator_->insertIntoCache(insert_info);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
     std::unordered_map<std::string, CacheGroupPolicy> policies{{"default", config.policyForGroup("default")}};
     policies.at("default").enable_prefix_reuse = false;
@@ -473,7 +474,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
 }
 
 // Test convert index to addr
-TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddr) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ConvertIndexToAddr) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -486,7 +487,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToAddr) {
     }
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleNoMtp) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ConvertToGlobalLayerIdSingleNoMtp) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
 
@@ -502,7 +503,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleNoMtp) {
               std::numeric_limits<uint32_t>::max());
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleWithMtp) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ConvertToGlobalLayerIdSingleWithMtp) {
     auto config = makeMtpCacheConfigByCreateSpConfig(
         /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
     allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config);
@@ -526,7 +527,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleWithMtp) {
               std::numeric_limits<uint32_t>::max());
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, MtpGlobalLayerIdRejectsInvalidModuleAndLocalIds) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MtpGlobalLayerIdRejectsInvalidModuleAndLocalIds) {
     constexpr auto invalid = std::numeric_limits<uint32_t>::max();
     EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/0), 2u);
     EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/3, /*local=*/2), 4u);
@@ -538,7 +539,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MtpGlobalLayerIdRejectsInvalidModuleAndLo
     EXPECT_EQ(CacheConfig::mtpGlobalLayerId(/*main=*/2, /*module=*/0, /*module_layers=*/0, /*local=*/0), invalid);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAttentionType) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigSlicesDescriptorAndAttentionType) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.kv_cache_spec_descs[0][0].tag                   = "layer0";
     config.kv_cache_spec_descs[1][0].tag                   = "layer1";
@@ -557,7 +558,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
     EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types[0], HybridAttentionType::SLIDING_WINDOW);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigRejectsMissingHybridAttentionTypes) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigRejectsMissingHybridAttentionTypes) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {};
@@ -568,7 +569,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigRejectsMissingHybridA
     EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/1), std::runtime_error);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, MtpModulePlanRejectsMissingHybridAttentionTypes) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MtpModulePlanRejectsMissingHybridAttentionTypes) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {};
@@ -577,7 +578,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MtpModulePlanRejectsMissingHybridAttentio
                  std::runtime_error);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::NONE, HybridAttentionType::NONE};
@@ -594,7 +595,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ActiveMtpCacheLayoutValidationOnlyChecksM
     EXPECT_NO_THROW(buildMTPModuleConfigPlan(config, /*weight_count=*/2, /*gen_num_per_cycle=*/2, SP_TYPE_MTP));
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, MtpModuleConfigPlanKeepsWeightsAndCopiesActiveCacheLayout) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MtpModuleConfigPlanKeepsWeightsAndCopiesActiveCacheLayout) {
     auto config                                 = makeTestModelConfig(/*num_layers=*/2);
     config.kv_cache_spec_descs[0][0].tag        = "active";
     config.kv_cache_spec_descs[1][0].tag        = "inactive-heterogeneous";
@@ -626,7 +627,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MtpModuleConfigPlanKeepsWeightsAndCopiesA
 }
 
 // Test convert index to buffer
-TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToBuffer) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ConvertIndexToBuffer) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -637,7 +638,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertIndexToBuffer) {
 }
 
 // Test layer cache base
-TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, LayerCacheBase) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -659,7 +660,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     }
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTensorsForMainAndMtp) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ManagerLayoutsPreserveSingleTypeGroupTensorsForMainAndMtp) {
     auto config = makeMtpCacheConfigByCreateSpConfig(
         /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
     auto manager = std::make_shared<KVCacheManager>(config);
@@ -703,7 +704,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTens
 }
 
 // Test block copy
-TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockCopySingle) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     allocator_->init();
@@ -757,7 +758,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
     }
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockBatchCopyVector) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     allocator_->init();
@@ -816,7 +817,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
     }
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyEmpty) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockBatchCopyEmpty) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -826,7 +827,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyEmpty) {
     EXPECT_NO_THROW(allocator_->blockBatchCopy(empty_mapping));
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexerStride) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockBatchCopyCopiesCompleteSparseIndexerStride) {
     auto model_config                                = makeTestModelConfig(/*num_layers=*/1);
     model_config.attn_config.is_sparse               = true;
     model_config.attn_config.indexer_head_dim        = 256;
@@ -898,7 +899,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
     verify(after_last);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockBatchCopyPointers) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     allocator_->init();
@@ -946,7 +947,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
     }
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockBatchCopyBuffer) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     allocator_->init();
@@ -999,7 +1000,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
 }
 
 // Test getter methods
-TEST_F(SingleTypeKVCacheAllocatorTest, FreeBlocksNums) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, FreeBlocksNums) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -1007,7 +1008,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeBlocksNums) {
     EXPECT_EQ(allocator_->freeBlocksNum(), config.blockNum() - 1);  // reserve 1 block
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, AvailableBlocksNums) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, AvailableBlocksNums) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -1015,7 +1016,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, AvailableBlocksNums) {
     EXPECT_EQ(allocator_->availableBlocksNum(), config.blockNum() - 1);  // reserve 1 block
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, IncrKVCacheRefReferencesMatchedBlocksOnly) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
@@ -1050,7 +1051,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesGlobalDependencyWhenParentFiltered) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, IncrKVCacheRefPreservesGlobalDependencyWhenParentFiltered) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
@@ -1078,7 +1079,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesGlobalDependencyWh
     block_pool->requestFree(blocks);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, IncrKVCacheRefPreservesConnectorDummyTail) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
@@ -1109,7 +1110,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
@@ -1134,7 +1135,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, TotalBlocksNums) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, TotalBlocksNums) {
     auto config = createSingleTypeTestConfig(4, 20);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -1142,7 +1143,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, TotalBlocksNums) {
     EXPECT_EQ(allocator_->totalBlocksNum(), 20 - 1);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MaxSeqLen) {
     auto config = createSingleTypeTestConfig(4, 10, 8);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -1150,7 +1151,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
     EXPECT_EQ(allocator_->totalTokensNum(), (10 - 1) * 8);  // block_num * seq_size_per_block
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, CPScalesTokenAndSequenceCapacityToLogicalUnits) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, CPScalesTokenAndSequenceCapacityToLogicalUnits) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
@@ -1173,7 +1174,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPScalesTokenAndSequenceCapacityToLogical
 
 // Test boundary conditions
 
-TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithZeroSeqLength) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MallocWithZeroSeqLength) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -1187,7 +1188,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithZeroSeqLength) {
     EXPECT_TRUE(result.success || !result.success);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, FreeEmptyBatchResource) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, FreeEmptyBatchResource) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -1199,7 +1200,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeEmptyBatchResource) {
     allocator_->free(free_info);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommonLenFails) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, InitMallocRollbackWhenInitMallocForCommonLenFails) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/6, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());
@@ -1255,7 +1256,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
 }
 
 // Test rollback logic in incrMalloc
-TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, IncrMallocRollback) {
     // Create a config with limited blocks to trigger rollback
     auto config = createSingleTypeTestConfig(4, 8, 4);  // 8 blocks, 4 seq per block
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
@@ -1300,7 +1301,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {
     // If rollback didn't work properly, we might have partially allocated blocks
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, InitMallocRollbackWhenIncrMallocFails) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/5, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
@@ -1330,7 +1331,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
 
 // ==================== Stress tests ====================
 
-TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MixedOperations) {
     auto config = createSingleTypeTestConfig(4, 30);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
@@ -1367,7 +1368,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
     EXPECT_GT(allocator_->freeBlocksNum(), 0);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, EstimatePeakNeedBlocks) {
     // seq_size_per_block=4, block_num=10
     auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/10, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
@@ -1397,7 +1398,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
     EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator_, new_res, 8, 4, 4, /*enable_reuse_cache=*/false), 2);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/16, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
@@ -1468,7 +1469,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
               6);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakCoversPartialTailCopiesAtExactCapacity) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, EstimateBatchPeakCoversPartialTailCopiesAtExactCapacity) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/6, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
