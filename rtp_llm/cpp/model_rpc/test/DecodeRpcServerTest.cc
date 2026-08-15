@@ -116,11 +116,13 @@ TEST(DecodeRpcServerTest, WholeBlockTransferUsesExplicitLayoutAndPageRouting) {
     const auto mla = makeRpcConfig({makeRpcGroup("full", {0})}, /*use_mla=*/true);
     EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(mla, /*page_level_routing=*/false));
 
-    const auto opaque = makeRpcConfig({makeOpaqueRpcGroup("opaque")}, /*use_mla=*/false, /*use_opaque=*/true);
+    const auto opaque = makeRpcConfig({makeOpaqueRpcGroup("opaque")});
     EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(opaque, /*page_level_routing=*/false));
 
+    // Multi-group topologies need per-group key prefixes, and a prefixed key implies a whole-block
+    // transfer, so grouped configs now take the whole-block path even without page-level routing.
     const auto grouped = makeRpcConfig({makeRpcGroup("full", {0}), makeRpcGroup("second", {1})});
-    EXPECT_FALSE(DecodeRpcServer::requiresWholeBlockTransfer(grouped, /*page_level_routing=*/false));
+    EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(grouped, /*page_level_routing=*/false));
 
     const auto hybrid =
         makeRpcConfig({makeRpcGroup("full", {0}), makeRpcGroup("linear", {1}, 8, 8, CacheGroupType::LINEAR)},
@@ -129,18 +131,57 @@ TEST(DecodeRpcServerTest, WholeBlockTransferUsesExplicitLayoutAndPageRouting) {
     EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(hybrid, /*page_level_routing=*/false));
 }
 
-TEST(DecodeRpcServerTest, WholeBlockRemoteRequestUsesOnlyMlaAndActiveOpaqueLayout) {
+TEST(DecodeRpcServerTest, WholeBlockTransferFollowsKVKeyPrefixPredicate) {
     const auto hybrid =
         makeRpcConfig({makeRpcGroup("full", {0}), makeRpcGroup("linear", {1}, 8, 8, CacheGroupType::LINEAR)},
                       /*use_mla=*/false,
                       /*enable_hybrid_attention=*/true);
-    EXPECT_FALSE(DecodeRpcServer::remoteWholeBlock(hybrid));
+    EXPECT_TRUE(hybrid.requiresKVKeyPrefix());
+    EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(hybrid, /*page_level_routing=*/false));
 
     const auto mla = makeRpcConfig({makeRpcGroup("full", {0})}, /*use_mla=*/true);
-    EXPECT_TRUE(DecodeRpcServer::remoteWholeBlock(mla));
+    EXPECT_TRUE(mla.requiresKVKeyPrefix());
+    EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(mla, /*page_level_routing=*/false));
 
     const auto opaque = makeRpcConfig({makeOpaqueRpcGroup("opaque")});
-    EXPECT_TRUE(DecodeRpcServer::remoteWholeBlock(opaque));
+    EXPECT_TRUE(opaque.requiresKVKeyPrefix());
+    EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(opaque, /*page_level_routing=*/false));
+
+    const auto single_full = makeRpcConfig({makeRpcGroup("full", {0})});
+    EXPECT_FALSE(single_full.requiresKVKeyPrefix());
+    EXPECT_FALSE(DecodeRpcServer::requiresWholeBlockTransfer(single_full, /*page_level_routing=*/false));
+    EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(single_full, /*page_level_routing=*/true));
+}
+
+TEST(DecodeRpcServerTest, MultiGroupWithoutHybridStillRequiresKeyPrefix) {
+    const auto grouped =
+        makeRpcConfig({makeRpcGroup("full", {0}), makeRpcGroup("linear", {1}, 8, 8, CacheGroupType::LINEAR)},
+                      /*use_mla=*/false,
+                      /*enable_hybrid_attention=*/false);
+    ASSERT_GT(grouped.groupNums(), 1);
+    EXPECT_FALSE(grouped.enable_hybrid_attention);
+    EXPECT_FALSE(grouped.use_mla);
+    EXPECT_TRUE(grouped.requiresKVKeyPrefix());
+    EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(grouped, /*page_level_routing=*/false));
+}
+
+TEST(DecodeRpcServerTest, InactiveOpaqueGroupRequiresPrefixAndWholeBlock) {
+    auto full   = makeRpcGroup("full", {0});
+    auto opaque = makeOpaqueRpcGroup("opaque");
+    auto spec   = std::make_shared<OpaqueKVCacheSpec>(8, 8);
+    spec->tag   = "opaque";
+    opaque.spec = std::move(spec);
+    opaque.layer_ids.clear();
+
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+    config.layer_num          = 1;
+    config.setTopology({std::move(full), std::move(opaque)}, {{0, {"full"}}});
+
+    EXPECT_TRUE(config.usesOpaqueKVCacheStore());
+    EXPECT_FALSE(config.usesActiveOpaqueKVCacheStore());
+    EXPECT_TRUE(config.requiresKVKeyPrefix());
+    EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(config, /*page_level_routing=*/false));
 }
 
 TEST(DecodeRpcServerTest, LoadPredicatesAreUnrestrictedWithoutPageLevelRouting) {
@@ -666,9 +707,12 @@ TEST(DecodeRpcServerTest, MtpTransferRejectsHybridAttentionMismatch) {
     auto sub_config  = makeRpcConfig({makeRpcGroup("full", {0})});
     main_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(std::move(sub_config)));
 
-    // The remote-request predicate agrees on this pair, but the buffer layout predicate does not.
-    ASSERT_EQ(DecodeRpcServer::remoteWholeBlock(main_config),
-              DecodeRpcServer::remoteWholeBlock(*main_config.mtp_sub_configs[0]));
+    // Both sides agree on MLA and on the active opaque store, so only the unified prefix predicate
+    // distinguishes this pair.
+    ASSERT_EQ(main_config.use_mla, main_config.mtp_sub_configs[0]->use_mla);
+    ASSERT_EQ(main_config.usesActiveOpaqueKVCacheStore(),
+              main_config.mtp_sub_configs[0]->usesActiveOpaqueKVCacheStore());
+    ASSERT_NE(main_config.requiresKVKeyPrefix(), main_config.mtp_sub_configs[0]->requiresKVKeyPrefix());
 
     const auto error = DecodeRpcServer::validateMTPTransfer(main_config, {0}, /*page_level_routing=*/false);
     EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);

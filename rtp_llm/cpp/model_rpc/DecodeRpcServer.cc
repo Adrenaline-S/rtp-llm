@@ -60,12 +60,8 @@ ErrorInfo DecodeRpcServer::validatePrefillCpPeerCount(int32_t prefill_cp_size, s
     return ErrorInfo::OkStatus();
 }
 
-bool DecodeRpcServer::remoteWholeBlock(const CacheConfig& cache_config) {
-    return cache_config.use_mla || cache_config.use_opaque_kv_cache_store;
-}
-
 bool DecodeRpcServer::requiresWholeBlockTransfer(const CacheConfig& cache_config, bool page_level_routing) {
-    return remoteWholeBlock(cache_config) || cache_config.enable_hybrid_attention || page_level_routing;
+    return cache_config.requiresKVKeyPrefix() || page_level_routing;
 }
 
 bool DecodeRpcServer::groupUsesCpSlice(const CacheConfig& cache_config, std::string_view tag, int32_t prefill_cp_size) {
@@ -169,14 +165,15 @@ ErrorInfo DecodeRpcServer::validateMTPTransfer(const CacheConfig&         main_c
         if (main_whole_block == requiresWholeBlockTransfer(sub_config, page_level_routing)) {
             continue;
         }
-        return ErrorInfo(
-            ErrorCode::LOAD_KV_CACHE_FAILED,
-            "MTP remote transfer protocol mismatch: module=" + std::to_string(module_index) + ", page_level_routing="
-                + std::to_string(page_level_routing) + ", main{mla=" + std::to_string(main_config.use_mla)
-                + ",opaque=" + std::to_string(main_config.use_opaque_kv_cache_store)
-                + ",hybrid=" + std::to_string(main_config.enable_hybrid_attention) + "}, sub{mla="
-                + std::to_string(sub_config.use_mla) + ",opaque=" + std::to_string(sub_config.use_opaque_kv_cache_store)
-                + ",hybrid=" + std::to_string(sub_config.enable_hybrid_attention) + "}");
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                         "MTP remote transfer protocol mismatch: module=" + std::to_string(module_index)
+                             + ", page_level_routing=" + std::to_string(page_level_routing)
+                             + ", main{mla=" + std::to_string(main_config.use_mla)
+                             + ",opaque=" + std::to_string(main_config.usesActiveOpaqueKVCacheStore())
+                             + ",hybrid=" + std::to_string(main_config.enable_hybrid_attention)
+                             + "}, sub{mla=" + std::to_string(sub_config.use_mla)
+                             + ",opaque=" + std::to_string(sub_config.usesActiveOpaqueKVCacheStore())
+                             + ",hybrid=" + std::to_string(sub_config.enable_hybrid_attention) + "}");
     }
     return ErrorInfo::OkStatus();
 }
@@ -675,7 +672,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "worker size or cq size is 0");
     }
     auto       worker_size_per_queue          = worker_size / completion_queues.size();
-    const bool use_whole_block_remote_request = remoteWholeBlock(load_cache_config);
+    const bool use_whole_block_remote_request = requiresWholeBlockTransfer(load_cache_config, is_page_level_rr);
     RTP_LLM_LOG_DEBUG("request:[%s] start to async remote load for all rank", decode_context.request_key.c_str());
     for (int i = 0; i < worker_size; i++) {
         auto& worker         = resource_.grpc_workers[i];
@@ -882,12 +879,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool use_mla              = cache_config.use_mla;
-    const bool use_tagged_cache     = cache_config.groupNums() > 1;
-    const bool use_opaque_kv_store  = cache_config.use_opaque_kv_cache_store;
-    const bool use_hybrid_attention = cache_config.enable_hybrid_attention;
-    const bool is_page_level_rr     = isPageLevelRouting(load_context.prefill_cp_size, load_context.peer_addrs.size());
-    const bool use_whole_kv_block   = requiresWholeBlockTransfer(cache_config, is_page_level_rr);
+    const bool use_tagged_cache   = cache_config.groupNums() > 1;
+    const bool is_page_level_rr   = isPageLevelRouting(load_context.prefill_cp_size, load_context.peer_addrs.size());
+    const bool use_whole_kv_block = requiresWholeBlockTransfer(cache_config, is_page_level_rr);
     if (!use_whole_kv_block && peer_cnt > 1) {
         for (const auto& group : cache_config.topology().groups()) {
             const size_t k_total_bytes = group.spec->k_block_size_bytes();
@@ -1069,7 +1063,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     auto cache_key =
                         makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
 
-                    const bool             use_kv_key_prefix = use_mla || use_opaque_kv_store || use_hybrid_attention;
+                    const bool             use_kv_key_prefix = cache_config.requiresKVKeyPrefix();
                     std::vector<BlockInfo> parts;
                     if (use_whole_kv_block) {
                         parts = cache_manager->convertIndexToBuffer(block_id, layer_id, tag);
@@ -1131,11 +1125,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
                 const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
 
-                const bool mtp_use_tagged_cache     = mtp_cache_cfg.groupNums() > 1;
-                const bool mtp_use_opaque_kv_store  = mtp_cache_cfg.use_opaque_kv_cache_store;
-                const bool mtp_use_hybrid_attention = mtp_cache_cfg.enable_hybrid_attention;
-                const bool mtp_use_mla              = mtp_cache_cfg.use_mla;
-                const bool mtp_use_kv_key_prefix  = mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid_attention;
+                const bool mtp_use_tagged_cache   = mtp_cache_cfg.groupNums() > 1;
+                const bool mtp_use_kv_key_prefix  = mtp_cache_cfg.requiresKVKeyPrefix();
                 const bool mtp_use_whole_kv_block = requiresWholeBlockTransfer(mtp_cache_cfg, is_page_level_rr);
 
                 for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {

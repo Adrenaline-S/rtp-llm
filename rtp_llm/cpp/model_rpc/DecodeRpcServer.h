@@ -90,7 +90,6 @@ private:
                                                             std::string_view     tag);
     static bool                      isPageLevelRouting(int32_t prefill_cp_size, size_t peer_addr_count);
     static ErrorInfo                 validatePrefillCpPeerCount(int32_t prefill_cp_size, size_t peer_addr_count);
-    static bool                      remoteWholeBlock(const CacheConfig& cache_config);
     static bool requiresWholeBlockTransfer(const CacheConfig& cache_config, bool page_level_routing);
     static bool groupUsesCpSlice(const CacheConfig& cache_config, std::string_view tag, int32_t prefill_cp_size);
     static bool shouldLoadGroupFromPeer(const CacheConfig& cache_config,
