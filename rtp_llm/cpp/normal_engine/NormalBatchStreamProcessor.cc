@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 
 namespace rtp_llm {
 

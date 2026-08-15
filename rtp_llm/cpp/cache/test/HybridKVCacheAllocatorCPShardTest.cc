@@ -1,7 +1,7 @@
-// CP-shard (Stage 5, Plan A) UTs for HybridKVCacheAllocator.
+// CP-shard (Stage 5, Plan A) UTs for HybridPoolKVCacheAllocator.
 //
 // These exercise the cp_slot_mapper plumbing in initMallocForCommonLen,
-// incrMalloc, insertIntoCache, and getNeedBlocks. The shape of the tests
+// incrMalloc and insertIntoCache. The shape of the tests
 // piggybacks on the helpers in HybridPoolKVCacheAllocatorTest.cc but
 // keeps the configuration self-contained so the two files build cleanly
 // alongside each other.
@@ -249,6 +249,24 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(batch_res->blocksNum(0, "full"), 2);  // ceil(8/4)=2
+}
+
+// 7) Token capacity stays in the finalized global coordinate system under CP.
+TEST_F(HybridKVCacheAllocatorCPShardTest, TokenCapacityUsesGlobalBlockSizeWhenSharded) {
+    auto config    = makeCPHybridConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    ASSERT_TRUE(allocator->init());
+
+    const auto&  pools          = allocator->groupBlockPools();
+    const size_t full_available = pools.at("full")->availableBlocksNum();
+
+    EXPECT_EQ(allocator->totalTokensNum(), 31u * 4u);
+    EXPECT_EQ(allocator->availableTokensNum(), full_available * 4u);
+
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
+    EXPECT_EQ(allocator->totalTokensNum(), 31u * 4u);
+    EXPECT_EQ(allocator->availableTokensNum(), full_available * 4u);
 }
 
 }  // namespace test

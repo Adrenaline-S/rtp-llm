@@ -156,9 +156,6 @@ public:
                               int                            reserve_step) const override {
         return 0;
     }
-    int getNeedBlocks(const MallocInfo& malloc_info) const override {
-        return 0;
-    }
     int estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                int                    seq_len,
                                int                    remaining_tokens,
