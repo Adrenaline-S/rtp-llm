@@ -54,15 +54,15 @@ public:
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false)                   = 0;
 
-    virtual GroupedCacheLayerLayout allLayerCacheBase() const                                           = 0;
-    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                                                  const std::vector<int>&         block_src_batch,
-                                                  bool                            copy_last_block,
-                                                  std::vector<TaggedBlockIdPair>& block_update_mapping) = 0;
-    virtual int                     seqSizePerBlock() const                                             = 0;
+    virtual GroupedCacheLayerLayout allLayerCacheBase() const                                          = 0;
+    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                  const std::vector<int>&        block_src_batch,
+                                                  bool                           copy_last_block,
+                                                  std::vector<GroupBlockIdPair>& block_update_mapping) = 0;
+    virtual int                     seqSizePerBlock() const                                            = 0;
     virtual int                     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                           int                            seq_len,
-                                                          int                            reserve_step) const                       = 0;
+                                                          int                            reserve_step) const                      = 0;
     // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
     int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                     int                            seq_len,
@@ -73,7 +73,7 @@ public:
                                     int                            target_batch_size) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
-    virtual void blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    virtual void blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping);
 
     virtual BlockPoolPtr getBlockPool(std::string_view tag) const = 0;
 

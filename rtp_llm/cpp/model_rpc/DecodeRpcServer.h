@@ -28,7 +28,7 @@ public:
                            const std::string&               request_key,
                            const std::vector<std::string>&  peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
-                           GroupBlockIds                    block_ids_by_group,
+                           GroupBlockIds                    group_block_ids,
                            int64_t                          reuse_block_size,
                            int64_t                          timeout_ms,
                            int                              partition_count,
@@ -39,7 +39,7 @@ public:
             request_key(request_key),
             peer_addrs(peer_addrs),
             cache_keys(cache_keys),
-            block_ids_by_group(std::move(block_ids_by_group)),
+            group_block_ids(std::move(group_block_ids)),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
             partition_count(partition_count),
@@ -50,7 +50,7 @@ public:
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
-        GroupBlockIds                    block_ids_by_group;
+        GroupBlockIds                    group_block_ids;
         int64_t                          reuse_block_size;
         int64_t                          timeout_ms;
         int                              partition_count;
@@ -83,7 +83,7 @@ private:
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
     static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
-    static std::shared_ptr<BlockIds> mtpBlockIdsByTagForTag(const GroupBlockIds& main_block_ids_by_group,
+    static std::shared_ptr<BlockIds> mtpGroupBlockIdsForTag(const GroupBlockIds& main_group_block_ids,
                                                             std::string_view     tag);
     static bool                      isPageLevelRouting(int32_t prefill_cp_size, size_t peer_addr_count);
     static ErrorInfo                 validatePrefillCpPeerCount(int32_t prefill_cp_size, size_t peer_addr_count);

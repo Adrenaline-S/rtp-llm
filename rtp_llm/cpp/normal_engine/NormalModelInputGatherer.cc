@@ -28,25 +28,25 @@ bool deviceInputEnabled() {
 }
 
 struct GatherModelInputContext {
-    int                             input_vocab_size;
-    bool                            need_cal_position_id;
-    size_t                          max_blocks_num;
-    int*                            merged_tokens;
-    int*                            input_lengths;
-    int*                            combo_position_ids;
-    std::vector<TaggedBlockIdPair>* kv_cache_update_mapping;
-    int                             batch_idx;
-    int*                            sequence_lengths;
-    bool                            has_multimodal_input;
-    bool                            has_mm_extra_input;
-    size_t                          total_decode_batch_size;
-    int*                            prefix_lengths;
-    int*                            prefix_lengths_host;
-    int*                            merged_text_mask;
-    int*                            mm_features_locs;
-    int                             token_idx;
-    int                             cum_output_seq_len;
-    int                             mm_feature_index;
+    int                            input_vocab_size;
+    bool                           need_cal_position_id;
+    size_t                         max_blocks_num;
+    int*                           merged_tokens;
+    int*                           input_lengths;
+    int*                           combo_position_ids;
+    std::vector<GroupBlockIdPair>* kv_cache_update_mapping;
+    int                            batch_idx;
+    int*                           sequence_lengths;
+    bool                           has_multimodal_input;
+    bool                           has_mm_extra_input;
+    size_t                         total_decode_batch_size;
+    int*                           prefix_lengths;
+    int*                           prefix_lengths_host;
+    int*                           merged_text_mask;
+    int*                           mm_features_locs;
+    int                            token_idx;
+    int                            cum_output_seq_len;
+    int                            mm_feature_index;
 };
 
 enum class GatherContextMode {
@@ -58,7 +58,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
                                             GptModelInputs&                       model_input,
                                             const StreamGroups&                   stream_groups,
                                             GatherContextMode                     mode,
-                                            std::vector<TaggedBlockIdPair>&       cache_update_mapping) {
+                                            std::vector<GroupBlockIdPair>&        cache_update_mapping) {
     GatherModelInputContext ctx{};
     ctx.input_vocab_size =
         config.input_vocab_size ? static_cast<int>(config.input_vocab_size) : static_cast<int>(config.vocab_size);
@@ -207,7 +207,7 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
 }
 
-void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<TaggedBlockIdPair>& update_mapping) {
+void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<GroupBlockIdPair>& update_mapping) {
     if (!ctx.kv_cache_update_mapping) {
         return;
     }
@@ -422,10 +422,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     return model_input;
 }
 
-absl::Status
-NormalModelInputGatherer::processDecodeStreams(GptModelInputs&                 model_input,
-                                               const StreamGroups&             stream_groups,
-                                               std::vector<TaggedBlockIdPair>& cache_update_mapping) const {
+absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&                model_input,
+                                                            const StreamGroups&            stream_groups,
+                                                            std::vector<GroupBlockIdPair>& cache_update_mapping) const {
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx =
         createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE, cache_update_mapping);
@@ -511,10 +510,10 @@ NormalModelInputGatherer::processDecodeStreams(GptModelInputs&                 m
 }
 
 absl::Status
-NormalModelInputGatherer::processContextStreams(GptModelInputs&                 model_input,
-                                                const StreamGroups&             stream_groups,
-                                                TensorHolder&                   host_holder,
-                                                std::vector<TaggedBlockIdPair>& cache_update_mapping) const {
+NormalModelInputGatherer::processContextStreams(GptModelInputs&                model_input,
+                                                const StreamGroups&            stream_groups,
+                                                TensorHolder&                  host_holder,
+                                                std::vector<GroupBlockIdPair>& cache_update_mapping) const {
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
@@ -699,8 +698,8 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
                       stream_groups.decodeStreams().size());
-    auto                           model_input = allocateModelInputBuffers(stream_groups);
-    std::vector<TaggedBlockIdPair> cache_update_mapping;
+    auto                          model_input = allocateModelInputBuffers(stream_groups);
+    std::vector<GroupBlockIdPair> cache_update_mapping;
     cache_update_mapping.reserve(stream_groups.totalBlockUpdateCopyNum());
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups, cache_update_mapping));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder, cache_update_mapping));

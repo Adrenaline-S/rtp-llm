@@ -12,7 +12,7 @@ constexpr std::string_view kFullTag        = "group_0";
 constexpr std::string_view kLinearTag      = "group_1";
 constexpr std::string_view kIndependentTag = "group_3";
 
-using TaggedBlockId = std::pair<std::string, BlockIdxType>;
+using GroupBlockId = std::pair<std::string, BlockIdxType>;
 
 class TestSharedBlockCache: public SharedBlockCache {
 public:
@@ -47,7 +47,7 @@ private:
     BlockPoolPtr pool_;
 };
 
-TaggedBlockId groupBlock(std::string_view tag, BlockIdxType block_id) {
+GroupBlockId groupBlock(std::string_view tag, BlockIdxType block_id) {
     return {std::string(tag), block_id};
 }
 
@@ -428,8 +428,8 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2}));
     ASSERT_EQ(evictedBlockForTag(evicted, 2, kIndependentTag), 302);
-    ASSERT_TRUE(evicted.evicted_independent_group.count(2));
-    EXPECT_EQ(evicted.evicted_independent_group.at(2), kIndependentTag);
+    ASSERT_TRUE(evicted.evicted_independent_tag.count(2));
+    EXPECT_EQ(evicted.evicted_independent_tag.at(2), kIndependentTag);
     EXPECT_EQ(cache.matchGroup(2, kFullTag), 102);
     EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(2, kIndependentTag)));
     EXPECT_EQ(cache.matchGroup(3, kIndependentTag), 303);
@@ -493,7 +493,7 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionFallsBackToWholeChainWhenOnly
     auto evicted = cache.selectAndEvictForGroup(kIndependentTag, /*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1, 2}));
-    ASSERT_FALSE(evicted.evicted_independent_group.count(2));
+    ASSERT_FALSE(evicted.evicted_independent_tag.count(2));
     EXPECT_TRUE(cache.empty());
 }
 

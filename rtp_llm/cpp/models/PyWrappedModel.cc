@@ -346,7 +346,7 @@ static void calculatePaddingOffsetDeviceAware(torch_ext::PyAttentionInputs& py_a
 }
 
 // Helper function to setup KV cache for attention inputs
-torch_ext::AttentionInputsByTag
+torch_ext::GroupAttentionInputs
 PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                const GptModelInputs&         inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.setupKVCacheForAttentionInputs");
@@ -364,7 +364,7 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                             kv_cache_group_tags_.size(),
                             inputs.kv_cache_kernel_block_ids_by_group.size());
 
-    torch_ext::AttentionInputsByTag by_group;
+    torch_ext::GroupAttentionInputs by_group;
     for (size_t i = 0; i < kv_cache_group_tags_.size(); ++i) {
         const auto& tag            = kv_cache_group_tags_[i];
         const auto& physical_table = inputs.kv_cache_block_ids_by_group[i];
@@ -652,7 +652,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     }
     calculatePaddingOffsetDeviceAware(attention_inputs);
     attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
-    attention_inputs_by_tag_        = setupKVCacheForAttentionInputs(attention_inputs, inputs);
+    group_attention_inputs_         = setupKVCacheForAttentionInputs(attention_inputs, inputs);
     attention_inputs_               = std::move(attention_inputs);
     prepared_attention_inputs_.store(true, std::memory_order_release);
 
@@ -668,7 +668,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                           torch_ext::PyEmbeddingInputs(),
                                           torch_ext::PyMultimodalInputs(),
                                           attention_inputs_,
-                                          attention_inputs_by_tag_,
+                                          group_attention_inputs_,
                                           torch_ext::BertEmbeddingInputs()});
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
@@ -683,7 +683,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     }
 
     d2d_copies_.clear();
-    attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs_, inputs);
+    group_attention_inputs_ = setupKVCacheForAttentionInputs(attention_inputs_, inputs);
     fusedCopy(d2d_copies_);
 
     if (enable_cuda_graph_) {
@@ -694,7 +694,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
                                               torch_ext::PyEmbeddingInputs(),
                                               torch_ext::PyMultimodalInputs(),
                                               attention_inputs_,
-                                              attention_inputs_by_tag_,
+                                              group_attention_inputs_,
                                               torch_ext::BertEmbeddingInputs()});
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
@@ -754,7 +754,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         if (device_props_.enable_prefill_cp) {
             attention_inputs_.context_parallel_info = cp_params;
-            for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
+            for (auto& [tag, tagged_inputs] : group_attention_inputs_) {
                 tagged_inputs.context_parallel_info = cp_params;
             }
         }
@@ -772,7 +772,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                                    embedding_inputs,
                                                                    multimodal_inputs,
                                                                    attention_inputs_,
-                                                                   attention_inputs_by_tag_,
+                                                                   group_attention_inputs_,
                                                                    bert_embedding_inputs});
         PyModelOutputs            py_model_outputs;
         torch::Tensor             hidden_states;

@@ -163,7 +163,7 @@ private:
     void rebuildLinearBlockDependencies();
 
     std::shared_ptr<const CacheTopology> topology_;
-    GroupBlockIds                        group_block_ids;
+    GroupBlockIds                        group_block_ids_;
     // One request-level timeline, derived from the request's global block geometry. Group tags only select physical
     // block vectors and must not own authoritative keys or dependencies.
     CacheKeysType         cache_keys;

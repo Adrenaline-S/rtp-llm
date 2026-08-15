@@ -8,11 +8,11 @@ namespace rtp_llm {
 
 class FullKVCacheGroup: public KVCacheGroup {
 public:
-    FullKVCacheGroup(GroupBase                           cache_group,
+    FullKVCacheGroup(GroupBase                           group_base,
                      BlockPoolPtr                        block_pool,
                      SharedBlockCache*                   shared_cache     = nullptr,
                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), shared_cache, metrics_reporter) {}
+        KVCacheGroup(std::move(group_base), std::move(block_pool), shared_cache, metrics_reporter) {}
 
     bool        malloc(BlockIds&            block_indices,
                        int                  seq_len,

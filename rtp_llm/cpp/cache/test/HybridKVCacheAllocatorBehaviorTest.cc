@@ -541,7 +541,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TopologyRejectsMissingLayerTagMapping) {
     EXPECT_THROW(config.setTopology(std::move(groups), std::move(layers)), std::runtime_error);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, CreateHybridConfigUsesTaggedContiguousLinearGroupsAndFullFirst) {
+TEST_F(HybridPoolKVCacheAllocatorTest, CreateHybridConfigUsesGroupedContiguousLinearGroupsAndFullFirst) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/8);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -993,7 +993,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, UpdateKVBlockForksSharedBlocksAcrossGroup
     batch_res->mutableBlockIds(1, kLinearTag).assign({linear_blocks[2]});
     batch_res->mutableBlockIds(1, kFullTag).assign({full_blocks[2]});
 
-    std::vector<TaggedBlockIdPair> update_mapping;
+    std::vector<GroupBlockIdPair> update_mapping;
     ASSERT_TRUE(allocator->updateKVBlock(batch_res,
                                          /*block_src_batch=*/std::vector<int>{0, 0},
                                          /*copy_last_block=*/false,
@@ -1034,7 +1034,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
     batch_res->mutableBlockIds(1, kLinearTag).assign({linear_blocks[2]});
     batch_res->mutableBlockIds(1, kFullTag).assign({full_blocks[2]});
 
-    std::vector<TaggedBlockIdPair> update_mapping{{"stale", 1, 2}};
+    std::vector<GroupBlockIdPair> update_mapping{{"stale", 1, 2}};
     ASSERT_TRUE(allocator->updateKVBlock(batch_res,
                                          /*block_src_batch=*/std::vector<int>{0, 0},
                                          /*copy_last_block=*/true,
@@ -1101,7 +1101,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesReso
     const auto linear_refs_before   = linear_pool->requestRefBlocksNum();
     const auto full_refs_before     = full_pool->requestRefBlocksNum();
 
-    std::vector<TaggedBlockIdPair> update_mapping{{"stale", 1, 2}};
+    std::vector<GroupBlockIdPair> update_mapping{{"stale", 1, 2}};
     EXPECT_FALSE(allocator->updateKVBlock(batch_res,
                                           /*block_src_batch=*/std::vector<int>{0, 0},
                                           /*copy_last_block=*/true,
@@ -1143,7 +1143,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, UpdateKVBlockReusesDroppedBatchCapacityTr
     batch_res->mutableBlockIds(1, kLinearTag).assign({linear_blocks[1]});
     batch_res->mutableBlockIds(1, kFullTag).assign({full_blocks[1]});
 
-    std::vector<TaggedBlockIdPair> update_mapping;
+    std::vector<GroupBlockIdPair> update_mapping;
     ASSERT_TRUE(allocator->updateKVBlock(batch_res,
                                          /*block_src_batch=*/std::vector<int>{1, 1},
                                          /*copy_last_block=*/true,

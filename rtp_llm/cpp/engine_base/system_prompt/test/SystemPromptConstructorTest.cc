@@ -40,14 +40,14 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
 
     const auto& item1 = result["1"];
     ASSERT_EQ(item1.prompt_tokens.size(), 3);
-    ASSERT_EQ(item1.blocks_by_tag.size(), 1u);
-    ASSERT_FALSE(item1.blocks_by_tag.at("full").empty());
+    ASSERT_EQ(item1.group_block_ids.size(), 1u);
+    ASSERT_FALSE(item1.group_block_ids.at("full").empty());
     ASSERT_EQ(item1.prompt_tokens, prompt_1);
 
     const auto& item2 = result["2"];
     ASSERT_EQ(item2.prompt_tokens.size(), 4);
-    ASSERT_EQ(item2.blocks_by_tag.size(), 1u);
-    ASSERT_FALSE(item2.blocks_by_tag.at("full").empty());
+    ASSERT_EQ(item2.group_block_ids.size(), 1u);
+    ASSERT_FALSE(item2.group_block_ids.at("full").empty());
     ASSERT_EQ(item2.prompt_tokens, prompt_2);
 }
 

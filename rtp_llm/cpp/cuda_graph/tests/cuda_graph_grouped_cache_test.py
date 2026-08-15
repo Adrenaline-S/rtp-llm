@@ -16,7 +16,7 @@ HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
 
 
-class TaggedBlockTableModel:
+class GroupedBlockTableModel:
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -35,7 +35,7 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedBlockTableSumModel:
+class GroupedBlockTableSumModel:
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         return None
 
@@ -48,8 +48,8 @@ class TaggedBlockTableSumModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedSequenceLengthModel:
-    """Expose the cumulative lengths used by a tagged captured graph."""
+class GroupedSequenceLengthModel:
+    """Expose the cumulative lengths used by a grouped captured graph."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         return None
@@ -85,7 +85,7 @@ def _tag_attention_inputs(
     batch_size: int,
     block_counts: dict[str, int],
 ) -> dict[str, PyAttentionInputs]:
-    tagged = {}
+    grouped = {}
     for tag in tags:
         tag_inputs = copy.copy(common)
         host_blocks = torch.full(
@@ -96,8 +96,8 @@ def _tag_attention_inputs(
         tag_inputs.kv_cache_kernel_block_id_device = device_blocks
         tag_inputs.kv_cache_block_id = host_blocks
         tag_inputs.kv_cache_block_id_device = device_blocks
-        tagged[tag] = tag_inputs
-    return tagged
+        grouped[tag] = tag_inputs
+    return grouped
 
 
 def _build_common_inputs(
@@ -130,7 +130,8 @@ def _build_common_inputs(
     attention_inputs.kv_cache_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id_device
     )
-    # Preserve common metadata used for graph selection and replay preparation.
+    # Preserve the common attention metadata used by CUDA graph selection and
+    # replay preparation before exposing the tag-local cache tables to Python.
     inputs.attention_inputs = attention_inputs
     if tags:
         inputs.attention_inputs = _tag_attention_inputs(
@@ -274,7 +275,7 @@ def _build_target_verify_inputs(
     )
 
 
-class TestCudaGraphTaggedCache(unittest.TestCase):
+class TestCudaGraphGroupedCache(unittest.TestCase):
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:
@@ -287,7 +288,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_decode_tag_validation_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            model := TaggedBlockTableModel(),
+            model := GroupedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -321,10 +322,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             )
         )
 
-    def test_prefill_tagged_capture_and_replay_updates(self) -> None:
+    def test_prefill_grouped_capture_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
         runner.init_prefill(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             2,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -348,7 +349,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_kernel_block_table_validation_falls_back(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             HIDDEN_SIZE,
             2 * TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -403,7 +404,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_defined_zero_width_kernel_tables_are_valid(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableSumModel(),
+            GroupedBlockTableSumModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -421,7 +422,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_groups_have_independent_capture_capacity(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableSumModel(),
+            GroupedBlockTableSumModel(),
             HIDDEN_SIZE,
             2 * TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -447,7 +448,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_wide_then_narrow_replay_clears_stale_kernel_ids(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableSumModel(),
+            GroupedBlockTableSumModel(),
             HIDDEN_SIZE,
             4 * TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -478,7 +479,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_focused_refresh_updates_only_kernel_device_tables(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableSumModel(),
+            GroupedBlockTableSumModel(),
             HIDDEN_SIZE,
             2 * TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -494,7 +495,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         refreshed = _build_decode_inputs(GROUP_TAGS, {"full": 4, "aux": 6})
         self.assertTrue(runner.canRun(refreshed))
         with torch.inference_mode():
-            runner.refreshTaggedBlockTables(refreshed)
+            runner.refreshGroupedBlockTables(refreshed)
         output = runner.forward(refreshed)
         torch.cuda.synchronize()
         torch.testing.assert_close(
@@ -509,7 +510,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         self.assertTrue(runner.canRun(empty))
         with torch.inference_mode():
             runner.prepareAttentionInputs(stale)
-            runner.refreshTaggedBlockTables(empty)
+            runner.refreshGroupedBlockTables(empty)
         output = runner.forward(empty)
         torch.cuda.synchronize()
         torch.testing.assert_close(
@@ -536,7 +537,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_prefill_batch_over_capture_capacity_falls_back(self) -> None:
         runner = CudaGraphRunner()
         runner.init_prefill(
-            TaggedBlockTableSumModel(),
+            GroupedBlockTableSumModel(),
             2,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -560,7 +561,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             RuntimeError, "kernel block-table capacity must be positive"
         ):
             runner.init_decode(
-                TaggedBlockTableModel(),
+                GroupedBlockTableModel(),
                 HIDDEN_SIZE,
                 TOKENS_PER_BLOCK,
                 TOKENS_PER_BLOCK,
@@ -573,7 +574,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_target_verify_validates_exact_tag_set(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -619,7 +620,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_target_verify_capacity_includes_speculative_steps(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -636,10 +637,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             query_len=1,
             prefix_len=1,
         )
-        for tagged_inputs in exact.attention_inputs.values():
+        for grouped_inputs in exact.attention_inputs.values():
             host = torch.ones((2, 3), dtype=torch.int32).pin_memory()
-            tagged_inputs.kv_cache_kernel_block_id = host
-            tagged_inputs.kv_cache_kernel_block_id_device = host.cuda()
+            grouped_inputs.kv_cache_kernel_block_id = host
+            grouped_inputs.kv_cache_kernel_block_id_device = host.cuda()
         self.assertTrue(runner.canRun(exact))
 
         over = _build_target_verify_inputs(
@@ -649,10 +650,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             query_len=1,
             prefix_len=1,
         )
-        for tagged_inputs in over.attention_inputs.values():
+        for grouped_inputs in over.attention_inputs.values():
             host = torch.ones((2, 4), dtype=torch.int32).pin_memory()
-            tagged_inputs.kv_cache_kernel_block_id = host
-            tagged_inputs.kv_cache_kernel_block_id_device = host.cuda()
+            grouped_inputs.kv_cache_kernel_block_id = host
+            grouped_inputs.kv_cache_kernel_block_id_device = host.cuda()
         self.assertFalse(runner.canRun(over))
 
     def test_target_verify_clears_rounded_batch_sequence_lengths(self) -> None:
@@ -660,7 +661,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         prefix_len = 11
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedSequenceLengthModel(),
+            GroupedSequenceLengthModel(),
             HIDDEN_SIZE,
             64,
             TOKENS_PER_BLOCK,

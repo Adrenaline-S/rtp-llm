@@ -25,11 +25,11 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(GroupBase                           cache_group,
+    KVCacheGroup(GroupBase                           group_base,
                  BlockPoolPtr                        block_pool,
                  SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        cache_group_(std::move(cache_group)),
+        group_base_(std::move(group_base)),
         block_pool_(std::move(block_pool)),
         shared_cache_(shared_cache),
         metrics_reporter_(metrics_reporter) {}
@@ -93,7 +93,7 @@ public:
     virtual bool isReservable() const;
 
 protected:
-    GroupBase                    cache_group_;
+    GroupBase                    group_base_;
     BlockPoolPtr                 block_pool_;
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;

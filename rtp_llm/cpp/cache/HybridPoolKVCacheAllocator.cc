@@ -231,7 +231,7 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
         config_.layer_num, static_cast<int>(model_id - 1), sub->layer_num, local_layer_id);
 }
 
-void KVCacheAllocator::blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+void KVCacheAllocator::blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping) {
     if (copy_mapping.empty()) {
         return;
     }
@@ -320,7 +320,7 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
             collector.lifetime_ms = lifetime_ms;
             kmonitor::MetricsTags tags("scope", "gpu");
             tags.AddTag("evict_policy",
-                        evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
+                        evict_result.evicted_independent_tag.count(cache_key) ? "independent" : "chain");
             tags.AddTag("backing", "device");
             metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
                                                                                                        &collector);
@@ -341,8 +341,8 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     evicted_keys.reserve(evict_result.evicted_keys.size());
     evicted_dependencies.reserve(evict_result.evicted_keys.size());
     for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
-        const auto  cache_key     = evict_result.evicted_keys[evicted_idx];
-        const auto& blocks_by_tag = evict_result.evicted_group_block_ids.at(cache_key);
+        const auto  cache_key       = evict_result.evicted_keys[evicted_idx];
+        const auto& group_block_ids = evict_result.evicted_group_block_ids.at(cache_key);
         evicted_keys.push_back(cache_key);
         auto dep_it = evict_result.evicted_dependencies.find(cache_key);
         if (dep_it != evict_result.evicted_dependencies.end()) {
@@ -356,7 +356,7 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
             }
             evicted_dependencies.push_back(dependency);
         }
-        for (const auto& [tag, block_id] : blocks_by_tag) {
+        for (const auto& [tag, block_id] : group_block_ids) {
             if (!isNullBlockIdx(block_id)) {
                 batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
             }
@@ -551,12 +551,12 @@ bool HybridPoolKVCacheAllocator::doInit() {
     std::vector<PoolPlan> pool_plans;
     pool_plans.reserve(config_.topology().groups().size());
 
-    for (const auto& cache_group : config_.topology().groups()) {
-        auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, cache_group.tag);
-        appendPoolSummary(pool_summary, has_pool, cache_group.tag, cache_group.policy.group_type, pool_config);
+    for (const auto& group_base : config_.topology().groups()) {
+        auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, group_base.tag);
+        appendPoolSummary(pool_summary, has_pool, group_base.tag, group_base.policy.group_type, pool_config);
         pool_total_bytes += pool_config.total_size_bytes;
         pool_total_blocks += pool_config.block_num;
-        pool_plans.push_back(PoolPlan{&cache_group, std::move(pool_config)});
+        pool_plans.push_back(PoolPlan{&group_base, std::move(pool_config)});
     }
 
     if (has_pool) {
@@ -570,41 +570,41 @@ bool HybridPoolKVCacheAllocator::doInit() {
     }
 
     for (const auto& plan : pool_plans) {
-        const auto& cache_group = *plan.group;
+        const auto& group_base  = *plan.group;
         const auto& pool_config = plan.pool_config;
-        const auto  group_type  = cache_group.policy.group_type;
+        const auto  group_type  = group_base.policy.group_type;
 
         auto group_pool = std::make_shared<BlockPool>(pool_config, allocation_type_, use_cuda_malloc_block_pool_);
         try {
             RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "BlockPool::init returned false");
         } catch (const std::exception& e) {
             RTP_LLM_FAIL("Failed to initialize block pool: tag=%s type=%s bytes=%zu blocks=%u layers=%zu error=%s",
-                         cache_group.tag.c_str(),
+                         group_base.tag.c_str(),
                          cacheGroupTypeName(group_type),
                          pool_config.total_size_bytes,
                          pool_config.block_num,
-                         cache_group.layer_ids.size(),
+                         group_base.layer_ids.size(),
                          e.what());
         }
 
         KVCacheGroupPtr group;
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearKVCacheGroup>(
-                cache_group, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
-            linear_group_tags_.push_back(cache_group.tag);
+                group_base, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
+            linear_group_tags_.push_back(group_base.tag);
         } else if (group_type == CacheGroupType::SWA) {
             group = std::make_shared<SWAKVCacheGroup>(
-                cache_group, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
-            swa_group_tags_.push_back(cache_group.tag);
+                group_base, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
+            swa_group_tags_.push_back(group_base.tag);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(cache_group, group_pool, shared_cache_raw, metrics_reporter_);
-            full_group_tags_.push_back(cache_group.tag);
+            group = std::make_shared<FullKVCacheGroup>(group_base, group_pool, shared_cache_raw, metrics_reporter_);
+            full_group_tags_.push_back(group_base.tag);
         }
 
         RTP_LLM_CHECK_WITH_INFO(
             group->init(), "Failed to initialize single-type KV cache manager %s", pool_config.pool_name.c_str());
-        RTP_LLM_CHECK(group_block_pools_.emplace(cache_group.tag, group_pool).second);
-        RTP_LLM_CHECK(kv_cache_groups_.emplace(cache_group.tag, std::move(group)).second);
+        RTP_LLM_CHECK(group_block_pools_.emplace(group_base.tag, group_pool).second);
+        RTP_LLM_CHECK(kv_cache_groups_.emplace(group_base.tag, std::move(group)).second);
     }
 
     if (shared_block_cache_) {
@@ -1073,7 +1073,7 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             const size_t max_keys = full_keys.size();
             for (size_t pos = max_keys; pos > 0; --pos) {
                 const size_t                                      i = pos - 1;
-                std::vector<std::pair<std::string, BlockIdxType>> blocks_by_tag;
+                std::vector<std::pair<std::string, BlockIdxType>> group_block_ids;
                 for (const auto& [tag, block_ids] : kv_cache_resource->groupBlocks(batch_id)) {
                     if (skipReuseCacheGroup(tag)) {
                         continue;
@@ -1083,15 +1083,15 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
                         continue;
                     }
                     if (!isNullBlockIdx(blocks[i])) {
-                        blocks_by_tag.push_back({tag, blocks[i]});
+                        group_block_ids.push_back({tag, blocks[i]});
                     }
                 }
-                if (!blocks_by_tag.empty()) {
+                if (!group_block_ids.empty()) {
                     const auto dependency = i < full_dependencies.size() ?
                                                 full_dependencies[i] :
                                                 BlockDependency{false, 0, static_cast<uint32_t>(i)};
                     shared_block_cache_->put(full_keys[i],
-                                             blocks_by_tag,
+                                             group_block_ids,
                                              insert_info.is_resident,
                                              SharedBlockCache::kGpuLogicalNamespace,
                                              dependency);
@@ -1153,10 +1153,11 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
                 if (isNullBlockIdx(blocks[i])) {
                     continue;
                 }
-                std::vector<std::pair<std::string, BlockIdxType>> blocks_by_tag{{tag, blocks[i]}};
+                std::vector<std::pair<std::string, BlockIdxType>> group_block_ids{{tag, blocks[i]}};
                 const auto                                        dependency =
                     i < dependencies.size() ? dependencies[i] : BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                shared_block_cache_->put(src_keys[i], blocks_by_tag, insert_info.is_resident, namespace_id, dependency);
+                shared_block_cache_->put(
+                    src_keys[i], group_block_ids, insert_info.is_resident, namespace_id, dependency);
             }
         }
     }
@@ -1254,10 +1255,10 @@ void HybridPoolKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
     }
 }
 
-bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                                               const std::vector<int>&         block_src_batch,
-                                               bool                            copy_last_block,
-                                               std::vector<TaggedBlockIdPair>& block_update_mapping) {
+bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                               const std::vector<int>&        block_src_batch,
+                                               bool                           copy_last_block,
+                                               std::vector<GroupBlockIdPair>& block_update_mapping) {
     block_update_mapping.clear();
     if (block_src_batch.empty()) {
         return true;
@@ -1449,10 +1450,10 @@ GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
                             topology->groups().size());
 
     GroupedCacheLayerLayout::GroupLayouts groups;
-    for (const auto& [tag, cache_group] : kv_cache_groups_) {
+    for (const auto& [tag, group_base] : kv_cache_groups_) {
         std::vector<BlockBufferPtrInfo> layers(topology->layers().size());
-        const auto                      layer_tensors = cache_group->allLayerCacheBase();
-        const auto                      scale_tensors = cache_group->allLayerScaleCacheBase();
+        const auto                      layer_tensors = group_base->allLayerCacheBase();
+        const auto                      scale_tensors = group_base->allLayerScaleCacheBase();
         for (const auto& [layer_id, tensor] : layer_tensors) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
                                     "layer_id %d out of group kv layout range %zu",

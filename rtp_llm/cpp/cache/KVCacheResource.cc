@@ -10,10 +10,10 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
     topology_ = std::move(topology);
 
-    group_block_ids.clear();
+    group_block_ids_.clear();
     for (const auto& group : topology_->groups()) {
         RTP_LLM_CHECK_WITH_INFO(
-            group_block_ids.emplace(group.tag, std::make_shared<BlockIds>(storedKernelBlocksPerKvBlock(group))).second,
+            group_block_ids_.emplace(group.tag, std::make_shared<BlockIds>(storedKernelBlocksPerKvBlock(group))).second,
             "KVCacheResource has duplicate tag=%s",
             group.tag.c_str());
     }
@@ -137,7 +137,7 @@ void BlockIds::syncKernelBlocks() {
 }
 
 void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
-    for (auto& [tag, block_ids] : group_block_ids) {
+    for (auto& [tag, block_ids] : group_block_ids_) {
         (void)tag;
         block_ids->resize(reserver_blocks, value);
     }
@@ -164,8 +164,8 @@ const BlockIndicesType& KVCacheResource::kernelBlocksForLayer(int layer_id, std:
 }
 
 BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
-    const auto it = group_block_ids.find(tag);
-    RTP_LLM_CHECK_WITH_INFO(it != group_block_ids.end(), "KVCacheResource missing tag=%s", std::string(tag).c_str());
+    const auto it = group_block_ids_.find(tag);
+    RTP_LLM_CHECK_WITH_INFO(it != group_block_ids_.end(), "KVCacheResource missing tag=%s", std::string(tag).c_str());
     return *it->second;
 }
 
@@ -202,7 +202,7 @@ int KVCacheResource::layerNum() const {
 }
 
 int KVCacheResource::groupNums() const {
-    return static_cast<int>(group_block_ids.size());
+    return static_cast<int>(group_block_ids_.size());
 }
 
 bool KVCacheResource::groupsInitialized() const {
@@ -210,7 +210,7 @@ bool KVCacheResource::groupsInitialized() const {
 }
 
 const GroupBlockIds& KVCacheResource::groupBlocks() const {
-    return group_block_ids;
+    return group_block_ids_;
 }
 
 bool KVCacheResource::maintainsTailBlocksOnly(std::string_view tag) const {
@@ -334,7 +334,7 @@ void KVCacheResource::setLastBlockAligned(bool last_block_aligned) {
 
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
-    for (const auto& [tag, block_ids] : group_block_ids) {
+    for (const auto& [tag, block_ids] : group_block_ids_) {
         debug_string << "group:[" << tag << "], block:[";
         const auto& block_indices = block_ids->blocks();
         for (auto& block : block_indices) {

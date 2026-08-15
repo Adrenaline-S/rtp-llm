@@ -50,13 +50,13 @@ public:
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
-    absl::Status   processDecodeStreams(GptModelInputs&                 model_input,
-                                        const StreamGroups&             stream_groups,
-                                        std::vector<TaggedBlockIdPair>& cache_update_mapping) const;
-    absl::Status   processContextStreams(GptModelInputs&                 model_input,
-                                         const StreamGroups&             stream_groups,
-                                         TensorHolder&                   host_holder,
-                                         std::vector<TaggedBlockIdPair>& cache_update_mapping) const;
+    absl::Status   processDecodeStreams(GptModelInputs&                model_input,
+                                        const StreamGroups&            stream_groups,
+                                        std::vector<GroupBlockIdPair>& cache_update_mapping) const;
+    absl::Status   processContextStreams(GptModelInputs&                model_input,
+                                         const StreamGroups&            stream_groups,
+                                         TensorHolder&                  host_holder,
+                                         std::vector<GroupBlockIdPair>& cache_update_mapping) const;
 
     NormalModelInputGathererConfig config_;
 };

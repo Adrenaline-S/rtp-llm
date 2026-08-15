@@ -12,14 +12,14 @@ namespace {
 DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&               request_key,
                                                     const std::vector<std::string>&  peer_addrs,
                                                     const std::vector<CacheKeyType>& cache_keys,
-                                                    const GroupBlockIds&             blocks_by_tag,
+                                                    const GroupBlockIds&             group_block_ids,
                                                     int32_t                          prefill_cp_size,
                                                     int64_t                          reuse_block_size = 0) {
     return {/*request_id=*/42,
             request_key,
             peer_addrs,
             cache_keys,
-            blocks_by_tag,
+            group_block_ids,
             reuse_block_size,
             /*timeout_ms=*/1000,
             /*partition_count=*/1,
@@ -278,7 +278,7 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(broadcast->FindFieldByName("partition_count")->number(), 10);
     EXPECT_EQ(broadcast->FindFieldByName("partition_id")->number(), 11);
     EXPECT_EQ(broadcast->FindFieldByName("prefill_cp_size")->number(), 13);
-    EXPECT_EQ(broadcast->FindFieldByName("tagged_blocks_by_tag")->number(), 14);
+    EXPECT_EQ(broadcast->FindFieldByName("tagged_group_block_ids")->number(), 14);
 
     const auto* remote = RemoteOperationRequestPB::descriptor();
     ASSERT_NE(remote, nullptr);
@@ -294,12 +294,12 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string               request_key   = "request";
-    const std::vector<std::string>  peer_addrs    = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys    = {101, 102};
-    const GroupBlockIds             blocks_by_tag = makeRpcBlockIds("full", {7, 9});
+    const std::string               request_key     = "request";
+    const std::vector<std::string>  peer_addrs      = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys      = {101, 102};
+    const GroupBlockIds             group_block_ids = makeRpcBlockIds("full", {7, 9});
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, group_block_ids, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
@@ -313,21 +313,21 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     ASSERT_EQ(request.cache_keys_size(), 2);
     EXPECT_EQ(request.cache_keys(0), 101);
     EXPECT_EQ(request.cache_keys(1), 102);
-    ASSERT_EQ(request.tagged_blocks_by_tag_size(), 1);
-    EXPECT_EQ(request.tagged_blocks_by_tag(0).tag(), "full");
-    EXPECT_EQ(request.tagged_blocks_by_tag(0).block_ids_size(), 2);
+    ASSERT_EQ(request.tagged_group_block_ids_size(), 1);
+    EXPECT_EQ(request.tagged_group_block_ids(0).tag(), "full");
+    EXPECT_EQ(request.tagged_group_block_ids(0).block_ids_size(), 2);
 }
 
 TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string               request_key   = "request";
-    const std::vector<std::string>  peer_addrs    = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys    = {101};
-    const GroupBlockIds             blocks_by_tag = makeRpcBlockIds("full", {7});
+    const std::string               request_key     = "request";
+    const std::vector<std::string>  peer_addrs      = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys      = {101};
+    const GroupBlockIds             group_block_ids = makeRpcBlockIds("full", {7});
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, group_block_ids, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
 
@@ -338,8 +338,8 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
-    ASSERT_EQ(request.tagged_blocks_by_tag_size(), 1);
-    EXPECT_EQ(request.tagged_blocks_by_tag(0).tag(), "full");
+    ASSERT_EQ(request.tagged_group_block_ids_size(), 1);
+    EXPECT_EQ(request.tagged_group_block_ids(0).tag(), "full");
 }
 
 TEST(DecodeRpcServerTest, LoadRequestBuildersShareCommonFields) {
@@ -347,12 +347,12 @@ TEST(DecodeRpcServerTest, LoadRequestBuildersShareCommonFields) {
     server.resource_.workers                            = {"decode-0", "decode-1"};
     server.maga_init_params_.parallelism_config.dp_rank = 3;
 
-    const std::string               request_key   = "shared-request";
-    const std::vector<std::string>  peer_addrs    = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys    = {101, 102};
-    const GroupBlockIds             blocks_by_tag = makeRpcBlockIds("full", {7, 9});
+    const std::string               request_key     = "shared-request";
+    const std::vector<std::string>  peer_addrs      = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys      = {101, 102};
+    const GroupBlockIds             group_block_ids = makeRpcBlockIds("full", {7, 9});
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/2, /*reuse=*/3);
+        makeLoadContext(request_key, peer_addrs, cache_keys, group_block_ids, /*cp_size=*/2, /*reuse=*/3);
 
     const auto split = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
     const auto whole = server.constructRemoteLoadRequestForMla(load_context, /*index=*/0, peer_addrs);
@@ -367,18 +367,18 @@ TEST(DecodeRpcServerTest, LoadRequestBuildersShareCommonFields) {
     for (int i = 0; i < split.cache_keys_size(); ++i) {
         EXPECT_EQ(split.cache_keys(i), whole.cache_keys(i));
     }
-    ASSERT_EQ(split.tagged_blocks_by_tag_size(), whole.tagged_blocks_by_tag_size());
-    EXPECT_EQ(split.tagged_blocks_by_tag(0).SerializeAsString(), whole.tagged_blocks_by_tag(0).SerializeAsString());
+    ASSERT_EQ(split.tagged_group_block_ids_size(), whole.tagged_group_block_ids_size());
+    EXPECT_EQ(split.tagged_group_block_ids(0).SerializeAsString(), whole.tagged_group_block_ids(0).SerializeAsString());
 }
 
 TEST(DecodeRpcServerTest, PartitionedLoadRequestMapsMoreDecodeRanksToPrefillPeers) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1", "decode-2", "decode-3"};
 
-    const std::vector<std::string>  peer_addrs    = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys    = {101};
-    const GroupBlockIds             blocks_by_tag = makeRpcBlockIds("full", {7});
-    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/1);
+    const std::vector<std::string>  peer_addrs      = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys      = {101};
+    const GroupBlockIds             group_block_ids = makeRpcBlockIds("full", {7});
+    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, group_block_ids, /*cp_size=*/1);
 
     for (int index = 0; index < 4; ++index) {
         const auto request = server.constructRemoteLoadRequest(load_context, index, peer_addrs);
@@ -393,10 +393,10 @@ TEST(DecodeRpcServerTest, PartitionedLoadRequestMapsMorePrefillRanksToDecodeRank
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::vector<std::string>  peer_addrs    = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
-    const std::vector<CacheKeyType> cache_keys    = {101};
-    const GroupBlockIds             blocks_by_tag = makeRpcBlockIds("full", {7});
-    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/1);
+    const std::vector<std::string>  peer_addrs      = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    const std::vector<CacheKeyType> cache_keys      = {101};
+    const GroupBlockIds             group_block_ids = makeRpcBlockIds("full", {7});
+    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, group_block_ids, /*cp_size=*/1);
 
     for (int index = 0; index < 2; ++index) {
         const auto request = server.constructRemoteLoadRequest(load_context, index, peer_addrs);
@@ -413,10 +413,10 @@ TEST(DecodeRpcServerTest, ReplicatedPrefillLoadRequestKeepsUpstreamMapping) {
     server.resource_.workers = {"decode-0", "decode-1", "decode-2", "decode-3"};
     server.maga_init_params_.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
 
-    const std::vector<std::string>  peer_addrs    = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys    = {101};
-    const GroupBlockIds             blocks_by_tag = makeRpcBlockIds("full", {7});
-    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/1);
+    const std::vector<std::string>  peer_addrs      = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys      = {101};
+    const GroupBlockIds             group_block_ids = makeRpcBlockIds("full", {7});
+    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, group_block_ids, /*cp_size=*/1);
 
     for (int index = 0; index < 4; ++index) {
         const auto request = server.constructRemoteLoadRequest(load_context, index, peer_addrs);
@@ -431,10 +431,10 @@ TEST(DecodeRpcServerTest, WholeBlockLoadRequestMapsMoreDecodeRanksToPrefillPeers
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1", "decode-2", "decode-3"};
 
-    const std::vector<std::string>  peer_addrs    = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType> cache_keys    = {101};
-    const GroupBlockIds             blocks_by_tag = makeRpcBlockIds("full", {7});
-    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/1);
+    const std::vector<std::string>  peer_addrs      = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys      = {101};
+    const GroupBlockIds             group_block_ids = makeRpcBlockIds("full", {7});
+    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, group_block_ids, /*cp_size=*/1);
 
     for (int index = 0; index < 4; ++index) {
         const auto request = server.constructRemoteLoadRequestForMla(load_context, index, peer_addrs);
@@ -449,10 +449,10 @@ TEST(DecodeRpcServerTest, WholeBlockLoadRequestMapsMorePrefillRanksToDecodeRanks
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::vector<std::string>  peer_addrs    = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
-    const std::vector<CacheKeyType> cache_keys    = {101};
-    const GroupBlockIds             blocks_by_tag = makeRpcBlockIds("full", {7});
-    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/1);
+    const std::vector<std::string>  peer_addrs      = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    const std::vector<CacheKeyType> cache_keys      = {101};
+    const GroupBlockIds             group_block_ids = makeRpcBlockIds("full", {7});
+    const auto load_context = makeLoadContext("request", peer_addrs, cache_keys, group_block_ids, /*cp_size=*/1);
 
     for (int index = 0; index < 2; ++index) {
         const auto request = server.constructRemoteLoadRequestForMla(load_context, index, peer_addrs);
@@ -463,40 +463,40 @@ TEST(DecodeRpcServerTest, WholeBlockLoadRequestMapsMorePrefillRanksToDecodeRanks
     }
 }
 
-TEST(DecodeRpcServerTest, LoadRequestRejectsEmptyBlockIdsByTag) {
+TEST(DecodeRpcServerTest, LoadRequestRejectsEmptyGroupBlockIds) {
     DecodeRpcServer server;
     server.resource_.workers                    = {"decode-0"};
     const std::string               request_key = "request";
     const std::vector<std::string>  peer_addrs  = {"prefill-0"};
     const std::vector<CacheKeyType> cache_keys  = {101};
-    const GroupBlockIds             blocks_by_tag;
+    const GroupBlockIds             group_block_ids;
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/1, /*reuse=*/0);
+        makeLoadContext(request_key, peer_addrs, cache_keys, group_block_ids, /*cp_size=*/1, /*reuse=*/0);
 
     try {
         (void)server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
-        FAIL() << "empty blocks_by_tag must be rejected";
+        FAIL() << "empty group_block_ids must be rejected";
     } catch (const std::exception& e) {
-        EXPECT_NE(std::string(e.what()).find("remote load request requires non-empty blocks_by_tag"),
+        EXPECT_NE(std::string(e.what()).find("remote load request requires non-empty group_block_ids"),
                   std::string::npos);
     }
 }
 
-TEST(DecodeRpcServerTest, MlaLoadRequestRejectsEmptyBlockIdsByTag) {
+TEST(DecodeRpcServerTest, MlaLoadRequestRejectsEmptyGroupBlockIds) {
     DecodeRpcServer server;
     server.resource_.workers                    = {"decode-0"};
     const std::string               request_key = "request";
     const std::vector<std::string>  peer_addrs  = {"prefill-0"};
     const std::vector<CacheKeyType> cache_keys  = {101};
-    const GroupBlockIds             blocks_by_tag;
+    const GroupBlockIds             group_block_ids;
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/1, /*reuse=*/0);
+        makeLoadContext(request_key, peer_addrs, cache_keys, group_block_ids, /*cp_size=*/1, /*reuse=*/0);
 
     try {
         (void)server.constructRemoteLoadRequestForMla(load_context, /*index=*/0, peer_addrs);
-        FAIL() << "empty MLA blocks_by_tag must be rejected";
+        FAIL() << "empty MLA group_block_ids must be rejected";
     } catch (const std::exception& e) {
-        EXPECT_NE(std::string(e.what()).find("remote load request requires non-empty blocks_by_tag"),
+        EXPECT_NE(std::string(e.what()).find("remote load request requires non-empty group_block_ids"),
                   std::string::npos);
     }
 }
@@ -505,18 +505,18 @@ TEST(DecodeRpcServerTest, ConstructAndDecodePreserveTaggedBlockGeometry) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0"};
 
-    const std::string               request_key   = "request";
-    const std::vector<std::string>  peer_addrs    = {"prefill-0"};
-    const std::vector<CacheKeyType> cache_keys    = {101, 102};
-    const auto                      blocks_by_tag = makeRpcBlockIds("full", {7, 9});
+    const std::string               request_key     = "request";
+    const std::vector<std::string>  peer_addrs      = {"prefill-0"};
+    const std::vector<CacheKeyType> cache_keys      = {101, 102};
+    const auto                      group_block_ids = makeRpcBlockIds("full", {7, 9});
     const auto                      load_context =
-        makeLoadContext(request_key, peer_addrs, cache_keys, blocks_by_tag, /*cp_size=*/1, /*reuse=*/0);
+        makeLoadContext(request_key, peer_addrs, cache_keys, group_block_ids, /*cp_size=*/1, /*reuse=*/0);
 
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
-    ASSERT_EQ(request.tagged_blocks_by_tag_size(), 1);
-    EXPECT_EQ(request.tagged_blocks_by_tag(0).tag(), "full");
-    EXPECT_EQ(request.tagged_blocks_by_tag(0).block_ids(0), 7);
-    EXPECT_EQ(request.tagged_blocks_by_tag(0).block_ids(1), 9);
+    ASSERT_EQ(request.tagged_group_block_ids_size(), 1);
+    EXPECT_EQ(request.tagged_group_block_ids(0).tag(), "full");
+    EXPECT_EQ(request.tagged_group_block_ids(0).block_ids(0), 7);
+    EXPECT_EQ(request.tagged_group_block_ids(0).block_ids(1), 9);
 
     const auto topology = CacheTopology::create({makeRpcGroup("full", {0}, 8, 2)}, {{0, {"full"}}});
     const auto decoded  = DecodeRpcServer::decodeGroupBlockIds(request, *topology).at("full");
@@ -529,10 +529,10 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     auto                   topology = CacheTopology::create({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})},
                                                             {{0, {"linear"}}, {1, {"full"}}});
     BroadcastLoadRequestPB request;
-    auto*                  full = request.add_tagged_blocks_by_tag();
+    auto*                  full = request.add_tagged_group_block_ids();
     full->set_tag("full");
     full->add_block_ids(10);
-    auto* linear = request.add_tagged_blocks_by_tag();
+    auto* linear = request.add_tagged_group_block_ids();
     linear->set_tag("linear");
     linear->add_block_ids(20);
 
@@ -552,7 +552,7 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
 TEST(DecodeRpcServerTest, TaggedBlockRowsPreservePhysicalAndKernelGeometry) {
     auto                   topology = CacheTopology::create({makeRpcGroup("full", {0}, 8, 2)}, {{0, {"full"}}});
     BroadcastLoadRequestPB request;
-    auto*                  row = request.add_tagged_blocks_by_tag();
+    auto*                  row = request.add_tagged_group_block_ids();
     row->set_tag("full");
     row->add_block_ids(7);
     row->add_block_ids(9);
@@ -573,21 +573,21 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
     auto topology =
         CacheTopology::create({makeRpcGroup("full", {0}), makeRpcGroup("linear", {0})}, {{0, {"full", "linear"}}});
     BroadcastLoadRequestPB missing_tag;
-    auto*                  row = missing_tag.add_tagged_blocks_by_tag();
+    auto*                  row = missing_tag.add_tagged_group_block_ids();
     row->set_tag("full");
     row->add_block_ids(1);
 
     EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology));
 
     BroadcastLoadRequestPB unknown_tag;
-    auto*                  unknown = unknown_tag.add_tagged_blocks_by_tag();
+    auto*                  unknown = unknown_tag.add_tagged_group_block_ids();
     unknown->set_tag("unknown");
     unknown->add_block_ids(1);
     EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(unknown_tag, *topology));
 
     BroadcastLoadRequestPB duplicate_tag;
     for (int i = 0; i < 2; ++i) {
-        auto* duplicate = duplicate_tag.add_tagged_blocks_by_tag();
+        auto* duplicate = duplicate_tag.add_tagged_group_block_ids();
         duplicate->set_tag("full");
         duplicate->add_block_ids(i + 1);
     }
@@ -604,32 +604,32 @@ TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {
     }
 }
 
-TEST(DecodeRpcServerTest, MtpBlockIdsByTagResolveSubsetByTag) {
-    GroupBlockIds main_blocks_by_tag;
+TEST(DecodeRpcServerTest, MtpGroupBlockIdsResolveSubsetByTag) {
+    GroupBlockIds main_group_block_ids;
     const auto    full   = makeRpcBlockIds("full", {7, 9}).at("full");
     const auto    linear = makeRpcBlockIds("linear", {11}).at("linear");
-    main_blocks_by_tag.emplace("full", full);
-    main_blocks_by_tag.emplace("linear", linear);
+    main_group_block_ids.emplace("full", full);
+    main_group_block_ids.emplace("linear", linear);
 
-    const auto selected = DecodeRpcServer::mtpBlockIdsByTagForTag(main_blocks_by_tag, "full");
+    const auto selected = DecodeRpcServer::mtpGroupBlockIdsForTag(main_group_block_ids, "full");
     EXPECT_EQ(selected, full);
     EXPECT_NE(selected, linear);
     EXPECT_EQ(selected->blocks(), (BlockIndicesType{7, 9}));
 }
 
-TEST(DecodeRpcServerTest, MtpBlockIdsByTagRejectMissingAndNullTags) {
-    GroupBlockIds main_blocks_by_tag;
-    main_blocks_by_tag.emplace("null_mtp", nullptr);
+TEST(DecodeRpcServerTest, MtpGroupBlockIdsRejectMissingAndNullTags) {
+    GroupBlockIds main_group_block_ids;
+    main_group_block_ids.emplace("null_mtp", nullptr);
 
     try {
-        (void)DecodeRpcServer::mtpBlockIdsByTagForTag(main_blocks_by_tag, "unknown_mtp");
+        (void)DecodeRpcServer::mtpGroupBlockIdsForTag(main_group_block_ids, "unknown_mtp");
         FAIL() << "missing MTP tag must be rejected";
     } catch (const std::exception& e) {
         EXPECT_NE(std::string(e.what()).find("missing MTP RPC cache blocks for tag=unknown_mtp"), std::string::npos);
     }
 
     try {
-        (void)DecodeRpcServer::mtpBlockIdsByTagForTag(main_blocks_by_tag, "null_mtp");
+        (void)DecodeRpcServer::mtpGroupBlockIdsForTag(main_group_block_ids, "null_mtp");
         FAIL() << "null MTP block ids must be rejected";
     } catch (const std::exception& e) {
         EXPECT_NE(std::string(e.what()).find("null MTP group_block for tag=null_mtp"), std::string::npos);

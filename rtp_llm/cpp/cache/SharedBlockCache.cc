@@ -895,7 +895,7 @@ void SharedBlockCache::removeGroupFromItemLocked(CacheKeyType cache_key, size_t 
     const int64_t block_created_time_us   = item.group_block_created_time_us[group_index];
     const int64_t created_time_us         = block_created_time_us > 0 ? block_created_time_us : item.created_time_us;
     result.evicted_lifetime_ms[cache_key] = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
-    result.evicted_independent_group[cache_key]   = tag;
+    result.evicted_independent_tag[cache_key]     = tag;
     item.group_block_ids[group_index]             = NULL_BLOCK_IDX;
     item.matchable_groups[group_index]            = true;
     item.group_block_created_time_us[group_index] = 0;

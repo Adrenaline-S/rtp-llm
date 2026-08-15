@@ -9,7 +9,7 @@ bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    const auto& layer_ids = cache_group_.layer_ids;
+    const auto& layer_ids = group_base_.layer_ids;
     RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_ids.size(),
                             "layer_tensors size (%zu) is less than layer_ids size (%zu)",
                             layer_tensors.size(),
@@ -59,7 +59,7 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
                 collector.lifetime_ms = lifetime_ms;
                 kmonitor::MetricsTags tags("scope", "gpu");
                 tags.AddTag("evict_policy",
-                            evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
+                            evict_result.evicted_independent_tag.count(cache_key) ? "independent" : "chain");
                 tags.AddTag("backing", "device");
                 metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
                                                                                                            &collector);
@@ -112,19 +112,19 @@ size_t KVCacheGroup::freeBlocksNum() const {
 }
 
 int KVCacheGroup::seqSizePerBlock() const {
-    return static_cast<int>(cache_group_.spec->seq_size_per_block);
+    return static_cast<int>(group_base_.spec->seq_size_per_block);
 }
 
 const std::string& KVCacheGroup::tag() const {
-    return cache_group_.tag;
+    return group_base_.tag;
 }
 
 const GroupBase& KVCacheGroup::config() const {
-    return cache_group_;
+    return group_base_;
 }
 
 const CacheGroupPolicy& KVCacheGroup::policy() const {
-    return cache_group_.policy;
+    return group_base_.policy;
 }
 
 bool KVCacheGroup::prefixReuseEnabled() const {

@@ -153,10 +153,10 @@ public:
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {
         return;
     }
-    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                       const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
-                       std::vector<TaggedBlockIdPair>& block_update_mapping) override {
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<GroupBlockIdPair>& block_update_mapping) override {
         return false;
     }
     int seqSizePerBlock() const override {

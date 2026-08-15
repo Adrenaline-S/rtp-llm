@@ -269,7 +269,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             wire      = wire.contiguous();
             RTP_LLM_CHECK_WITH_INFO(wire.scalar_type() == torch::kInt32 && wire.dim() == 2 && wire.size(1) == 3,
                                     "KV cache update mapping must be int32 [N, 3]");
-            std::vector<TaggedBlockIdPair> tagged_mapping;
+            std::vector<GroupBlockIdPair> tagged_mapping;
             tagged_mapping.reserve(wire.size(0));
             const auto* data = wire.data_ptr<int32_t>();
             for (int64_t row = 0; row < wire.size(0); ++row) {
@@ -278,7 +278,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                         "invalid KV cache update wire slot=%d for %zu local groups",
                                         wire_slot,
                                         sorted_tags.size());
-                tagged_mapping.push_back(TaggedBlockIdPair{
+                tagged_mapping.push_back(GroupBlockIdPair{
                     sorted_tags[static_cast<size_t>(wire_slot)], data[row * 3 + 1], data[row * 3 + 2]});
             }
             cache_manager_->blockBatchCopy(tagged_mapping);

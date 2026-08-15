@@ -63,7 +63,7 @@ public:
         std::unordered_map<CacheKeyType, BlockDependency>                               evicted_dependencies;
         std::unordered_map<CacheKeyType, NamespaceId>                                   evicted_namespaces;
         std::unordered_map<CacheKeyType, int64_t>                                       evicted_lifetime_ms;
-        std::unordered_map<CacheKeyType, std::string>                                   evicted_independent_group;
+        std::unordered_map<CacheKeyType, std::string>                                   evicted_independent_tag;
     };
 
     struct MatchResult {

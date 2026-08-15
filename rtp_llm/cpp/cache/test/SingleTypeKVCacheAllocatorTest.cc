@@ -734,7 +734,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
         }
     }
 
-    EXPECT_NO_THROW(allocator_->blockBatchCopy({TaggedBlockIdPair{"default", src_block, dst_block}}));
+    EXPECT_NO_THROW(allocator_->blockBatchCopy({GroupBlockIdPair{"default", src_block, dst_block}}));
 
     for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
         auto src_addr = allocator_->convertIndexToAddr(layer_id, "default", src_block);
@@ -762,7 +762,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     allocator_->init();
 
-    std::vector<TaggedBlockIdPair> copy_mapping;
+    std::vector<GroupBlockIdPair> copy_mapping;
     copy_mapping.push_back({"default", 0, 1});
     copy_mapping.push_back({"default", 2, 3});
     copy_mapping.push_back({"default", 4, 5});
@@ -821,7 +821,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyEmpty) {
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
 
-    std::vector<TaggedBlockIdPair> empty_mapping;
+    std::vector<GroupBlockIdPair> empty_mapping;
 
     EXPECT_NO_THROW(allocator_->blockBatchCopy(empty_mapping));
 }
@@ -883,16 +883,16 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
     }
 
     const auto initial = snapshot();
-    EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<TaggedBlockIdPair>{}));
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<GroupBlockIdPair>{}));
     verify(initial);
 
-    EXPECT_NO_THROW(allocator_->blockBatchCopy({TaggedBlockIdPair{"indexer_kv", 0, 1}}));
+    EXPECT_NO_THROW(allocator_->blockBatchCopy({GroupBlockIdPair{"indexer_kv", 0, 1}}));
     auto after_single = initial;
     after_single[1]   = initial[0];
     verify(after_single);
 
     const int last_block = static_cast<int>(config.blockNum() - 1);
-    EXPECT_NO_THROW(allocator_->blockBatchCopy({TaggedBlockIdPair{"indexer_kv", 1, last_block}}));
+    EXPECT_NO_THROW(allocator_->blockBatchCopy({GroupBlockIdPair{"indexer_kv", 1, last_block}}));
     auto after_last        = after_single;
     after_last[last_block] = after_single[1];
     verify(after_last);
@@ -903,7 +903,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     allocator_->init();
 
-    std::vector<TaggedBlockIdPair> pairs = {{"default", 0, 1}, {"default", 2, 3}};
+    std::vector<GroupBlockIdPair> pairs = {{"default", 0, 1}, {"default", 2, 3}};
 
     auto&  spec         = config.specForGroup("default");
     size_t k_block_size = spec->k_block_size();
@@ -951,8 +951,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     allocator_->init();
 
-    std::vector<int32_t>           data         = {0, 1, 2, 3, 4, 5};  // 3 pairs: (0->1, 2->3, 4->5)
-    std::vector<TaggedBlockIdPair> copy_mapping = {{"default", 0, 1}, {"default", 2, 3}, {"default", 4, 5}};
+    std::vector<int32_t>          data         = {0, 1, 2, 3, 4, 5};  // 3 pairs: (0->1, 2->3, 4->5)
+    std::vector<GroupBlockIdPair> copy_mapping = {{"default", 0, 1}, {"default", 2, 3}, {"default", 4, 5}};
 
     auto&  spec         = config.specForGroup("default");
     size_t k_block_size = spec->k_block_size();
@@ -1488,7 +1488,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakCoversPartialTailCopiesA
                                                       /*target_batch_size=*/4),
               3);
 
-    std::vector<TaggedBlockIdPair> block_update_mapping;
+    std::vector<GroupBlockIdPair> block_update_mapping;
     ASSERT_TRUE(allocator_->updateKVBlock(
         resource, /*block_src_batch=*/{0, 0, 0, 0}, /*copy_last_block=*/true, block_update_mapping));
     EXPECT_EQ(resource->batchSize(), 4);

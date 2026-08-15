@@ -83,7 +83,7 @@ public:
         runner_->prepareAttentionInputs(inputs, state_, /*skip_forward_event_sync=*/true);
     }
 
-    void refreshTaggedBlockTables(torch_ext::PyModelInputs& inputs) {
+    void refreshGroupedBlockTables(torch_ext::PyModelInputs& inputs) {
         publishRequestDeviceState(inputs);
         runner_->updateKVCacheKernelBlockId(inputs, state_);
     }
@@ -108,7 +108,7 @@ private:
     static void publishRequestDeviceState(torch_ext::PyModelInputs& inputs) {
         inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
-        refreshTaggedAttentionInputs(inputs);
+        refreshGroupedAttentionInputs(inputs);
     }
 
     static void bindCacheGroups(GraphParams&                          params,
@@ -174,6 +174,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
-        .def("refreshTaggedBlockTables", &CudaGraphTestRunner::refreshTaggedBlockTables)
+        .def("refreshGroupedBlockTables", &CudaGraphTestRunner::refreshGroupedBlockTables)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }

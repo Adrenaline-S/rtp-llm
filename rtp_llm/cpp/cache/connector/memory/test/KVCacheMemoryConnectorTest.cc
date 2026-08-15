@@ -281,7 +281,7 @@ private:
 
     void addTaggedGpuBlocks(MemoryOperationRequestPB::CopyItem& item,
                             const std::vector<BlockIdxType>&    blocks_by_layer) const {
-        const auto& slots = connector_->layerTagSlots();
+        const auto& slots = connector_->layerGroupSlots();
         for (const auto& slot : slots) {
             ASSERT_GE(slot.layer_id, 0);
             ASSERT_LT(static_cast<size_t>(slot.layer_id), blocks_by_layer.size());
@@ -297,7 +297,7 @@ private:
         for (const auto& layer_block : gpu_layer_blocks) {
             blocks_by_layer.at(static_cast<size_t>(layer_block.layer_id)) = layer_block.block_id;
         }
-        for (const auto& slot : connector_->layerTagSlots()) {
+        for (const auto& slot : connector_->layerGroupSlots()) {
             const auto block_id = blocks_by_layer.at(static_cast<size_t>(slot.layer_id));
             if (isNullBlockIdx(block_id)) {
                 continue;
@@ -327,7 +327,7 @@ private:
         }
 
         size_t byte_off = 0;
-        for (const auto& slot : connector_->layerTagSlots()) {
+        for (const auto& slot : connector_->layerGroupSlots()) {
             const auto block_id = layer_to_block[static_cast<size_t>(slot.layer_id)];
             if (isNullBlockIdx(block_id)) {
                 byte_off += slot.stride_bytes;
@@ -362,11 +362,11 @@ private:
         }
 
         size_t total = 0;
-        for (const auto& slot : connector_->layerTagSlots()) {
+        for (const auto& slot : connector_->layerGroupSlots()) {
             total += slot.stride_bytes;
         }
 
-        for (const auto& slot : connector_->layerTagSlots()) {
+        for (const auto& slot : connector_->layerGroupSlots()) {
             const auto block_id = layer_to_block[static_cast<size_t>(slot.layer_id)];
             if (isNullBlockIdx(block_id)) {
                 continue;
@@ -398,7 +398,7 @@ private:
         // Fill memory buffer (merged layout: reserve per-layer stride even if block is null).
         if (fill_cpu) {
             size_t byte_off = 0;
-            for (const auto& slot : connector_->layerTagSlots()) {
+            for (const auto& slot : connector_->layerGroupSlots()) {
                 const auto block_id = layer_to_block[static_cast<size_t>(slot.layer_id)];
                 if (isNullBlockIdx(block_id)) {
                     byte_off += slot.stride_bytes;
@@ -576,9 +576,9 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, LayerTagSlotsAreCachedDerivedBindings) {
-    const auto& first  = connector_->layerTagSlots();
-    const auto& second = connector_->layerTagSlots();
+TEST_F(KVCacheMemoryConnectorTest, LayerGroupSlotsAreCachedDerivedBindings) {
+    const auto& first  = connector_->layerGroupSlots();
+    const auto& second = connector_->layerGroupSlots();
 
     EXPECT_EQ(&first, &second);
     ASSERT_FALSE(first.empty());
@@ -1682,7 +1682,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCop
     auto*                    item = req.add_copy_items();
     addTaggedGpuBlocks(*item,
                        std::vector<BlockIdxType>(static_cast<size_t>(cache_config_.totalLayerNum()), gpu_block_idx));
-    const auto& slots = connector_->layerTagSlots();
+    const auto& slots = connector_->layerGroupSlots();
     ASSERT_FALSE(slots.empty());
     auto* invalid_block = item->add_tagged_gpu_blocks();
     invalid_block->set_layer_id(cache_config_.layer_num);
@@ -1968,7 +1968,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
 
     // Allocate one memory block for the merged layout (one cache-key across all layers).
     size_t total_bytes = 0;
-    for (const auto& slot : connector_->layerTagSlots()) {
+    for (const auto& slot : connector_->layerGroupSlots()) {
         total_bytes += slot.stride_bytes;
     }
     ASSERT_GT(total_bytes, 0u);
@@ -2002,7 +2002,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
         layer_to_block[static_cast<size_t>(lb.layer_id)] = lb.block_id;
     }
     size_t byte_off = 0;
-    for (const auto& slot : connector_->layerTagSlots()) {
+    for (const auto& slot : connector_->layerGroupSlots()) {
         const auto block_id = layer_to_block[static_cast<size_t>(slot.layer_id)];
         if (isNullBlockIdx(block_id)) {
             byte_off += slot.stride_bytes;
