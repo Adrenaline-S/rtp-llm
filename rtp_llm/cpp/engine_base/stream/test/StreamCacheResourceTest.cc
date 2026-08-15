@@ -121,7 +121,7 @@ protected:
     std::shared_ptr<KVCacheManager> cache_manager_;
 };
 
-TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesGroupTopology) {
+TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesGroupBase) {
     ResourceContext resource_context;
     ModelConfig     model_config;
     model_config.max_seq_len = 2048;

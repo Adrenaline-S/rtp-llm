@@ -5,7 +5,7 @@ test_copts = [
 ] + copts()
 
 cc_library(
-    name = "mock_allocator_lib",
+    name = "mock_kv_cache_allocator_lib",
     hdrs = [
         "MockKVCacheAllocator.h",
     ],

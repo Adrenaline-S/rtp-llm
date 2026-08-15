@@ -551,12 +551,12 @@ bool HybridPoolKVCacheAllocator::doInit() {
     std::vector<PoolPlan> pool_plans;
     pool_plans.reserve(config_.topology().groups().size());
 
-    for (const auto& group_topology : config_.topology().groups()) {
-        auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, group_topology.tag);
-        appendPoolSummary(pool_summary, has_pool, group_topology.tag, group_topology.policy.group_type, pool_config);
+    for (const auto& cache_group : config_.topology().groups()) {
+        auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, cache_group.tag);
+        appendPoolSummary(pool_summary, has_pool, cache_group.tag, cache_group.policy.group_type, pool_config);
         pool_total_bytes += pool_config.total_size_bytes;
         pool_total_blocks += pool_config.block_num;
-        pool_plans.push_back(PoolPlan{&group_topology, std::move(pool_config)});
+        pool_plans.push_back(PoolPlan{&cache_group, std::move(pool_config)});
     }
 
     if (has_pool) {
@@ -570,41 +570,41 @@ bool HybridPoolKVCacheAllocator::doInit() {
     }
 
     for (const auto& plan : pool_plans) {
-        const auto& group_topology = *plan.group;
-        const auto& pool_config    = plan.pool_config;
-        const auto  group_type     = group_topology.policy.group_type;
+        const auto& cache_group = *plan.group;
+        const auto& pool_config = plan.pool_config;
+        const auto  group_type  = cache_group.policy.group_type;
 
         auto group_pool = std::make_shared<BlockPool>(pool_config, allocation_type_, use_cuda_malloc_block_pool_);
         try {
             RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "BlockPool::init returned false");
         } catch (const std::exception& e) {
             RTP_LLM_FAIL("Failed to initialize block pool: tag=%s type=%s bytes=%zu blocks=%u layers=%zu error=%s",
-                         group_topology.tag.c_str(),
+                         cache_group.tag.c_str(),
                          cacheGroupTypeName(group_type),
                          pool_config.total_size_bytes,
                          pool_config.block_num,
-                         group_topology.layer_ids.size(),
+                         cache_group.layer_ids.size(),
                          e.what());
         }
 
         KVCacheGroupPtr group;
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearKVCacheGroup>(
-                group_topology, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
-            linear_group_tags_.push_back(group_topology.tag);
+                cache_group, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
+            linear_group_tags_.push_back(cache_group.tag);
         } else if (group_type == CacheGroupType::SWA) {
             group = std::make_shared<SWAKVCacheGroup>(
-                group_topology, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
-            swa_group_tags_.push_back(group_topology.tag);
+                cache_group, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
+            swa_group_tags_.push_back(cache_group.tag);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(group_topology, group_pool, shared_cache_raw, metrics_reporter_);
-            full_group_tags_.push_back(group_topology.tag);
+            group = std::make_shared<FullKVCacheGroup>(cache_group, group_pool, shared_cache_raw, metrics_reporter_);
+            full_group_tags_.push_back(cache_group.tag);
         }
 
         RTP_LLM_CHECK_WITH_INFO(
             group->init(), "Failed to initialize single-type KV cache manager %s", pool_config.pool_name.c_str());
-        RTP_LLM_CHECK(group_block_pools_.emplace(group_topology.tag, group_pool).second);
-        RTP_LLM_CHECK(kv_cache_groups_.emplace(group_topology.tag, std::move(group)).second);
+        RTP_LLM_CHECK(group_block_pools_.emplace(cache_group.tag, group_pool).second);
+        RTP_LLM_CHECK(kv_cache_groups_.emplace(cache_group.tag, std::move(group)).second);
     }
 
     if (shared_block_cache_) {
@@ -1449,10 +1449,10 @@ GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
                             topology->groups().size());
 
     GroupedCacheLayerLayout::GroupLayouts groups;
-    for (const auto& [tag, group_topology] : kv_cache_groups_) {
+    for (const auto& [tag, cache_group] : kv_cache_groups_) {
         std::vector<BlockBufferPtrInfo> layers(topology->layers().size());
-        const auto                      layer_tensors = group_topology->allLayerCacheBase();
-        const auto                      scale_tensors = group_topology->allLayerScaleCacheBase();
+        const auto                      layer_tensors = cache_group->allLayerCacheBase();
+        const auto                      scale_tensors = cache_group->allLayerScaleCacheBase();
         for (const auto& [layer_id, tensor] : layer_tensors) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
                                     "layer_id %d out of group kv layout range %zu",

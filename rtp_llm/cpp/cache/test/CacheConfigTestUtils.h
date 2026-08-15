@@ -598,9 +598,10 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.seq_size_per_block = tokens_per_block;
-    config.linear_step        = 1;
+    config.layer_num               = static_cast<uint32_t>(layer_num);
+    config.seq_size_per_block      = tokens_per_block;
+    config.linear_step             = 1;
+    config.enable_hybrid_attention = true;
     RTP_LLM_CHECK_WITH_INFO(group_layer_num > 0 && layer_num > 0 && (layer_num % group_layer_num) == 0
                                 && (layer_num / group_layer_num) >= 2,
                             "makeSimpleHybridMhaCacheConfig requires layer_num divisible by group_layer_num into at "

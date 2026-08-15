@@ -92,12 +92,13 @@ protected:
                                                                      allocator_);
     }
 
-    // In production, KVCacheAllocator::incrKVCacheRef() typically returns a shared_ptr with a custom deleter that
-    // decrements the ref-count via KVCacheAllocator::decrKVCacheRef(). Our gmock allocator does not provide that,
-    // so tests that validate ref-counting must simulate it explicitly.
+    // In production, KVCacheAllocator::incrKVCacheRef() typically returns a shared_ptr with a custom deleter
+    // that decrements the ref-count via KVCacheAllocator::decrKVCacheRef(). Our gmock allocator does not
+    // provide that, so tests that validate ref-counting must simulate it explicitly.
     std::shared_ptr<KVCacheResource> makeResourceWithAutoDecr() {
         // IMPORTANT: Use weak_ptr to avoid a reference cycle:
-        // allocator_ (mock) -> EXPECT_CALL action -> returned resource -> deleter -> allocator_.
+        // allocator_ (mock) -> EXPECT_CALL action -> returned resource -> deleter ->
+        // allocator_.
         std::weak_ptr<MockKVCacheAllocator> allocator_weak = allocator_;
         auto                                owned          = std::make_shared<KVCacheResource>();
         return std::shared_ptr<KVCacheResource>(owned.get(), [owned, allocator_weak](KVCacheResource*) mutable {
@@ -403,8 +404,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
 
     // Coordinator logs free/available blocks before calling incrKVCacheRef().
     // MockKVCacheAllocator doesn't initialize its internal BlockPool unless we set it up explicitly.
-    // Without this, allocator_->freeBlocksNum() / availableBlocksNum() will dereference a null BlockPool and
-    // the test process can crash/hang.
+    // Without this, allocator_->freeBlocksNum() / availableBlocksNum() will dereference a null
+    // BlockPool and the test process can crash/hang.
     {
         const auto&  group = cache_config_.topology().groups().front();
         const size_t block_stride_bytes =
