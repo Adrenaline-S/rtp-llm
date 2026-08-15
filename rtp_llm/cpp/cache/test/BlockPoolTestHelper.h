@@ -125,13 +125,8 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     group.block_num             = kBlockNum;
     group.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
     group.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    group.local_kv_head_num     = test_spec->local_kv_head_num;
     test::setTestTopology(cache_config, {std::move(group)});
-    std::vector<GroupBase> groups;
-    for (const auto& group : cache_config.topology().groups()) {
-        groups.push_back(group);
-    }
-    groups.at(0).local_kv_head_num = test_spec->local_kv_head_num;
-    cache_config.setTopology(std::move(groups), cache_config.topology().layers());
 
     return BlockPoolConfigHelper::createConfig(cache_config);
 }
