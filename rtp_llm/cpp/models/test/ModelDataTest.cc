@@ -5,6 +5,8 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
+#include <thread>
+
 using namespace std;
 
 namespace rtp_llm {

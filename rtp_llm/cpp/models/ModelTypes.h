@@ -8,9 +8,11 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
+#include <map>
+#include <memory>
 #include <string>
 #include <utility>
-#include <memory>
+#include <vector>
 
 namespace rtp_llm {
 

@@ -1,27 +1,87 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include <algorithm>
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
+#include <vector>
 
 namespace rtp_llm {
+
+namespace {
+
+constexpr size_t kWidthWordsPerGroup = 2;
+
+void reconstructCacheGroupBlockTableViews(const std::vector<int32_t>& widths,
+                                          size_t                      group_count,
+                                          size_t                      batch_size,
+                                          const torch::Tensor&        physical_backing,
+                                          const torch::Tensor&        kernel_backing,
+                                          std::vector<torch::Tensor>& physical_tables,
+                                          std::vector<torch::Tensor>& kernel_tables) {
+    RTP_LLM_CHECK_WITH_INFO(widths.size() == group_count * kWidthWordsPerGroup,
+                            "invalid KV cache group width count: %zu for %zu groups",
+                            widths.size(),
+                            group_count);
+    size_t expected_physical_numel = 0;
+    size_t expected_kernel_numel   = 0;
+    for (size_t i = 0; i < group_count; ++i) {
+        const int32_t physical_width = widths[i * kWidthWordsPerGroup];
+        const int32_t kernel_width   = widths[i * kWidthWordsPerGroup + 1];
+        RTP_LLM_CHECK_WITH_INFO(physical_width >= 0 && kernel_width >= 0,
+                                "invalid KV cache group widths at wire slot %zu: physical=%d kernel=%d",
+                                i,
+                                physical_width,
+                                kernel_width);
+        expected_physical_numel += batch_size * static_cast<size_t>(physical_width);
+        expected_kernel_numel += batch_size * static_cast<size_t>(kernel_width);
+    }
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(physical_backing.numel()) == expected_physical_numel,
+                            "invalid physical block table backing size: %ld != %zu",
+                            physical_backing.numel(),
+                            expected_physical_numel);
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kernel_backing.numel()) == expected_kernel_numel,
+                            "invalid kernel block table backing size: %ld != %zu",
+                            kernel_backing.numel(),
+                            expected_kernel_numel);
+
+    physical_tables.clear();
+    kernel_tables.clear();
+    physical_tables.reserve(group_count);
+    kernel_tables.reserve(group_count);
+    size_t physical_offset = 0;
+    size_t kernel_offset   = 0;
+    for (size_t i = 0; i < group_count; ++i) {
+        const size_t physical_width = static_cast<size_t>(widths[i * kWidthWordsPerGroup]);
+        const size_t kernel_width   = static_cast<size_t>(widths[i * kWidthWordsPerGroup + 1]);
+        physical_tables.emplace_back(
+            physical_backing.narrow(0, physical_offset, batch_size * physical_width)
+                .view({static_cast<int64_t>(batch_size), static_cast<int64_t>(physical_width)}));
+        kernel_tables.emplace_back(kernel_backing.narrow(0, kernel_offset, batch_size * kernel_width)
+                                       .view({static_cast<int64_t>(batch_size), static_cast<int64_t>(kernel_width)}));
+        physical_offset += batch_size * physical_width;
+        kernel_offset += batch_size * kernel_width;
+    }
+}
+
+}  // namespace
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
     }
-
     // The UDS-backed CPU broadcaster (used by execBroadcastCpu below) is
     // bootstrapped from Python in collective_torch._register_process_groups_to_cpp,
     // which guarantees deterministic timing across TP siblings. Cross-node TP
     // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
 
-    // first sync stage: shape hints
+    const bool   is_non_root      = parallelism_config.tp_rank != 0;
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
-    auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
+    auto         shape_hints_t    = torch::zeros({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
     auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
     shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] =
@@ -30,22 +90,61 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::prefixLengths] =
         inputs.prefix_lengths.defined() ? inputs.prefix_lengths.numel() : 0;
-    shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch] =
-        inputs.kv_cache_kernel_block_id.defined() ? inputs.kv_cache_kernel_block_id.size(2) : 0;
-    shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] =
-        inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(2) : 0;
+    int32_t max_kernel_blocks_hint = 0;
+    int32_t max_blocks_hint        = 0;
+    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_ids_by_group.size()
+                                == inputs.kv_cache_kernel_block_ids_by_group.size(),
+                            "physical and kernel KV cache group counts differ: %zu vs %zu",
+                            inputs.kv_cache_block_ids_by_group.size(),
+                            inputs.kv_cache_kernel_block_ids_by_group.size());
+    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_ids_by_group.size()
+                                <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+                            "KV cache group count exceeds wire range: %zu",
+                            inputs.kv_cache_block_ids_by_group.size());
+    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_ids_by_group.size()
+                                <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) / kWidthWordsPerGroup,
+                            "KV cache group width metadata exceeds tensor range");
+    const size_t root_group_width_words = inputs.kv_cache_block_ids_by_group.size() * kWidthWordsPerGroup;
+    auto group_widths_t   = torch::empty({static_cast<int64_t>(root_group_width_words)}, torch::kInt32).pin_memory();
+    auto group_widths_ptr = group_widths_t.data_ptr<int32_t>();
+    for (size_t group_index = 0; group_index < inputs.kv_cache_block_ids_by_group.size(); ++group_index) {
+        const auto& physical = inputs.kv_cache_block_ids_by_group[group_index];
+        const auto& kernel   = inputs.kv_cache_kernel_block_ids_by_group[group_index];
+        RTP_LLM_CHECK_WITH_INFO(physical.dim() == 2 && kernel.dim() == 2,
+                                "KV cache tables must be two-dimensional at wire slot %zu",
+                                group_index);
+        RTP_LLM_CHECK_WITH_INFO(physical.size(0) == kernel.size(0),
+                                "physical and kernel KV cache batch sizes differ at wire slot %zu",
+                                group_index);
+        RTP_LLM_CHECK_WITH_INFO(physical.size(1) <= std::numeric_limits<int32_t>::max()
+                                    && kernel.size(1) <= std::numeric_limits<int32_t>::max(),
+                                "KV cache table width exceeds wire range at wire slot %zu",
+                                group_index);
+        max_blocks_hint                    = std::max(max_blocks_hint, static_cast<int32_t>(physical.size(1)));
+        max_kernel_blocks_hint             = std::max(max_kernel_blocks_hint, static_cast<int32_t>(kernel.size(1)));
+        const size_t width_offset          = group_index * kWidthWordsPerGroup;
+        group_widths_ptr[width_offset]     = static_cast<int32_t>(physical.size(1));
+        group_widths_ptr[width_offset + 1] = static_cast<int32_t>(kernel.size(1));
+    }
+    shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch] = max_kernel_blocks_hint;
+    shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]       = max_blocks_hint;
     shape_hints_ptr[GptModelInputIndex::cacheKeysWidth] =
         inputs.cache_keys.defined() && inputs.cache_keys.dim() >= 2 ? inputs.cache_keys.size(1) : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] =
-        inputs.kv_cache_kernel_block_id.defined() ?
-            inputs.kv_cache_kernel_block_id.size(0) :
-            (inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(0) : 1);
+    shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] = inputs.kv_cache_block_ids_by_group.size();
     // Kept as a reserved zero-valued slot for shape-hint wire compatibility.
     shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen] = 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen] =
-        inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum] =
-        inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
+    shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen]   = 0;
+    RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_update_mapping.defined()
+                                || (inputs.kv_cache_update_mapping.scalar_type() == torch::kInt32
+                                    && inputs.kv_cache_update_mapping.dim() == 2
+                                    && inputs.kv_cache_update_mapping.size(1) == 3),
+                            "KV cache update mapping must be int32 [N, 3]");
+    const size_t update_mapping_count =
+        inputs.kv_cache_update_mapping.defined() ? static_cast<size_t>(inputs.kv_cache_update_mapping.size(0)) : 0;
+    RTP_LLM_CHECK_WITH_INFO(update_mapping_count <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+                            "KV cache update mapping count exceeds wire range: %zu",
+                            update_mapping_count);
+    shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum] = update_mapping_count;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] =
@@ -98,7 +197,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
         }
-        if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
+        const bool kernel_block_ids_on_cuda =
+            std::any_of(inputs.kv_cache_kernel_block_ids_by_group.begin(),
+                        inputs.kv_cache_kernel_block_ids_by_group.end(),
+                        [](const auto& tensor) { return tensor.defined() && tensor.is_cuda(); });
+        if (kernel_block_ids_on_cuda) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
         }
         shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int32_t>(device_bits);
@@ -121,6 +224,32 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;
+    }
+
+    const int32_t kv_cache_group_num_raw = shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
+    RTP_LLM_CHECK_WITH_INFO(
+        kv_cache_group_num_raw >= 0, "invalid broadcast KV cache group count: %d", kv_cache_group_num_raw);
+    const size_t kv_cache_group_num = static_cast<size_t>(kv_cache_group_num_raw);
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_group_num
+                                <= static_cast<size_t>(std::numeric_limits<int64_t>::max()) / kWidthWordsPerGroup,
+                            "broadcast KV cache group width metadata exceeds tensor range");
+    const size_t group_width_words = kv_cache_group_num * kWidthWordsPerGroup;
+    if (is_non_root) {
+        group_widths_t   = torch::empty({static_cast<int64_t>(group_width_words)}, torch::kInt32).pin_memory();
+        group_widths_ptr = group_widths_t.data_ptr<int32_t>();
+    }
+    std::vector<int32_t> group_width_wire;
+    if (group_width_words > 0) {
+        execBroadcastCpu({{group_widths_t}, 0});
+        group_width_wire.assign(group_widths_ptr, group_widths_ptr + group_width_words);
+        for (size_t i = 0; i < kv_cache_group_num; ++i) {
+            RTP_LLM_CHECK_WITH_INFO(group_width_wire[i * kWidthWordsPerGroup] >= 0
+                                        && group_width_wire[i * kWidthWordsPerGroup + 1] >= 0,
+                                    "invalid broadcast KV cache widths at wire slot %zu: physical=%d kernel=%d",
+                                    i,
+                                    group_width_wire[i * kWidthWordsPerGroup],
+                                    group_width_wire[i * kWidthWordsPerGroup + 1]);
+        }
     }
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
@@ -149,11 +278,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         cudaSyncAndCheck();
     }
 
-    auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
     auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
     auto   cache_keys_width        = (size_t)shape_hints_ptr[GptModelInputIndex::cacheKeysWidth];
-    auto   kv_cache_group_num      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
-    auto   group_types_len         = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
     auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
     auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
     auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
@@ -177,7 +303,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         return tensor;
     };
 
-    bool is_non_root = parallelism_config.tp_rank != 0;
     if (is_non_root) {
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
@@ -200,29 +325,29 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
-        if (max_kernel_blocks != 0) {
-            // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
-            // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
-            // classification below stays identical across ranks (otherwise pack/unpack drifts
-            // off-by-tensor and non-root unpacks garbage).
-            inputs.kv_cache_kernel_block_id = allocBuf(
-                rtp_llm::DataType::TYPE_INT32,
-                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks},
-                pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
-            inputs.kv_cache_update_mapping = allocBuf(
-                rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 3});
-        }
-        if (max_blocks != 0) {
-            inputs.kv_cache_block_id =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
+        if (kv_cache_group_num != 0) {
+            const size_t batch_size     = shape_hints_ptr[GptModelInputIndex::inputLengths];
+            size_t       physical_numel = 0;
+            size_t       kernel_numel   = 0;
+            for (size_t i = 0; i < kv_cache_group_num; ++i) {
+                physical_numel += batch_size * static_cast<size_t>(group_width_wire[i * kWidthWordsPerGroup]);
+                kernel_numel += batch_size * static_cast<size_t>(group_width_wire[i * kWidthWordsPerGroup + 1]);
+            }
+            auto physical_backing = allocBuf(rtp_llm::DataType::TYPE_INT32, {physical_numel});
+            auto kernel_backing   = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                             {kernel_numel},
+                                           pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
+            reconstructCacheGroupBlockTableViews(group_width_wire,
+                                                 kv_cache_group_num,
+                                                 batch_size,
+                                                 physical_backing,
+                                                 kernel_backing,
+                                                 inputs.kv_cache_block_ids_by_group,
+                                                 inputs.kv_cache_kernel_block_ids_by_group);
             if (inputs.pd_separation) {
                 inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64,
                                              {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks});
             }
-        }
-        if (group_types_len) {
-            inputs.kv_cache_group_types = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
         }
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
@@ -271,6 +396,18 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
+    const int32_t update_count_raw = shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum];
+    RTP_LLM_CHECK_WITH_INFO(
+        update_count_raw >= 0, "invalid broadcast KV cache update mapping count: %d", update_count_raw);
+    const size_t  update_count = static_cast<size_t>(update_count_raw);
+    torch::Tensor update_wire  = inputs.kv_cache_update_mapping;
+    if (update_count > 0) {
+        if (is_non_root) {
+            update_wire = torch::empty({static_cast<int64_t>(update_count), 3}, torch::kInt32).pin_memory();
+            inputs.kv_cache_update_mapping = update_wire;
+        }
+    }
+
     // Collect all tensors that participate in broadcast.
     // The collect order must be deterministic and identical across all ranks.
     std::vector<torch::Tensor*> tensor_ptrs;
@@ -284,16 +421,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
-    if (max_kernel_blocks || max_blocks) {
-        collect(inputs.kv_cache_kernel_block_id);
-        collect(inputs.kv_cache_block_id);
-        if (group_types_len) {
-            collect(inputs.kv_cache_group_types);
+    if (kv_cache_group_num != 0) {
+        for (size_t i = 0; i < inputs.kv_cache_block_ids_by_group.size(); ++i) {
+            collect(inputs.kv_cache_kernel_block_ids_by_group[i]);
+            collect(inputs.kv_cache_block_ids_by_group[i]);
         }
         if (inputs.pd_separation) {
             collect(inputs.cache_keys);
         }
-        collect(inputs.kv_cache_update_mapping);
+    }
+    if (update_wire.defined()) {
+        collect(update_wire);
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);

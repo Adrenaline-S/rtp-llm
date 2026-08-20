@@ -1,18 +1,23 @@
 from dataclasses import dataclass
+from functools import cache
 from typing import Optional
 
 import torch
+
 from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
 from libth_transformer_config import (
     AttentionConfigs,
     check_rope_cache,
     get_rope_cache_once,
 )
-from rtp_kernel.fused_rope_kvcache import (
-    convert_offset_to_block_array,
-    decode_fused_rope_kvcache,
-    prefill_fused_rope_kvcache,
-)
+
+
+@cache
+def _get_fused_rope_kvcache():
+    # Lazy: keeps import free of JIT builds; warm-up still hits this pre-readiness.
+    from rtp_kernel import fused_rope_kvcache
+
+    return fused_rope_kvcache
 
 
 @dataclass
@@ -42,7 +47,7 @@ class FusedRopeKVCachePrefillOpBase:
             attn_inputs.kv_cache_kernel_block_id_device is not None
             and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
         ):
-            kv_cache_offset = convert_offset_to_block_array(
+            kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
                 attn_inputs.kv_cache_kernel_block_id_device
             )
         else:
@@ -86,7 +91,7 @@ class FusedRopeKVCachePrefillOpBase:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
 
-        return prefill_fused_rope_kvcache(
+        return _get_fused_rope_kvcache().prefill_fused_rope_kvcache(
             qkv,
             params.cu_seqlens,
             params.cu_seqlens.size(0) - 1,
@@ -177,7 +182,7 @@ class FusedRopeKVCacheDecodeOp:
         #
         # `is not None` is sufficient here: pybind11 maps an undefined C++ torch::Tensor to
         # Python None, and the cache allocator only stores defined tensors with numel > 0
-        # (see SingleTypeKVCacheAllocator::allLayerCacheBase). MHAKVCacheSpec guarantees
+        # (see HybridPoolCoordinatorKVCacheManager::allLayerCacheBase). MHAKVCacheSpec guarantees
         # FP8 dtype always has a scale buffer, so the dummy-scale branch below is purely
         # defensive and unreachable under normal operation.
         if kv_cache.kv_scale_base is not None:
@@ -204,7 +209,7 @@ class FusedRopeKVCacheDecodeOp:
         assert params.sequence_lengths.is_cuda or params.sequence_lengths.is_pinned(), (
             "sequence_lengths must be CUDA or pinned host memory"
         )
-        return decode_fused_rope_kvcache(
+        return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
             params.sequence_lengths,
@@ -243,7 +248,7 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.kv_cache_kernel_block_id_device is not None
             and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
         )
-        kv_cache_offset = convert_offset_to_block_array(
+        kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
             attn_inputs.kv_cache_kernel_block_id_device
         )
         kv_cache_offset_h = None  # not used

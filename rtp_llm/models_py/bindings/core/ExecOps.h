@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 
 #if USING_ROCM
