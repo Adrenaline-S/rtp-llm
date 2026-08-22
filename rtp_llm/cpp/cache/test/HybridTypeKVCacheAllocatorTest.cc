@@ -1011,6 +1011,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksSharedBlocksAcrossGroup
     ASSERT_EQ(allocator->freeBlocksNum(), free_before - 6);
 
     auto batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101});
+    batch_res->cacheResource(0).setCacheKeysAndBlockDependencies(
+        CacheKeysType{100, 101}, BlockDependenciesType{{true, 900, 7}, {true, 777, 34}});
+    batch_res->cacheResource(0).setCacheKeysAreCpCanonical(true);
     batch_res->mutableBlockIds(/*batch_id=*/0, /*gid=*/0).assign({blocks[0], NULL_BLOCK_IDX, blocks[1]});
     batch_res->mutableBlockIds(/*batch_id=*/0, /*gid=*/1).assign({blocks[2], blocks[3]});
     batch_res->mutableBlockIds(/*batch_id=*/1, /*gid=*/0).assign({blocks[4]});
@@ -1027,6 +1030,17 @@ TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksSharedBlocksAcrossGroup
     ASSERT_EQ(batch_res->batchSize(), 2);
     EXPECT_EQ(batch_res->cacheKeys(0), (CacheKeysType{100, 101}));
     EXPECT_EQ(batch_res->cacheKeys(1), (CacheKeysType{100, 101}));
+    for (int batch_id = 0; batch_id < 2; ++batch_id) {
+        const auto& resource = batch_res->cacheResource(batch_id);
+        ASSERT_EQ(resource.blockDependencies().size(), 2u);
+        EXPECT_TRUE(resource.blockDependencies()[0].has_parent);
+        EXPECT_EQ(resource.blockDependencies()[0].parent_key, 900);
+        EXPECT_EQ(resource.blockDependencies()[0].ordinal, 7u);
+        EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
+        EXPECT_EQ(resource.blockDependencies()[1].parent_key, 777);
+        EXPECT_EQ(resource.blockDependencies()[1].ordinal, 34u);
+        EXPECT_TRUE(resource.cacheKeysAreCpCanonical());
+    }
     EXPECT_EQ(batch_res->blocks(0, 0), (BlockIndicesType{blocks[0], NULL_BLOCK_IDX, blocks[1]}));
     EXPECT_EQ(batch_res->blocks(0, 1), (BlockIndicesType{blocks[2], blocks[3]}));
     EXPECT_EQ(batch_res->blocks(1, 0), (BlockIndicesType{blocks[0], NULL_BLOCK_IDX, blocks[1]}));
@@ -1183,7 +1197,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{100, 101, 102};
+    const BlockDependenciesType dependencies{
+        BlockDependency{true, 900, 7},
+        BlockDependency{true, 100, 13},
+        BlockDependency{true, 777, 34},
+    };
+    resource.setCacheKeysAndBlockDependencies(CacheKeysType{100, 101, 102}, dependencies);
+    resource.setCacheKeysAreCpCanonical(true);
     resource.mutableBlockIds(/*gid=*/0).assign(
         BlockIndicesType{blocks[0], 0, blocks[1]});  // linear group (contains a 0)
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{blocks[2], blocks[3], 0});  // full group (contains a 0)
@@ -1196,6 +1216,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ASSERT_EQ(ref->cacheKeys().size(), 2u);
     ASSERT_EQ(ref->blocks(0).size(), 2u);
     ASSERT_EQ(ref->blocks(1).size(), 2u);
+    ASSERT_EQ(ref->blockDependencies().size(), 2u);
+    EXPECT_EQ(ref->blockDependencies()[0].parent_key, 100);
+    EXPECT_EQ(ref->blockDependencies()[0].ordinal, 13u);
+    EXPECT_EQ(ref->blockDependencies()[1].parent_key, 777);
+    EXPECT_EQ(ref->blockDependencies()[1].ordinal, 34u);
+    EXPECT_TRUE(ref->cacheKeysAreCpCanonical());
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2) << "Only blocks[1] and blocks[3] should remain referenced";

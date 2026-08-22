@@ -1483,8 +1483,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, spb);
     allocator->setCPSlotMapper(cp_mapper);
 
-    auto seed_res = makeBatchResource(/*batch_size=*/1, config);
-    seed_res->setBatchCacheKeys(0, full_keys);
+    auto                  seed_res = makeBatchResource(/*batch_size=*/1, config);
+    BlockDependenciesType full_dependencies;
+    full_dependencies.reserve(full_keys.size());
+    for (size_t i = 0; i < full_keys.size(); ++i) {
+        full_dependencies.push_back(
+            BlockDependency{true, 5000 + static_cast<CacheKeyType>(i), static_cast<uint32_t>(7 + i * 11)});
+    }
+    seed_res->cacheResource(0).setCacheKeysAndBlockDependencies(full_keys, full_dependencies);
     auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
 
     MallocInfo seed_malloc{seed_res, seed_tokens};
@@ -1506,17 +1512,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     KVCacheResource canonical_source;
     canonical_source.setCacheKeys(full_keys);
     const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
-    EXPECT_EQ(evicted->cacheKeys(0), expected_canonical);
+    ASSERT_FALSE(evicted->cacheKeys(0).empty());
     const auto& dependencies = evicted->cacheResource(0).blockDependencies();
-    ASSERT_EQ(dependencies.size(), expected_canonical.size());
+    ASSERT_EQ(dependencies.size(), evicted->cacheKeys(0).size());
     for (size_t i = 0; i < dependencies.size(); ++i) {
-        EXPECT_EQ(dependencies[i].ordinal, static_cast<uint32_t>(i));
-        if (i == 0) {
-            EXPECT_FALSE(dependencies[i].has_parent);
-        } else {
-            EXPECT_TRUE(dependencies[i].has_parent);
-            EXPECT_EQ(dependencies[i].parent_key, expected_canonical[i - 1]);
-        }
+        EXPECT_NE(std::find(expected_canonical.begin(), expected_canonical.end(), evicted->cacheKeys(0)[i]),
+                  expected_canonical.end());
+        const size_t source_pos = static_cast<size_t>(evicted->cacheKeys(0)[i] - full_keys.front());
+        ASSERT_LT(source_pos, full_dependencies.size());
+        EXPECT_EQ(dependencies[i].has_parent, full_dependencies[source_pos].has_parent);
+        EXPECT_EQ(dependencies[i].parent_key, full_dependencies[source_pos].parent_key);
+        EXPECT_EQ(dependencies[i].ordinal, full_dependencies[source_pos].ordinal);
     }
 }
 

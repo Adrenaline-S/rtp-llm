@@ -457,7 +457,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
 
     KVCacheResource resource;
     resource.initGroups(cache_config_.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    resource.setCacheKeys(CacheKeysType{1, 2, 3});
 
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -480,7 +480,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
 
     auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    req_resource.setCacheKeys({1, 2, 3});
 
     // No connectors registered: asyncRead() still returns a fused read context; it will contain zero match contexts
     // and will be processed/cleaned up by the coordinator update loop if enabled.
@@ -527,7 +527,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
     coordinator->connectors_ = {mock_connector};
 
     auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    req_resource.setCacheKeys({1, 2, 3});
     auto resource = makeResourceWithAutoDecr();
 
     // Don't let gmock keep a ref to `resource` until program exit.
@@ -631,7 +631,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsIn
 
     KVCacheResource resource;
     resource.initGroups(cp_cache_config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{10, 11, 12, 13};
+    resource.setCacheKeys(CacheKeysType{10, 11, 12, 13});
     resource.setLastBlockAligned(false);
     resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{100, 101});            // FULL: compact local blocks
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{200, 201, 202, 203});  // SWA: full logical slots
@@ -682,15 +682,14 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonic
 
     KVCacheResource resource;
     resource.initGroups(cp_cache_config.topologyPtr());
-    resource.setCacheKeys(CacheKeysType{11, 13});
-    resource.setCacheKeysAreCpCanonical(true);
     BlockDependency root_dep;
     root_dep.ordinal = 0;
     BlockDependency child_dep;
     child_dep.has_parent = true;
     child_dep.parent_key = 11;
     child_dep.ordinal    = 1;
-    resource.setBlockDependencies(BlockDependenciesType{root_dep, child_dep});
+    resource.setCacheKeysAndBlockDependencies(CacheKeysType{11, 13}, BlockDependenciesType{root_dep, child_dep});
+    resource.setCacheKeysAreCpCanonical(true);
     resource.setLastBlockAligned(true);
     resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{100, 101});
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{201, 203});
@@ -749,7 +748,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGro
 
     KVCacheResource resource;
     resource.initGroups(cp_cache_config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{10, 11, 12, 13};
+    resource.setCacheKeys(CacheKeysType{10, 11, 12, 13});
     resource.setLastBlockAligned(false);
     resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{100, 101});
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{200, 201});
@@ -803,7 +802,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndC
 
     KVCacheResource resource;
     resource.initGroups(cp_cache_config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{10, 11, 12, 13, 14};
+    resource.setCacheKeys(CacheKeysType{10, 11, 12, 13, 14});
     resource.setLastBlockAligned(false);
     resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{100, 101, 102, 103, 104});
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{200, 201, 202});
@@ -859,7 +858,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedAppendsDummyTailWhen
 
     KVCacheResource resource;
     resource.initGroups(cp_cache_config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{10, 11, 12, 13, 14};
+    resource.setCacheKeys(CacheKeysType{10, 11, 12, 13, 14});
     resource.setLastBlockAligned(false);
     resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{100, 101, 102});
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{200, 201, 202, 203, 204});
@@ -901,7 +900,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRef
     // Build a connector context with non-empty cache keys.
     auto ctx_resource = std::make_shared<KVCacheResource>();
     ctx_resource->initGroups(cache_config_.topologyPtr());
-    ctx_resource->cacheKeys()    = CacheKeysType{1, 2, 3};
+    ctx_resource->setCacheKeys(CacheKeysType{1, 2, 3});
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
         std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
@@ -926,7 +925,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenMemory
 
     KVCacheResource resource;
     resource.initGroups(cache_config_.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    resource.setCacheKeys(CacheKeysType{1, 2, 3});
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
@@ -965,7 +964,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenConnec
 
     KVCacheResource resource;
     resource.initGroups(cache_config_.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    resource.setCacheKeys(CacheKeysType{1, 2, 3});
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
@@ -1005,7 +1004,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
 
     KVCacheResource resource;
     resource.initGroups(cache_config_.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    resource.setCacheKeys(CacheKeysType{1, 2, 3});
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
@@ -1039,7 +1038,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
 
     auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    req_resource.setCacheKeys({1, 2, 3});
     auto resource = makeResourceWithAutoDecr();
 
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
@@ -1076,7 +1075,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenH
     coordinator->connectors_ = {mock_connector};
 
     auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    req_resource.setCacheKeys({1, 2, 3});
     auto resource = makeResourceWithAutoDecr();
 
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);

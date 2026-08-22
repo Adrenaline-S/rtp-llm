@@ -724,7 +724,6 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     autil::ScopedTime2 timer;
 
     if (use_prefix_tree) {
-        resource->ensureLinearBlockDependencies();
         size_t matched_num  = already_reuse_num;
         bool   matched_disk = false;
         for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
@@ -992,7 +991,6 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     }
     if (!copy_plan) {
         if (use_prefix_tree) {
-            resource->ensureLinearBlockDependencies();
             copy_plan = buildPrefixCopyPlanForRead(cache_keys,
                                                    resource->blockDependencies(),
                                                    layer_attn_block_ids,
@@ -1324,7 +1322,6 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     }
 
     if (use_prefix_tree) {
-        resource->ensureLinearBlockDependencies();
         bool no_need_write = false;
         auto copy_plan     = buildPrefixCopyPlanForWrite(cache_keys,
                                                      resource->blockDependencies(),

@@ -600,7 +600,7 @@ private:
                       const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                       size_t                                        reuse_len = 0) const {
         auto res               = std::make_shared<KVCacheResource>();
-        res->cacheKeys()       = cache_keys;
+        res->setCacheKeys(cache_keys);
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         res->initGroups(cache_config_.topologyPtr());
         const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
@@ -628,7 +628,7 @@ private:
                                                              const std::vector<BlockIdxType>& group1_blocks,
                                                              size_t                           reuse_len = 0) const {
         auto res         = std::make_shared<KVCacheResource>();
-        res->cacheKeys() = cache_keys;
+        res->setCacheKeys(cache_keys);
         (void)group1_blocks;
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         RTP_LLM_CHECK_WITH_INFO(layer_num == 4, "test helper expects 4 layers, got %zu", layer_num);
@@ -1354,7 +1354,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
 
     auto make_resource = [&](CacheKeyType key, bool compressed_required, bool state_required) {
         auto res = std::make_shared<KVCacheResource>();
-        res->cacheKeys() = {key};
+        res->setCacheKeys({key});
         res->initGroups(cfg.topologyPtr());
         for (int layer = 0; layer < static_cast<int>(cfg.layer_all_num); ++layer) {
             for (const auto& tag : layerTagsOf(cfg, layer)) {
@@ -1373,7 +1373,6 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
         set_if(state_required, 1, "indexer_state", 32);
         set_if(state_required, 1, "csa_state", 33);
         set_if(state_required, 1, "swa_kv", 34);
-        res->ensureLinearBlockDependencies();
         res->setLastBlockAligned(true);
         return res;
     };
@@ -1570,7 +1569,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsPartialMe
     }
 
     auto resource         = std::make_shared<KVCacheResource>();
-    resource->cacheKeys() = {key};
+    resource->setCacheKeys({key});
     resource->initGroups(cfg.topologyPtr());
     for (int layer = 0; layer < static_cast<int>(cfg.layer_all_num); ++layer) {
         for (const auto& tag : layerTagsOf(cfg, layer)) {
@@ -1578,7 +1577,6 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsPartialMe
         }
     }
     resource->mutableBlockIdsForLayer(1, "csa_state").assign({7001});
-    resource->ensureLinearBlockDependencies();
     resource->setLastBlockAligned(true);
 
     auto layer_blocks = conn->resourceLayerRegionBlocks(*resource, slots);
@@ -1690,7 +1688,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
     }
 
     auto resource         = std::make_shared<KVCacheResource>();
-    resource->cacheKeys() = {key};
+    resource->setCacheKeys({key});
     resource->initGroups(cfg.topologyPtr());
     for (int layer = 0; layer < static_cast<int>(cfg.layer_all_num); ++layer) {
         for (const auto& tag : layerTagsOf(cfg, layer)) {
@@ -1698,7 +1696,6 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
         }
     }
     resource->mutableBlockIdsForLayer(1, "csa_state").assign({7001});
-    resource->ensureLinearBlockDependencies();
     resource->setLastBlockAligned(true);
 
     auto layer_blocks = conn->resourceLayerRegionBlocks(*resource, slots);
@@ -1748,7 +1745,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
 
     CacheKeysType cache_keys{83001, 83002, 83999};
     auto          resource = std::make_shared<KVCacheResource>();
-    resource->cacheKeys()  = cache_keys;
+    resource->setCacheKeys(cache_keys);
     resource->initGroups(cfg.topologyPtr());
     for (const auto& slot : slots) {
         resource->mutableBlockIdsForLayer(slot.layer_id, slot.tag)
@@ -1756,7 +1753,6 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
                      static_cast<BlockIdxType>(200 + slot.group_id),
                      static_cast<BlockIdxType>(300 + slot.group_id)});
     }
-    resource->ensureLinearBlockDependencies();
     resource->setLastBlockAligned(false);
 
     auto layer_blocks = conn->resourceLayerRegionBlocks(*resource, slots);
@@ -1836,7 +1832,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     EXPECT_EQ(slots[1].stride_bytes, 32u);
 
     auto resource         = std::make_shared<KVCacheResource>();
-    resource->cacheKeys() = {101, 102, 103};
+    resource->setCacheKeys({101, 102, 103});
     resource->initGroups(cfg.topologyPtr());
     resource->mutableBlockIds(/*group_id=*/0).assign({11, 12, 13});
     resource->mutableBlockIds(/*group_id=*/1).assign({21, NULL_BLOCK_IDX, 23});
@@ -1878,7 +1874,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
     EXPECT_TRUE(conn->supportsTypedPrefixCacheLayout(slots));
 
     auto resource         = std::make_shared<KVCacheResource>();
-    resource->cacheKeys() = {1001, 1002};
+    resource->setCacheKeys({1001, 1002});
     resource->initGroups(cfg.topologyPtr());
     resource->mutableBlockIdsForLayer(0, "hca_kv").assign({11, 12});
     resource->mutableBlockIdsForLayer(0, "hca_state").assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
@@ -2076,7 +2072,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
     // uninitialized legacy layer view
     // NOTE: asyncRead always skips the last cache_key (cache_keys.size() - 1), so keep size >= 2 here.
     auto res_empty_lbs         = std::make_shared<KVCacheResource>();
-    res_empty_lbs->cacheKeys() = {1, 2};
+    res_empty_lbs->setCacheKeys({1, 2});
     auto ctx_empty_lbs =
         connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
     EXPECT_EQ(ctx_empty_lbs, nullptr);
@@ -2445,7 +2441,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
 
     // uninitialized legacy layer view
     auto res_empty_lbs         = std::make_shared<KVCacheResource>();
-    res_empty_lbs->cacheKeys() = {1};
+    res_empty_lbs->setCacheKeys({1});
     res_empty_lbs->setLastBlockAligned(true);
     auto ctx_empty_lbs = connector_->asyncWrite(res_empty_lbs, meta);
     EXPECT_EQ(ctx_empty_lbs, nullptr);
@@ -3448,7 +3444,7 @@ protected:
             set_layer_blocks(l, swa_gid, swa_blocks);
         }
 
-        res->cacheKeys() = cache_keys;
+        res->setCacheKeys(cache_keys);
         res->setDeviceReuseBlockNum(reuse_len);
         res->setLastBlockAligned(true);
         return res;
