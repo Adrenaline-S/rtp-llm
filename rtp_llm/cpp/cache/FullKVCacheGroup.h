@@ -8,7 +8,7 @@ namespace rtp_llm {
 
 class FullKVCacheGroup: public KVCacheGroup {
 public:
-    FullKVCacheGroup(const GroupBase&                    cache_group,
+    FullKVCacheGroup(const CacheGroup&                    cache_group,
                      BlockPoolPtr                        block_pool,
                      SharedBlockCache*                   shared_cache     = nullptr,
                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):

@@ -33,7 +33,7 @@ struct NormalModelInputGathererConfig {
     size_t                          kernel_seq_size_per_block{};
     size_t                          kernel_blocks_per_kv_block = 1;
     bool                            use_opaque_kv_cache_store  = false;
-    std::unordered_map<std::string, GroupBase> kv_cache_groups;
+    std::unordered_map<std::string, CacheGroup> kv_cache_groups;
     bool                            warm_up{};
     bool                            enable_detail_log{};
     bool                            enable_model_inputs_log{};

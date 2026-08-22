@@ -16,7 +16,7 @@ class KVCacheAllocator;
 
 namespace remote_connector {
 
-void validateRemoteCacheTopology(const CacheConfig& cache_config);
+void validateRemoteCacheConfig(const CacheConfig& cache_config);
 
 // Semantic tags of every FULL cache group in the finalized plan, in the plan's
 // own order. Remote transfer accepts exactly one of them.

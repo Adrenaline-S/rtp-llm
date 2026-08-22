@@ -27,6 +27,13 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
 
 class CacheConfigCreator {
 public:
+    static CacheConfig buildResolvedConfig(ResolvedCacheConfigData data);
+
+    // Returns a finalized value; config and all of its MTP descendants remain unchanged.
+    static CacheConfig finalizeBlockNums(const CacheConfig&  config,
+                                         uint32_t            global_block_num,
+                                         const RuntimeConfig& runtime_config);
+
     // Owns all production descriptor lowering. The legacy creator classes are
     // retained only as test oracles until their Task 9 deletion.
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,

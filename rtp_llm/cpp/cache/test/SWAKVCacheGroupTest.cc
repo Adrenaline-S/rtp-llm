@@ -33,19 +33,19 @@ CacheGroupPolicy makePolicy(bool skip_prefix_reuse = false) {
     return policy;
 }
 
-GroupBase makeSwaGroupConfig(std::string tag, KVCacheSpecPtr spec, CacheGroupPolicy policy) {
-    GroupBase group;
+CacheGroup makeSwaGroupConfig(std::string tag, KVCacheSpecPtr spec, CacheGroupPolicy policy) {
+    CacheGroup group;
     group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
+    group.layout.spec                      = std::move(spec);
     group.policy                    = policy;
-    group.seq_size_per_block        = group.spec->seq_size_per_block;
-    group.kernel_seq_size_per_block = group.seq_size_per_block;
-    group.kv_block_stride_bytes     = group.spec->block_size_bytes();
-    group.kv_scale_stride_bytes     = group.spec->scale_block_size_bytes();
+    group.layout.seq_size_per_block        = group.layout.spec->seq_size_per_block;
+    group.layout.kernel_seq_size_per_block = group.layout.seq_size_per_block;
+    group.layout.kv_block_stride_bytes     = group.layout.spec->block_size_bytes();
+    group.layout.kv_scale_stride_bytes     = group.layout.spec->scale_block_size_bytes();
     return group;
 }
 
-GroupBase makeTaggedGroup(std::string tag, int layer_id) {
+CacheGroup makeTaggedGroup(std::string tag, int layer_id) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 1;
     auto group               = makeSwaGroupConfig(std::move(tag), std::move(spec), makePolicy());
@@ -70,7 +70,7 @@ protected:
         total_blocks_ = block_pool_->freeBlocksNum();
         shared_cache_ = std::make_shared<SharedBlockCache>();
         CacheConfig config;
-        config.setTopology(
+        rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config,
             {makeTaggedGroup("swa", 0), makeTaggedGroup("hca_state", 1), makeTaggedGroup("csa_state", 2)},
             {{0, {"swa"}}, {1, {"hca_state"}}, {2, {"csa_state"}}});
         shared_cache_->init(config, {{"csa_state", block_pool_}, {"swa", block_pool_}, {"hca_state", block_pool_}});
@@ -104,7 +104,7 @@ protected:
         return SWAKVCacheGroup(group_configs_.back(), std::move(block_pool), linear_step, shared_cache);
     }
 
-    std::deque<GroupBase> group_configs_;
+    std::deque<CacheGroup> group_configs_;
     BlockPoolPtr          block_pool_;
     SharedBlockCachePtr   shared_cache_;
     size_t                total_blocks_ = 0;

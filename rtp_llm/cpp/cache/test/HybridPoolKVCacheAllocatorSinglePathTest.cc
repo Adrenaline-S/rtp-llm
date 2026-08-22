@@ -505,12 +505,12 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, InsertIntoCacheAsResident) {
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     auto config   = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
     std::vector<CacheGroupPolicy> policies;
-    for (const auto& group : config.topology().groups()) {
+    for (const auto& group : config.groups()) {
         policies.push_back(group.policy);
     }
     ASSERT_EQ(policies.size(), 1u);
     policies[0].enable_prefix_reuse = false;
-    config.setGroupPolicies(policies);
+    rtp_llm::test::TestCacheConfigBuilder::setGroupPolicies(config, policies);
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator_        = std::make_shared<HybridPoolKVCacheAllocator>(config);
@@ -727,12 +727,13 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, LayerCacheBase) {
 
     auto layout = allocator_->allLayerCacheBase();
     ASSERT_EQ(layout.groups().size(), 1u);
-    ASSERT_EQ(layout.topology().layers().size(), 4u);
-    for (const auto& layer : layout.topology().layers()) {
-        EXPECT_EQ(layer.group_tags, std::vector<std::string>{"default"}) << "layer " << layer.layer_id;
+    ASSERT_EQ(layout.layerCount(), 4u);
+    for (size_t layer_id = 0; layer_id < layout.layerCount(); ++layer_id) {
+        EXPECT_EQ(layout.groupTagsForLayer(static_cast<int>(layer_id)), std::vector<std::string>{"default"})
+            << "layer " << layer_id;
     }
-    EXPECT_EQ(layout.topology().groups().size(), 1u);
-    EXPECT_EQ(layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(layout.groups().size(), 1u);
+    EXPECT_EQ(layout.groupType("default"), CacheGroupType::FULL);
     const auto& default_layout = layout.group("default");
     EXPECT_EQ(default_layout.size(), config.layer_num);
     EXPECT_EQ(default_layout.activeLayerCount(), config.layer_num);
@@ -759,8 +760,8 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, ManagerLayoutsPreserveSingleTyp
     auto verify_layout = [](const GroupedCacheLayerLayout& local_layout,
                             const GroupedCacheLayerLayout& all,
                             size_t                         global_begin) {
-        ASSERT_EQ(local_layout.topology().groups().size(), 1u);
-        ASSERT_EQ(local_layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+        ASSERT_EQ(local_layout.groups().size(), 1u);
+        ASSERT_EQ(local_layout.groupType("default"), CacheGroupType::FULL);
         const auto& local_group = local_layout.group("default");
         const auto& all_group   = all.group("default");
         for (size_t local_layer = 0; local_layer < local_group.size(); ++local_layer) {
@@ -796,7 +797,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, BlockCopySingle) {
     int src_block = 0;
     int dst_block = 1;
 
-    auto&  spec         = config.group("default").spec;
+    auto&  spec         = config.group("default").layout.spec;
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -852,7 +853,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, BlockBatchCopyVector) {
     copy_mapping.push_back({2, 3});
     copy_mapping.push_back({4, 5});
 
-    auto&  spec         = config.group("default").spec;
+    auto&  spec         = config.group("default").layout.spec;
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -919,11 +920,11 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, BlockBatchCopyCopiesCompleteSpa
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
     auto config                = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
-    config.finalizeBlockNums(/*global_block_num=*/4, RuntimeConfig{});
+    config = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/4, RuntimeConfig{});
 
     ASSERT_TRUE(config.is_sparse);
     ASSERT_GT(config.kv_scale_stride_bytes, 0u);
-    ASSERT_EQ(config.kv_scale_stride_bytes, config.group("default").kv_scale_stride_bytes);
+    ASSERT_EQ(config.kv_scale_stride_bytes, config.group("default").layout.kv_scale_stride_bytes);
 
     allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
@@ -978,7 +979,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, BlockBatchCopyPointers) {
 
     BlockIdPair pairs[] = {{0, 1}, {2, 3}};
 
-    auto&  spec         = config.group("default").spec;
+    auto&  spec         = config.group("default").layout.spec;
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -1027,7 +1028,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, BlockBatchCopyBuffer) {
     std::vector<int32_t> data   = {0, 1, 2, 3, 4, 5};  // 3 pairs: (0->1, 2->3, 4->5)
     auto                 tensor = torch::from_blob(data.data(), {3, 2}, torch::kInt32).clone();
 
-    auto&  spec         = config.group("default").spec;
+    auto&  spec         = config.group("default").layout.spec;
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 

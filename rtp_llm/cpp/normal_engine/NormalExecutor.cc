@@ -33,8 +33,8 @@ std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor& map
                                 && mapping.is_contiguous() && mapping.dim() == 2 && mapping.size(1) == 3,
                             "kv_cache_update_mapping must be a contiguous CPU int32 [copies, 3] matrix");
     std::vector<std::string> tags;
-    tags.reserve(cache_config.topology().groups().size());
-    for (const auto& group : cache_config.topology().groups()) {
+    tags.reserve(cache_config.groups().size());
+    for (const auto& group : cache_config.groups()) {
         tags.push_back(group.tag);
     }
     const auto sorted_tags = sortedCacheGroupTags(tags, "cache update mapping");

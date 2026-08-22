@@ -11,12 +11,12 @@ void KVCacheResource::initGroups(const CacheConfig& config) {
     layer_group_tags_.clear();
     blocks_by_tag_.clear();
 
-    const auto& groups = config.topology().groups();
+    const auto& groups = config.groups();
 
     for (const auto& group : groups) {
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "KVCacheResource requires a non-empty cache group tag");
 
-        const size_t blocks_per_kv_block = group.seq_size_per_block / group.kernel_seq_size_per_block;
+        const size_t blocks_per_kv_block = group.layout.seq_size_per_block / group.layout.kernel_seq_size_per_block;
         const size_t stored_blocks_per_kv_block =
             group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
         RTP_LLM_CHECK_WITH_INFO(
@@ -25,7 +25,7 @@ void KVCacheResource::initGroups(const CacheConfig& config) {
             group.tag.c_str());
     }
 
-    const auto& layers = config.topology().layers();
+    const auto& layers = config.layerMemberships();
     layer_group_tags_.reserve(layers.size());
     for (const auto& layer : layers) {
         for (const auto& tag : layer.group_tags) {

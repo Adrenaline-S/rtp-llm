@@ -25,27 +25,27 @@ static std::shared_ptr<LinearKVCacheSpec> makeTestLinearSpec(uint32_t seq_size_p
                                   "linear");
 }
 
-static const GroupBase& makeTestLinearGroup(KVCacheSpecPtr   spec,
+static const CacheGroup& makeTestLinearGroup(KVCacheSpecPtr   spec,
                                             CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)) {
-    static std::deque<GroupBase> groups;
-    GroupBase                    group;
+    static std::deque<CacheGroup> groups;
+    CacheGroup                    group;
     group.tag                       = "linear";
-    group.spec                      = std::move(spec);
+    group.layout.spec                      = std::move(spec);
     group.policy                    = policy;
-    group.seq_size_per_block        = group.spec->seq_size_per_block;
-    group.kernel_seq_size_per_block = group.seq_size_per_block;
-    group.kv_block_stride_bytes     = group.spec->block_size_bytes();
-    group.kv_scale_stride_bytes     = group.spec->scale_block_size_bytes();
+    group.layout.seq_size_per_block        = group.layout.spec->seq_size_per_block;
+    group.layout.kernel_seq_size_per_block = group.layout.seq_size_per_block;
+    group.layout.kv_block_stride_bytes     = group.layout.spec->block_size_bytes();
+    group.layout.kv_scale_stride_bytes     = group.layout.spec->scale_block_size_bytes();
     groups.push_back(std::move(group));
     return groups.back();
 }
 
 static CacheConfig makeLinearCacheConfig() {
     auto      spec  = makeTestLinearSpec(/*seq_size_per_block=*/4);
-    GroupBase group = makeTestLinearGroup(spec);
+    CacheGroup group = makeTestLinearGroup(spec);
     group.layer_ids = {0};
     CacheConfig config;
-    config.setTopology({std::move(group)}, {{0, {"linear"}}});
+    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, {std::move(group)}, {{0, {"linear"}}});
     return config;
 }
 

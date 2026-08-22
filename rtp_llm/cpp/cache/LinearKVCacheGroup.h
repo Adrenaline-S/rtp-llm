@@ -10,7 +10,7 @@ namespace rtp_llm {
 
 class LinearKVCacheGroup: public KVCacheGroup {
 public:
-    LinearKVCacheGroup(const GroupBase&                    cache_group,
+    LinearKVCacheGroup(const CacheGroup&                    cache_group,
                        BlockPoolPtr                        block_pool,
                        int                                 linear_step      = 0,
                        SharedBlockCache*                   shared_cache     = nullptr,

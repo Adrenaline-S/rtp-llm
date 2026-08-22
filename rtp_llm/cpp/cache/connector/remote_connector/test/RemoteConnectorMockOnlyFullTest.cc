@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 #include <stdio.h>
 
@@ -142,7 +143,8 @@ private:
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
-        cache_config_.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        cache_config_ = buildTestCacheConfigFromGroupedSpecs(
+            std::move(cache_config_), {mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
     }
 };
 
@@ -150,9 +152,11 @@ private:
 TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAndBuildsFullPolicy) {
     CacheConfig hybrid_config                 = cache_config_;
     hybrid_config.use_independent_block_pools = true;
-    hybrid_config.setGroupBlockLayout({hybrid_config.block_num},
-                                      {hybrid_config.group("default").spec->block_size_bytes()},
-                                      {hybrid_config.group("default").spec->scale_block_size_bytes()});
+    const auto hybrid_block_num = hybrid_config.block_num;
+    const auto hybrid_kv_stride = hybrid_config.group("default").layout.spec->block_size_bytes();
+    const auto hybrid_scale_stride = hybrid_config.group("default").layout.spec->scale_block_size_bytes();
+    hybrid_config = TestCacheConfigBuilder::withGroupBlockLayout(
+        std::move(hybrid_config), {hybrid_block_num}, {hybrid_kv_stride}, {hybrid_scale_stride});
 
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(hybrid_config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -250,7 +254,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     {
         // 没有其他connector
         UriStrVec          expected_uris        = genUris({1, 2, 3});
-        BlockBuffersExpect block_buffers_expect = {3, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
+        BlockBuffersExpect block_buffers_expect = {
+            3, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"1", "2", "3"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -276,7 +281,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     {
         // 其他connector也命中了部分
         UriStrVec          expected_uris        = genUris({2, 3});
-        BlockBuffersExpect block_buffers_expect = {2, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
+        BlockBuffersExpect block_buffers_expect = {
+            2, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"2", "3"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -341,7 +347,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     {
         // 没有其他connector
         UriStrVec          expected_uris        = genUris({2, 3});
-        BlockBuffersExpect block_buffers_expect = {2, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
+        BlockBuffersExpect block_buffers_expect = {
+            2, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"2", "3"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -364,7 +371,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     {
         // 有其他connector
         UriStrVec          expected_uris        = genUris({3});
-        BlockBuffersExpect block_buffers_expect = {1, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
+        BlockBuffersExpect block_buffers_expect = {
+            1, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"3"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -425,7 +433,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
     UriStrVec expected_uris = genUris({1, 2, 3});
     UriStrVec actual_uris   = genUris({1, 2, 3}, {}, "actual_");
 
-    BlockBuffersExpect block_buffers_expect = {3, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
+    BlockBuffersExpect block_buffers_expect = {
+        3, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
     std::vector<std::string> expect_block_ids({"1", "2", "3"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -471,7 +480,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     UriStrVec expected_uris = genUris({2, 3});
     UriStrVec actual_uris   = genUris({2, 3}, {}, "actual_");
 
-    BlockBuffersExpect block_buffers_expect = {2, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
+    BlockBuffersExpect block_buffers_expect = {
+        2, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
     std::vector<std::string> expect_block_ids({"2", "3"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -518,7 +528,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     UriStrVec expected_uris = genUris({2, 4});
     UriStrVec actual_uris   = genUris({2, 4}, {}, "actual_");
 
-    BlockBuffersExpect block_buffers_expect = {2, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
+    BlockBuffersExpect block_buffers_expect = {
+        2, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
     std::vector<std::string> expect_block_ids({"2", "4"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -590,7 +601,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
 
     UriStrVec expected_uris = genUris({1, 2, 3});
 
-    BlockBuffersExpect block_buffers_expect = {3, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
+    BlockBuffersExpect block_buffers_expect = {
+        3, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
     std::vector<std::string> expect_block_ids({"1", "2", "3"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),

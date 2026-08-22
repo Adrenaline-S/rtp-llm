@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
@@ -26,18 +26,14 @@ const CacheConfig& warmupCacheConfig() {
         constexpr auto kWarmupCacheTag = "__warmup__";
         auto           spec            = std::make_shared<MHAKVCacheSpec>();
 
-        GroupBase group;
-        group.tag                       = kWarmupCacheTag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
-
-        CacheConfig config;
-        config.layer_num = 1;
-        config.setTopology({std::move(group)}, {{0, {kWarmupCacheTag}}});
-        return config;
+        CacheGroup group;
+        group.tag                                = kWarmupCacheTag;
+        group.layout.spec                        = std::move(spec);
+        group.policy                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.layer_ids                          = {0};
+        group.layout.seq_size_per_block          = 1;
+        group.layout.kernel_seq_size_per_block   = 1;
+        return CacheConfigCreator::buildResolvedConfig({{std::move(group)}, {{0, {kWarmupCacheTag}}}});
     }();
     return config;
 }
@@ -992,8 +988,8 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    const auto& topology = resource_context_.cache_manager->cacheConfig().topology();
-    for (const auto& group : topology.groups()) {
+    const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+    for (const auto& group : cache_config.groups()) {
         if (group.policy.group_type == CacheGroupType::LINEAR) {
             batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
         }

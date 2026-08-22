@@ -112,24 +112,22 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     ASSERT_GT(cache_cfg.groupNums(), 0);
     ASSERT_EQ(cache_cfg.soleGroupForLayer(0).layer_ids.size(), static_cast<size_t>(cache_cfg.layer_all_num));
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->groupNums(), 1);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->groupNums(), 1);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->soleGroupForLayer(0).spec->block_size_bytes(),
-              cache_cfg.mtp_sub_configs[1]->soleGroupForLayer(0).spec->block_size_bytes());
+    ASSERT_EQ(cache_cfg.mtpModuleCount(), 2u);
+    ASSERT_EQ(cache_cfg.mtpModule(0).groupNums(), 1);
+    ASSERT_EQ(cache_cfg.mtpModule(1).groupNums(), 1);
+    EXPECT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).layout.spec->block_size_bytes(),
+              cache_cfg.mtpModule(1).soleGroupForLayer(0).layout.spec->block_size_bytes());
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->soleGroupForLayer(0).layer_ids.size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->soleGroupForLayer(0).layer_ids.size(), 1u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->soleGroupForLayer(0).layer_ids[0], 0);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->soleGroupForLayer(0).layer_ids[0], 0);
+    ASSERT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).layer_ids.size(), 1u);
+    ASSERT_EQ(cache_cfg.mtpModule(1).soleGroupForLayer(0).layer_ids.size(), 1u);
+    EXPECT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).layer_ids[0], 0);
+    EXPECT_EQ(cache_cfg.mtpModule(1).soleGroupForLayer(0).layer_ids[0], 0);
 
     RuntimeConfig runtime_config;
-    cache_cfg.finalizeBlockNums(/*global_block_num=*/3, runtime_config);
+    cache_cfg = CacheConfigCreator::finalizeBlockNums(cache_cfg, /*global_block_num=*/3, runtime_config);
     EXPECT_EQ(cache_cfg.block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 3u);
+    EXPECT_EQ(cache_cfg.mtpModule(0).block_num, 3u);
+    EXPECT_EQ(cache_cfg.mtpModule(1).block_num, 3u);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
@@ -220,11 +218,9 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 4u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 4u);
+    ASSERT_EQ(cache_cfg.mtpModuleCount(), 2u);
+    ASSERT_EQ(cache_cfg.mtpModule(0).block_num, 4u);
+    ASSERT_EQ(cache_cfg.mtpModule(1).block_num, 4u);
 
     // Shared default pool follows the main cache_config.block_num after TP sync.
     // MTP sub-config block_num may still contain the pre-sync local value.

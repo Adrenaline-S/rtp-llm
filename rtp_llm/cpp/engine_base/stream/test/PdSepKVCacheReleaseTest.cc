@@ -258,7 +258,7 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
     config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
     config.kv_block_stride_bytes     = kv_stride;
     config.kv_scale_stride_bytes     = kv_scale_stride;
-    config.setGroupBlockLayout({kBlockNum}, {kv_stride}, {kv_scale_stride});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, {kBlockNum}, {kv_stride}, {kv_scale_stride});
     return config;
 }
 
@@ -1137,7 +1137,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     ASSERT_EQ(resource.kvCache().groupNums(), kDsv4PoolNum);
     ASSERT_GT(resource.curBlocksNum(), 0);
     ASSERT_EQ(config.groupNums(), kDsv4PoolNum);
-    for (const auto& group : config.topology().groups()) {
+    for (const auto& group : config.groups()) {
         const auto& tag = group.tag;
         ASSERT_EQ(resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
         const auto&  blocks = resource.kvCache().blocks(0, tag);
@@ -1294,14 +1294,14 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     size_t expected_requests = 0;
     size_t expected_blocks   = 0;
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ++expected_requests;
             expected_blocks += dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0).size();
         }
     }
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, tag)[block_pos];
@@ -1319,7 +1319,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
 
@@ -1331,7 +1331,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
-            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seq_size_per_block);
+            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).layout.seq_size_per_block);
             layer_cache.layer_id           = layer_id;
             layer_cache.tag                = tag;
 
@@ -1377,7 +1377,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, tag)[block_pos];
@@ -1435,7 +1435,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
     const auto& cache_config = prefill_manager->cacheConfig();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, tag)[block_pos];
@@ -1453,7 +1453,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
 
@@ -1486,7 +1486,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     const std::string csa_tag = "csa_kv";
     const auto first_csa_key = "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[0]), /*layer_id=*/2, "csa_kv");
     ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
-    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(), cache_config.group(csa_tag).kv_block_stride_bytes);
+    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(), cache_config.group(csa_tag).layout.kv_block_stride_bytes);
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -1515,7 +1515,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     ASSERT_TRUE(status.ok()) << status.ToString();
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, tag)[block_pos];
@@ -1578,14 +1578,14 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     size_t expected_requests = 0;
     size_t expected_blocks   = 0;
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ++expected_requests;
             expected_blocks += dsv4TransferPositions(cache_config, tag, block_num, reuse_num).size();
         }
     }
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, reuse_num);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, tag)[block_pos];
@@ -1603,7 +1603,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
 
@@ -1615,7 +1615,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
-            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seq_size_per_block);
+            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).layout.seq_size_per_block);
             layer_cache.layer_id           = layer_id;
             layer_cache.tag                = tag;
 
@@ -1661,7 +1661,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (const auto& tag : cache_config.groupsForLayer(layer_id)) {
+for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             auto positions = dsv4TransferPositions(cache_config, tag, block_num, reuse_num);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, tag)[block_pos];

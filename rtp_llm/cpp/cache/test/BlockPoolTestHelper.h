@@ -7,6 +7,7 @@
 #include <string>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -122,10 +123,10 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
 
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    auto groups                 = cache_config.topology().groups();
-    groups[0].local_kv_head_num = test_spec->local_kv_head_num;
-    cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    auto groups                 = cache_config.groups();
+    groups[0].layout.local_kv_head_num = test_spec->local_kv_head_num;
+    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(cache_config, std::move(groups), cache_config.layerMemberships());
 
     return BlockPoolConfigHelper::createConfig(cache_config);
 }

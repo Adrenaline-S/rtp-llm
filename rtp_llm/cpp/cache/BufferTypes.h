@@ -9,7 +9,7 @@
 
 #include <torch/extension.h>
 
-#include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -65,30 +65,33 @@ private:
     size_t                          active_layer_count_ = 0;
 };
 
-// Canonical KV-cache buffer layout: semantic group tag -> dense all-layer
-// layout. CacheTopology is the sole owner of group metadata and numeric group ids.
+// Immutable memory-layout projection built once from a resolved CacheConfig.
 class GroupedCacheLayerLayout {
 public:
     using GroupLayouts = std::map<std::string, CacheLayerLayout>;
 
     GroupedCacheLayerLayout() = default;
 
-    GroupedCacheLayerLayout(std::shared_ptr<const CacheTopology> topology, GroupLayouts groups):
-        topology_(std::move(topology)), groups_(std::move(groups)) {
-        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "GroupedCacheLayerLayout requires a topology");
-        RTP_LLM_CHECK_WITH_INFO(groups_.size() == topology_->groups().size(),
-                                "GroupedCacheLayerLayout group count=%zu topology count=%zu",
+    GroupedCacheLayerLayout(const CacheConfig& config, GroupLayouts groups): groups_(std::move(groups)) {
+        RTP_LLM_CHECK_WITH_INFO(groups_.size() == config.groups().size(),
+                                "GroupedCacheLayerLayout group count=%zu config count=%zu",
                                 groups_.size(),
-                                topology_->groups().size());
-        for (const auto& group_config : topology_->groups()) {
+                                config.groups().size());
+        layer_group_tags_.reserve(config.layerMemberships().size());
+        for (const auto& layer : config.layerMemberships()) {
+            layer_group_tags_.push_back(layer.group_tags);
+        }
+        for (const auto& group_config : config.groups()) {
             const auto it = groups_.find(group_config.tag);
             RTP_LLM_CHECK_WITH_INFO(
-                it != groups_.end(), "GroupedCacheLayerLayout missing topology tag=%s", group_config.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(it->second.size() == topology_->layers().size(),
-                                    "GroupedCacheLayerLayout tag=%s layer count=%zu topology count=%zu",
+                it != groups_.end(), "GroupedCacheLayerLayout missing config tag=%s", group_config.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(it->second.size() == layer_group_tags_.size(),
+                                    "GroupedCacheLayerLayout tag=%s layer count=%zu config count=%zu",
                                     group_config.tag.c_str(),
                                     it->second.size(),
-                                    topology_->layers().size());
+                                    layer_group_tags_.size());
+            group_layouts_.emplace(group_config.tag, group_config.layout);
+            group_types_.emplace(group_config.tag, group_config.policy.group_type);
         }
     }
 
@@ -130,19 +133,40 @@ public:
         return !group(tag).empty();
     }
 
-    const CacheTopology& topology() const {
-        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "GroupedCacheLayerLayout has no topology");
-        return *topology_;
+    const std::vector<std::string>& groupTagsForLayer(int layer_id) const {
+        RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_group_tags_.size(),
+                                "GroupedCacheLayerLayout invalid layer=%d size=%zu",
+                                layer_id,
+                                layer_group_tags_.size());
+        return layer_group_tags_[static_cast<size_t>(layer_id)];
     }
 
-    const std::shared_ptr<const CacheTopology>& topologyPtr() const {
-        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "GroupedCacheLayerLayout has no topology");
-        return topology_;
+    size_t layerCount() const noexcept {
+        return layer_group_tags_.size();
+    }
+
+    const CacheGroupLayout& groupLayout(std::string_view tag) const {
+        const std::string value(tag);
+        const auto        it = group_layouts_.find(value);
+        RTP_LLM_CHECK_WITH_INFO(it != group_layouts_.end(),
+                                "GroupedCacheLayerLayout missing group layout tag=%s",
+                                value.c_str());
+        return it->second;
+    }
+
+    CacheGroupType groupType(std::string_view tag) const {
+        const std::string value(tag);
+        const auto        it = group_types_.find(value);
+        RTP_LLM_CHECK_WITH_INFO(
+            it != group_types_.end(), "GroupedCacheLayerLayout missing group type tag=%s", value.c_str());
+        return it->second;
     }
 
 private:
-    std::shared_ptr<const CacheTopology> topology_;
-    GroupLayouts                         groups_;
+    GroupLayouts                            groups_;
+    std::map<std::string, CacheGroupLayout> group_layouts_;
+    std::map<std::string, CacheGroupType>   group_types_;
+    std::vector<std::vector<std::string>>    layer_group_tags_;
 };
 
 struct KVCacheBuffer {

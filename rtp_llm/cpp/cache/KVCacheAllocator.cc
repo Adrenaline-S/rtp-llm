@@ -176,25 +176,21 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
         return std::numeric_limits<uint32_t>::max();
     }
 
-    if (model_id > config_.mtp_sub_configs.size()) {
+    if (model_id > config_.mtpModuleCount()) {
         RTP_LLM_LOG_ERROR("convertToGlobalLayerId: model_id=%zu out of range (mtp_sub_configs=%zu)",
                           model_id,
-                          config_.mtp_sub_configs.size());
+                          config_.mtpModuleCount());
         return std::numeric_limits<uint32_t>::max();
     }
 
-    const auto& sub = config_.mtp_sub_configs[model_id - 1];
-    if (!sub) {
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] is null", model_id - 1);
-        return std::numeric_limits<uint32_t>::max();
-    }
-    if (local_layer_id < 0 || static_cast<size_t>(local_layer_id) >= sub->layer_num) {
+    const auto& sub = config_.mtpModule(model_id - 1);
+    if (local_layer_id < 0 || static_cast<size_t>(local_layer_id) >= sub.layer_num) {
         RTP_LLM_LOG_ERROR("convertToGlobalLayerId: local_layer_id=%d is invalid", local_layer_id);
         return std::numeric_limits<uint32_t>::max();
     }
 
     return CacheConfig::mtpGlobalLayerId(
-        config_.layer_num, static_cast<int>(model_id - 1), sub->layer_num, local_layer_id);
+        config_.layer_num, static_cast<int>(model_id - 1), sub.layer_num, local_layer_id);
 }
 
 BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, std::string_view tag, int block_id) const {
@@ -241,11 +237,11 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
     if (end_ptr == begin_ptr) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(config_.topology().hasOneGroupPerLayer(),
+    RTP_LLM_CHECK_WITH_INFO(config_.hasOneGroupPerLayer(),
                             "legacy layer-only block copy requires exactly one cache group per layer");
     std::vector<TaggedBlockIdPair> tagged_mappings;
-    tagged_mappings.reserve(static_cast<size_t>(end_ptr - begin_ptr) * config_.topology().groups().size());
-    for (const auto& group : config_.topology().groups()) {
+    tagged_mappings.reserve(static_cast<size_t>(end_ptr - begin_ptr) * config_.groups().size());
+    for (const auto& group : config_.groups()) {
         for (auto it = begin_ptr; it != end_ptr; ++it) {
             tagged_mappings.push_back({group.tag, it->src, it->dst});
         }
@@ -262,14 +258,14 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
     const auto copy_type   = BatchCopyParams::get_copy_type(memory_type, memory_type);
     size_t     copy_count  = 0;
     for (const auto& mapping : copy_mapping) {
-        const auto& group = config_.topology().group(mapping.tag);
-        copy_count += group.layer_ids.size() * (group.kv_scale_stride_bytes > 0 ? 2 : 1);
+        const auto& group = config_.group(mapping.tag);
+        copy_count += group.layer_ids.size() * (group.layout.kv_scale_stride_bytes > 0 ? 2 : 1);
     }
 
     BatchCopyParams copy_params;
     copy_params.reserve(copy_type, copy_count);
     for (const auto& mapping : copy_mapping) {
-        const auto& group = config_.topology().group(mapping.tag);
+        const auto& group = config_.group(mapping.tag);
         for (int layer_id : group.layer_ids) {
             const auto src_addr = convertIndexToAddrByTag(layer_id, mapping.tag, mapping.src);
             const auto dst_addr = convertIndexToAddrByTag(layer_id, mapping.tag, mapping.dst);
@@ -279,9 +275,9 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
                                     layer_id,
                                     mapping.src,
                                     mapping.dst);
-            copy_params.add(dst_addr.kv_addr, src_addr.kv_addr, group.kv_block_stride_bytes, copy_type);
-            if (group.kv_scale_stride_bytes > 0 && src_addr.kv_scale_addr && dst_addr.kv_scale_addr) {
-                copy_params.add(dst_addr.kv_scale_addr, src_addr.kv_scale_addr, group.kv_scale_stride_bytes, copy_type);
+            copy_params.add(dst_addr.kv_addr, src_addr.kv_addr, group.layout.kv_block_stride_bytes, copy_type);
+            if (group.layout.kv_scale_stride_bytes > 0 && src_addr.kv_scale_addr && dst_addr.kv_scale_addr) {
+                copy_params.add(dst_addr.kv_scale_addr, src_addr.kv_scale_addr, group.layout.kv_scale_stride_bytes, copy_type);
             }
         }
     }
@@ -327,7 +323,7 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     batch_resource->initGroups(config_);
     batch_resource->setLastBlockAligned(true);
 
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         batch_resource->mutableBlockIds(0, group.tag).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
@@ -406,12 +402,12 @@ size_t KVCacheAllocator::notInUseBlocksNum() const {
 }
 
 size_t KVCacheAllocator::availableTokensNum() const {
-    const auto& tag = config_.topology().groups().front().tag;
+    const auto& tag = config_.groups().front().tag;
     return block_pool_ ? (block_pool_->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(tag)) : 0;
 }
 
 size_t KVCacheAllocator::totalTokensNum() const {
-    const auto& tag = config_.topology().groups().front().tag;
+    const auto& tag = config_.groups().front().tag;
     return block_pool_ ? (block_pool_->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(tag)) : 0;
 }
 
@@ -431,7 +427,7 @@ size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(std::string_view tag)
     if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
         return cp_slot_mapper_->logicalSeqSizePerBlock(config_, tag);
     }
-    return config_.group(tag).seq_size_per_block;
+    return config_.group(tag).layout.seq_size_per_block;
 }
 
 int KVCacheAllocator::cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const {

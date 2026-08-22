@@ -201,9 +201,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
     if (kv_cache_layer_layout_.has_value()) {
         std::vector<std::string> tags;
-        tags.reserve(kv_cache_layer_layout_->topology().groups().size());
-        for (const auto& group : kv_cache_layer_layout_->topology().groups()) {
-            tags.push_back(group.tag);
+        tags.reserve(kv_cache_layer_layout_->groups().size());
+        for (const auto& [tag, layout] : kv_cache_layer_layout_->groups()) {
+            (void)layout;
+            tags.push_back(tag);
         }
         kv_cache_boundary_group_tags_ = sortedCacheGroupTags(tags, "model KV cache");
     }

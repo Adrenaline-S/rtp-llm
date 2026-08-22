@@ -37,9 +37,9 @@ CacheConfig makeTaggedCacheConfig() {
 
     auto linear = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "linear");
     auto full   = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
-    config.fromGroupedSpecs(
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config,
         {linear, full}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"linear", "full"});
-    config.setGroupBlockLayout({16, 16}, {linear->block_size_bytes(), full->block_size_bytes()}, {0, 0});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, {16, 16}, {linear->block_size_bytes(), full->block_size_bytes()}, {0, 0});
     return config;
 }
 
@@ -70,8 +70,8 @@ CacheConfig makeSlotCacheConfig(size_t group_count) {
         block_nums.push_back(2048);
         scale_strides.push_back(0);
     }
-    config.fromGroupedSpecs(specs, layer_ids, group_types, tags);
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, specs, layer_ids, group_types, tags);
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
     return config;
 }
 
@@ -95,7 +95,7 @@ class PositionalSharedBlockCacheForTest: public SharedBlockCache {
 public:
     PositionalSharedBlockCacheForTest(): config_(makeSlotCacheConfig(4)) {
         std::map<std::string, BlockPoolPtr> tagged_pools;
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             auto pool = makeLargeTestPool();
             pools_.push_back(pool);
             tagged_pools.emplace(group.tag, std::move(pool));

@@ -55,7 +55,7 @@ private:
 //   "full_kv" -> FULL attention group, "swa_kv" -> SWA / fixed-state group.
 //
 // The CP connector projection now lives in CPSlotMapper::projectConnectorResource
-// and is driven entirely by CacheGroupPolicy, reached through the CacheTopology
+// and is driven entirely by CacheGroupPolicy, reached through CacheConfig
 // that CacheConfig::fromGroupedSpecs builds:
 //   * FULL             -> cp_mapping = BLOCK_ROUND_ROBIN  (page round-robin remap,
 //                         with the compact-local-block shortcut)
@@ -105,7 +105,7 @@ CacheConfig makeCpFullPlusSwaCacheConfig(bool cp_compact_swa_group, size_t cp_si
         swa_policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
     }
 
-    config.fromGroupedSpecs({full_spec, swa_spec},
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, {full_spec, swa_spec},
                             /*layers_by_group=*/{{0}, {1}},
                             {CacheGroupType::FULL, CacheGroupType::SWA},
                             /*tags=*/{"full_kv", "swa_kv"},
@@ -154,7 +154,7 @@ protected:
             allocator_->block_pool_ = pool;
         }
         // KVCacheMemoryConnector::init() validates cache-plan wiring by reading
-        // allocator_->allLayerCacheBase().topology(). The gmock allocator materializes no cache
+        // allocator_->allLayerCacheBase() routing. The gmock allocator materializes no cache
         // buffers, so hand it a layout carrying the topology of the plan it was constructed from;
         // a default-constructed GroupedCacheLayerLayout has no topology and the guard throws.
         ON_CALL(*allocator_, allLayerCacheBase())

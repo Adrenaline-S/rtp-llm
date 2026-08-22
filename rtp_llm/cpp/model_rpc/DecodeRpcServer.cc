@@ -771,7 +771,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const bool   use_mla             = cache_config.use_mla;
     const bool   use_hybrid          = cache_config.groupNums() > 1;
     const bool   use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
-    const auto&  spec                = cache_config.topology().groups().front().spec;
+    const auto&  spec                = cache_config.groups().front().layout.spec;
     const size_t k_total_bytes       = spec->k_block_size_bytes();
     const size_t v_total_bytes       = spec->v_block_size_bytes();
 
@@ -808,7 +808,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     // The single-group plan has exactly one cache group, so "the only group" is
     // not a positional choice.
     auto soleGroupTag = [](const CacheConfig& cfg) -> const std::string& {
-        const auto& groups = cfg.topology().groups();
+        const auto& groups = cfg.groups();
         RTP_LLM_CHECK_WITH_INFO(
             groups.size() == 1, "single-group cache load requires exactly one cache group, got %zu", groups.size());
         return groups.front().tag;
@@ -816,7 +816,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     auto layerGroupTags = [&soleGroupTag](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<std::string> layer_tags;
         if (use_hybrid) {
-            const auto& tags = cfg.groupsForLayer(static_cast<int>(layer_id));
+            const auto& tags = cfg.groupTagsForLayer(static_cast<int>(layer_id));
             RTP_LLM_CHECK_WITH_INFO(!tags.empty(), "hybrid cache layer %zu has no cache group tag", layer_id);
             layer_tags = tags;
         } else {
@@ -872,7 +872,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (!is_page_level_rr || !groupUsesCpSlice(cfg, tag) || load_context.prefill_cp_size <= 1) {
             return false;
         }
-        const auto group_tokens = cfg.group(tag).seq_size_per_block;
+        const auto group_tokens = cfg.group(tag).layout.seq_size_per_block;
         return group_tokens > 0
                && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
     };
@@ -1239,7 +1239,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     const auto&               cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto                group_blocks = decodeGroupBlockRecords(*request, cache_config.topology());
+    const auto                group_blocks = decodeGroupBlockRecords(*request, cache_config);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1263,23 +1263,23 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
 }
 
 std::map<std::string, BlockIds> DecodeRpcServer::decodeGroupBlockRecords(const BroadcastLoadRequestPB& request,
-                                                                         const CacheTopology&          topology) {
+                                                                         const CacheConfig&            cache_config) {
     std::map<std::string, BlockIds> records;
     std::unordered_set<std::string> seen_tags;
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
         const auto& tag = tagged_row.tag();
         RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "RPC cache group record requires a non-empty tag");
         // Rejects any tag the local cache plan does not own.
-        topology.group(tag);
+        cache_config.group(tag);
         RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(tag).second, "duplicate RPC cache tag=%s", tag.c_str());
         BlockIds block_ids;
         block_ids.assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
         records.emplace(tag, std::move(block_ids));
     }
-    RTP_LLM_CHECK_WITH_INFO(records.size() == topology.groups().size(),
-                            "RPC cache tag set does not match local topology, rows=%zu groups=%zu",
+    RTP_LLM_CHECK_WITH_INFO(records.size() == cache_config.groups().size(),
+                            "RPC cache tag set does not match local config, rows=%zu groups=%zu",
                             records.size(),
-                            topology.groups().size());
+                            cache_config.groups().size());
     return records;
 }
 

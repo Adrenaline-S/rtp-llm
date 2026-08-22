@@ -30,7 +30,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     // so leave the record list empty rather than dereferencing it.
     model_input_gatherer_config_.kv_cache_groups.clear();
     if (cache_config.groupNums() > 0) {
-        const auto& groups = cache_config.topology().groups();
+        const auto& groups = cache_config.groups();
         for (const auto& group : groups) {
             const auto [it, inserted] = model_input_gatherer_config_.kv_cache_groups.emplace(group.tag, group);
             (void)it;

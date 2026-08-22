@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -137,12 +138,65 @@ static torch::Tensor makeNonContiguousMatrix(const torch::Tensor& values, int64_
     return view;
 }
 
-static std::shared_ptr<KVCacheSpec> makeTestSpec(const std::string& tag, size_t tokens_per_block, bool mla_cache) {
-    std::shared_ptr<KVCacheSpec> spec = mla_cache ?
-                                            std::static_pointer_cast<KVCacheSpec>(std::make_shared<MLAKVCacheSpec>()) :
-                                            std::static_pointer_cast<KVCacheSpec>(std::make_shared<MHAKVCacheSpec>());
-    spec->seq_size_per_block          = static_cast<uint32_t>(tokens_per_block);
-    return spec;
+class SizedTestKVCacheSpec: public KVCacheSpec {
+public:
+    SizedTestKVCacheSpec(KVCacheSpecType type, size_t tokens_per_block, size_t kv_bytes, size_t scale_bytes):
+        kv_bytes_(kv_bytes), scale_bytes_(scale_bytes) {
+        this->type               = type;
+        this->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+    }
+
+    size_t block_size() const override {
+        return kv_bytes_;
+    }
+    size_t k_block_size() const override {
+        return kv_bytes_ / 2;
+    }
+    size_t v_block_size() const override {
+        return kv_bytes_ - k_block_size();
+    }
+    size_t block_size_bytes() const override {
+        return kv_bytes_;
+    }
+    size_t k_block_size_bytes() const override {
+        return k_block_size();
+    }
+    size_t v_block_size_bytes() const override {
+        return v_block_size();
+    }
+    size_t scale_block_size_bytes() const override {
+        return scale_bytes_;
+    }
+    size_t k_scale_block_size_bytes() const override {
+        return scale_bytes_ / 2;
+    }
+    size_t v_scale_block_size_bytes() const override {
+        return scale_bytes_ - k_scale_block_size_bytes();
+    }
+    DataType memoryLayoutDType() const override {
+        return DataType::TYPE_UINT8;
+    }
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<SizedTestKVCacheSpec>(*this);
+    }
+    std::string debugString(size_t = 0) const override {
+        return "SizedTestKVCacheSpec";
+    }
+
+private:
+    size_t kv_bytes_;
+    size_t scale_bytes_;
+};
+
+static std::shared_ptr<KVCacheSpec> makeTestSpec(size_t tokens_per_block,
+                                                 bool   mla_cache,
+                                                 size_t kv_bytes,
+                                                 size_t scale_bytes) {
+    return std::make_shared<SizedTestKVCacheSpec>(mla_cache ? KVCacheSpecType::MultiHeadLatentAttention :
+                                                               KVCacheSpecType::MultiHeadAttention,
+                                                   tokens_per_block,
+                                                   kv_bytes,
+                                                   scale_bytes);
 }
 
 static CacheConfig makeCacheConfig(size_t             tokens_per_block,
@@ -169,32 +223,35 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     config.use_independent_block_pools = independent_pools;
     config.use_opaque_kv_cache_store   = opaque_store;
 
-    GroupBase target_group;
-    target_group.tag                       = tag;
-    target_group.spec                      = makeTestSpec(tag, tokens_per_block, mla_cache);
-    target_group.policy                    = policy;
-    target_group.block_num                 = static_cast<uint32_t>(block_num);
-    target_group.seq_size_per_block        = tokens_per_block;
-    target_group.kernel_seq_size_per_block = tokens_per_block;
-    target_group.kv_block_stride_bytes     = transfer_kv_bytes == 0 ? physical_kv_stride : transfer_kv_bytes;
-    target_group.kv_scale_stride_bytes     = transfer_scale_bytes == 0 ? physical_scale_stride : transfer_scale_bytes;
+    const size_t target_kv_stride = transfer_kv_bytes == 0 ? physical_kv_stride : transfer_kv_bytes;
+    const size_t target_scale_stride = transfer_scale_bytes == 0 ? physical_scale_stride : transfer_scale_bytes;
+    CacheGroup   target_group;
+    target_group.tag                              = tag;
+    target_group.layout.spec = makeTestSpec(tokens_per_block, mla_cache, target_kv_stride, target_scale_stride);
+    target_group.policy                           = policy;
+    target_group.layout.block_num                 = static_cast<uint32_t>(block_num);
+    target_group.layout.seq_size_per_block        = tokens_per_block;
+    target_group.layout.kernel_seq_size_per_block = tokens_per_block;
+    target_group.layout.kv_block_stride_bytes     = target_kv_stride;
+    target_group.layout.kv_scale_stride_bytes     = target_scale_stride;
 
-    std::vector<LayerBase> layers(static_cast<size_t>(layer_id + 1));
+    std::vector<CacheLayerMembership> layers(static_cast<size_t>(layer_id + 1));
     for (size_t i = 0; i < layers.size(); ++i) {
         layers[i].layer_id = static_cast<int>(i);
     }
 
-    std::vector<GroupBase> groups;
+    std::vector<CacheGroup> groups;
     if (add_dummy_group) {
-        GroupBase dummy_group;
-        dummy_group.tag                       = tag == "full" ? "linear" : "full";
-        dummy_group.spec                      = makeTestSpec(dummy_group.tag, tokens_per_block, false);
-        dummy_group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        dummy_group.block_num                 = static_cast<uint32_t>(block_num);
-        dummy_group.seq_size_per_block        = tokens_per_block;
-        dummy_group.kernel_seq_size_per_block = tokens_per_block;
-        dummy_group.kv_block_stride_bytes     = physical_kv_stride;
-        dummy_group.kv_scale_stride_bytes     = physical_scale_stride;
+        CacheGroup dummy_group;
+        dummy_group.tag = tag == "full" ? "linear" : "full";
+        dummy_group.layout.spec =
+            makeTestSpec(tokens_per_block, false, physical_kv_stride, physical_scale_stride);
+        dummy_group.policy                           = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        dummy_group.layout.block_num                 = static_cast<uint32_t>(block_num);
+        dummy_group.layout.seq_size_per_block        = tokens_per_block;
+        dummy_group.layout.kernel_seq_size_per_block = tokens_per_block;
+        dummy_group.layout.kv_block_stride_bytes     = physical_kv_stride;
+        dummy_group.layout.kv_scale_stride_bytes     = physical_scale_stride;
         for (int i = 0; i < layer_id; ++i) {
             dummy_group.layer_ids.push_back(i);
             layers[static_cast<size_t>(i)].group_tags = {dummy_group.tag};
@@ -209,8 +266,7 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     target_group.layer_ids.push_back(layer_id);
     layers[static_cast<size_t>(layer_id)].group_tags = {tag};
     groups.push_back(std::move(target_group));
-    config.setTopology(std::move(groups), std::move(layers));
-    return config;
+    return test::TestCacheConfigBuilder::withResolvedData(std::move(config), std::move(groups), std::move(layers));
 }
 
 static std::string cacheKeyAt(const torch_ext::PyCacheStoreInputs& inputs,
@@ -919,19 +975,21 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
     config.kv_block_stride_bytes     = block_stride;
 
     auto make_group = [](const std::string& tag, CacheGroupType type) {
-        GroupBase group;
-        group.tag                       = tag;
-        group.spec                      = makeTestSpec(tag, tokens_per_block, false);
-        group.policy                    = defaultCacheGroupPolicy(type);
-        group.layer_ids                 = {0};
-        group.block_num                 = block_num;
-        group.seq_size_per_block        = tokens_per_block;
-        group.kernel_seq_size_per_block = tokens_per_block;
-        group.kv_block_stride_bytes     = block_stride;
+        CacheGroup group;
+        group.tag                              = tag;
+        group.layout.spec                      = makeTestSpec(tokens_per_block, false, block_stride, 0);
+        group.policy                           = defaultCacheGroupPolicy(type);
+        group.layer_ids                        = {0};
+        group.layout.block_num                 = block_num;
+        group.layout.seq_size_per_block        = tokens_per_block;
+        group.layout.kernel_seq_size_per_block = tokens_per_block;
+        group.layout.kv_block_stride_bytes     = block_stride;
         return group;
     };
-    config.setTopology({make_group("linear", CacheGroupType::LINEAR), make_group("full", CacheGroupType::FULL)},
-                       {{0, {"linear", "full"}}});
+    config = test::TestCacheConfigBuilder::withResolvedData(
+        std::move(config),
+        {make_group("linear", CacheGroupType::LINEAR), make_group("full", CacheGroupType::FULL)},
+        {{0, {"linear", "full"}}});
 
     auto                    inputs = makePyCacheStoreInputs(tokens_per_block, block_num);
     torch_ext::LayerKVCache layer_cache;

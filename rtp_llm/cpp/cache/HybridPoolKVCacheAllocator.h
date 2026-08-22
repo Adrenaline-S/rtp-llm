@@ -145,8 +145,8 @@ private:
 
     size_t                 storageIdxForTag(std::string_view tag) const;
     const KVCacheGroupPtr& groupStrategy(std::string_view tag) const;
-    const GroupBase&       validateGroupForLayer(int layer_id, std::string_view tag) const;
-    const GroupBase&       defaultGroupForLayer(int layer_id) const;
+    const CacheGroup&       validateGroupForLayer(int layer_id, std::string_view tag) const;
+    const CacheGroup&       defaultGroupForLayer(int layer_id) const;
     size_t                 minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
     size_t                 totalReservableAvailableBlocks() const;
     size_t

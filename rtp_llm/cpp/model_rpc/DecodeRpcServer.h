@@ -96,7 +96,7 @@ private:
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
     static std::map<std::string, BlockIds> decodeGroupBlockRecords(const BroadcastLoadRequestPB& request,
-                                                                  const CacheTopology&          topology);
+                                                                  const CacheConfig&            cache_config);
     static std::string            makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);

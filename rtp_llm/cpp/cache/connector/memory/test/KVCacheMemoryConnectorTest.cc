@@ -257,8 +257,8 @@ CacheConfig createDsv4TypedConnectorConfig() {
         kv_strides.push_back(pool.stride_bytes);
     }
 
-    config.fromGroupedSpecs(specs, layers_by_group, types, tags, policies);
-    config.setGroupBlockLayout(
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, specs, layers_by_group, types, tags, policies);
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config,
         std::vector<uint32_t>(kDsv4PoolNum, config.block_num), kv_strides, std::vector<size_t>(kDsv4PoolNum, 0));
     // layer 0: hca_kv(24) + hca_state(20) + swa_kv(28) = 72
     // layer 1: csa_kv(16) + indexer_kv(32) + indexer_state(8) + csa_state(12) + swa_kv(28) = 96
@@ -275,17 +275,17 @@ void setGroupKvStrideBytes(CacheConfig& config, const std::string& tag, size_t s
     std::vector<uint32_t> block_nums;
     std::vector<size_t>   kv_strides;
     std::vector<size_t>   scale_strides;
-    for (const auto& group : config.topology().groups()) {
-        block_nums.push_back(group.block_num);
-        kv_strides.push_back(group.tag == tag ? stride_bytes : group.kv_block_stride_bytes);
-        scale_strides.push_back(group.kv_scale_stride_bytes);
+    for (const auto& group : config.groups()) {
+        block_nums.push_back(group.layout.block_num);
+        kv_strides.push_back(group.tag == tag ? stride_bytes : group.layout.kv_block_stride_bytes);
+        scale_strides.push_back(group.layout.kv_scale_stride_bytes);
     }
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
 }
 
 // Per-layer tags of a topology, used by tests that need to seed every slot of a resource.
 std::vector<std::string> layerTagsOf(const CacheConfig& config, int layer_id) {
-    return config.topology().layer(layer_id).group_tags;
+    return config.groupTagsForLayer(layer_id);
 }
 
 }  // namespace
@@ -404,12 +404,12 @@ private:
     }
     size_t memoryCacheBlockBytes(const CacheConfig& cfg) const {
         size_t      total  = 0;
-        const auto& layers = cfg.topology().layers();
+        const auto& layers = cfg.layerMemberships();
         for (size_t layer = 0; layer < static_cast<size_t>(cfg.layer_all_num); ++layer) {
             if (layer >= layers.size()) {
                 continue;
             }
-            for (const auto& tag : cfg.groupsForLayer(static_cast<int>(layer))) {
+for (const auto& tag : cfg.groupTagsForLayer(static_cast<int>(layer))) {
                 if (tag.empty()) {
                     continue;
                 }
@@ -417,7 +417,7 @@ private:
                 if (!policy.enable_prefix_reuse) {
                     continue;
                 }
-                total += cfg.group(tag).kv_block_stride_bytes + cfg.group(tag).kv_scale_stride_bytes;
+                total += cfg.group(tag).layout.kv_block_stride_bytes + cfg.group(tag).layout.kv_scale_stride_bytes;
             }
         }
         return total;
@@ -426,7 +426,7 @@ private:
         return memoryCacheBlockBytes(cache_config_);
     }
     void setGroupBlockBytes(CacheConfig& cfg, size_t stride_bytes) const {
-        cfg.setGroupBlockLayout(std::vector<uint32_t>(cfg.groupNums(), cfg.block_num),
+        rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cfg, std::vector<uint32_t>(cfg.groupNums(), cfg.block_num),
                                 std::vector<size_t>(cfg.groupNums(), stride_bytes),
                                 std::vector<size_t>(cfg.groupNums(), 0));
     }
@@ -1862,12 +1862,12 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
-    cfg.fromGroupedSpecs({makeMhaSpec("csa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 8),
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cfg, {makeMhaSpec("csa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 8),
                           makeMhaSpec("swa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 16)},
                          /*layers_by_group=*/{{0}, {0}},
                          {CacheGroupType::FULL, CacheGroupType::FULL},
                          {"csa_kv", "swa_kv"});
-    cfg.setGroupBlockLayout({cfg.block_num, cfg.block_num}, {16, 32}, {0, 0});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cfg, {cfg.block_num, cfg.block_num}, {16, 32}, {0, 0});
     cfg.layer_to_block_stride_bytes = {999};
 
     auto kv_cfg                         = kv_cache_config_;
@@ -1929,12 +1929,12 @@ TEST_F(KVCacheMemoryConnectorTest, WireRowsSortTagsIndependentlyOfLocalGroupDecl
     auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
-    cfg.fromGroupedSpecs({makeMhaSpec("zeta", cfg.seq_size_per_block, cfg.dtype, 1, 8),
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cfg, {makeMhaSpec("zeta", cfg.seq_size_per_block, cfg.dtype, 1, 8),
                           makeMhaSpec("alpha", cfg.seq_size_per_block, cfg.dtype, 1, 16)},
                          /*layers_by_group=*/{{0}, {0}},
                          {CacheGroupType::FULL, CacheGroupType::FULL},
                          {"zeta", "alpha"});
-    cfg.setGroupBlockLayout({cfg.block_num, cfg.block_num}, {16, 32}, {0, 0});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cfg, {cfg.block_num, cfg.block_num}, {16, 32}, {0, 0});
 
     const auto slots = KVCacheMemoryConnector::buildPoolBlockMemoryLayout(cfg);
     ASSERT_EQ(slots.size(), 2u);
@@ -1948,15 +1948,15 @@ TEST_F(KVCacheMemoryConnectorTest, PoolBlockMemoryLayoutCarriesResolvedPhysicalL
     auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
-    cfg.fromGroupedSpecs({makeMhaSpec("full", cfg.seq_size_per_block, cfg.dtype, 1, 8)},
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cfg, {makeMhaSpec("full", cfg.seq_size_per_block, cfg.dtype, 1, 8)},
                          /*layers_by_group=*/{{0}},
                          {CacheGroupType::FULL},
                          {"full"});
     auto policy       = defaultCacheGroupPolicy(CacheGroupType::FULL);
     policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
-    cfg.setGroupPolicies({policy});
-    cfg.setGroupBlockLayout({cfg.block_num}, {64}, {8});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupPolicies(cfg, {policy});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cfg, {cfg.block_num}, {64}, {8});
     cfg.layer_to_block_stride_bytes = {999};
 
     auto conn  = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, allocator_, server_addrs_);
@@ -1975,23 +1975,23 @@ TEST_F(KVCacheMemoryConnectorTest, PoolBlockMemoryLayoutPreserveMtpGlobalLayerAn
     main_cfg.layer_num       = 1;
     main_cfg.layer_all_num   = 1;
     main_cfg.group_layer_num = 1;
-    main_cfg.fromGroupedSpecs({makeMhaSpec("full", main_cfg.seq_size_per_block, main_cfg.dtype, 1, 8)},
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(main_cfg, {makeMhaSpec("full", main_cfg.seq_size_per_block, main_cfg.dtype, 1, 8)},
                               /*layers_by_group=*/{{0}},
                               {CacheGroupType::FULL},
                               {"full"});
-    main_cfg.setGroupBlockLayout({main_cfg.block_num}, {48}, {0});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(main_cfg, {main_cfg.block_num}, {48}, {0});
     main_cfg.layer_to_block_stride_bytes = {999, 999};
 
     auto propose_cfg          = main_cfg;
     propose_cfg.layer_num     = 1;
     propose_cfg.layer_all_num = 1;
-    propose_cfg.fromGroupedSpecs({makeMhaSpec("full", propose_cfg.seq_size_per_block, propose_cfg.dtype, 1, 8)},
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(propose_cfg, {makeMhaSpec("full", propose_cfg.seq_size_per_block, propose_cfg.dtype, 1, 8)},
                                  /*layers_by_group=*/{{0}},
                                  {CacheGroupType::FULL},
                                  {"full"});
-    propose_cfg.setGroupBlockLayout({propose_cfg.block_num}, {48}, {0});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(propose_cfg, {propose_cfg.block_num}, {48}, {0});
     propose_cfg.layer_to_block_stride_bytes = {777};
-    ASSERT_NE(main_cfg.mergeMTPModule(propose_cfg, /*module_index=*/0, /*main_layer_num=*/1), nullptr);
+    ASSERT_NE(rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(main_cfg, propose_cfg, /*module_index=*/0, /*main_layer_num=*/1), nullptr);
 
     auto conn  = std::make_shared<KVCacheMemoryConnector>(main_cfg, kv_cache_config_, allocator_, server_addrs_);
     auto slots = conn->poolBlockMemoryLayout();
@@ -3271,8 +3271,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
-    cache_config_.fromGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    cache_config_.setGroupBlockLayout({static_cast<uint32_t>(kBlockNum)},
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config_, {mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cache_config_, {static_cast<uint32_t>(kBlockNum)},
                                       {cache_config_.kv_block_stride_bytes},
                                       {cache_config_.kv_scale_stride_bytes});
     ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
@@ -3514,9 +3514,9 @@ TEST_F(KVCacheMemoryConnectorTest, CreatorFullLinearSplitUsesSingleMemoryAndDisk
     for (const bool linear_first : {true, false}) {
         SCOPED_TRACE(linear_first ? "kimi-linear-first" : "qwen-full-first");
         auto cfg = createCreatorFullLinearSplitConfig(linear_first);
-        ASSERT_TRUE(cfg.topology().hasOneGroupPerLayer());
+        ASSERT_TRUE(cfg.hasOneGroupPerLayer());
         std::vector<std::string> group_tags;
-        for (const auto& group : cfg.topology().groups()) {
+        for (const auto& group : cfg.groups()) {
             group_tags.push_back(group.tag);
         }
         std::sort(group_tags.begin(), group_tags.end());
@@ -3524,15 +3524,15 @@ TEST_F(KVCacheMemoryConnectorTest, CreatorFullLinearSplitUsesSingleMemoryAndDisk
 
         size_t physical_block_bytes = 0;
         for (size_t layer = 0; layer < cfg.layer_all_num; ++layer) {
-            const auto& tags = cfg.topology().layer(static_cast<int>(layer)).group_tags;
+            const auto& tags = cfg.groupTagsForLayer(static_cast<int>(layer));
             ASSERT_EQ(tags.size(), 1u);
             const auto& group = cfg.groupForLayer(static_cast<int>(layer), tags.front());
-            physical_block_bytes += group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
+            physical_block_bytes += group.layout.kv_block_stride_bytes + group.layout.kv_scale_stride_bytes;
         }
         ASSERT_GT(physical_block_bytes, 0u);
 
         // Flat/global physical-stride projections are deliberately inconsistent. The connector must
-        // still size and map its pool exclusively from the cached GroupBase-backed layer-tag slots.
+        // still size and map its pool exclusively from the cached CacheGroup-backed layer-tag slots.
         cfg.kv_block_stride_bytes       = 999;
         cfg.kv_scale_stride_bytes       = 777;
         cfg.layer_to_block_stride_bytes = std::vector<int>(cfg.layer_all_num, 555);
@@ -3744,7 +3744,7 @@ protected:
 
         std::vector<int> all_layer_ids(static_cast<size_t>(layer_num));
         std::iota(all_layer_ids.begin(), all_layer_ids.end(), 0);
-        config.fromGroupedSpecs({full_spec, swa_spec},
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, {full_spec, swa_spec},
                                 {all_layer_ids, all_layer_ids},
                                 {CacheGroupType::FULL, CacheGroupType::SWA},
                                 {"default", "swa_kv"},
@@ -3752,7 +3752,7 @@ protected:
 
         const size_t full_stride = full_spec->block_size_bytes();
         const size_t swa_stride  = swa_spec->block_size_bytes();
-        config.setGroupBlockLayout(
+        rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config,
             {static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_num)}, {full_stride, swa_stride}, {0, 0});
 
         config.dtype                 = rtp_llm::DataType::TYPE_FP16;

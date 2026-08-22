@@ -78,8 +78,6 @@ const std::vector<std::string>& requiredScannedFiles() {
     static const std::vector<std::string> required = {
         "rtp_llm/cpp/cache/CacheConfig.h",
         "rtp_llm/cpp/cache/CacheConfig.cc",
-        "rtp_llm/cpp/cache/CacheTopology.h",
-        "rtp_llm/cpp/cache/CacheTopology.cc",
         "rtp_llm/cpp/cache/CacheConfigCreator.cc",
         "rtp_llm/cpp/cache/KVCacheResource.h",
         "rtp_llm/cpp/cache/KVCacheResource.cc",
@@ -176,12 +174,15 @@ const std::vector<Rule>& rules() {
         // may reintroduce a cache-group slot/id abstraction.
         const std::vector<std::string> forbidden_identity_names = {
             "tag_to_slot", "group_slot", "groupIdForTag", "groupById", "layer_group_ids",
+            "CacheTopology", "topologyPtr", "groupTagsInConfigOrder",
         };
         for (const auto& name : forbidden_identity_names) {
             built.push_back({"cache-group identity must remain tag-keyed (" + name + ")",
                              std::regex("$^"),
                              name});
         }
+        built.push_back({"cache metadata must be accessed directly through CacheConfig",
+                         std::regex(R"(\.topology\(\))")});
         return built;
     }();
     return all;

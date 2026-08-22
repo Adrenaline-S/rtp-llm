@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 using namespace std;
 
@@ -37,7 +38,7 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
     cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 }
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {
@@ -143,12 +144,12 @@ static void initTwoGroupCacheConfig(CacheConfig& cache_config, bool declare_in_s
     cache_config.layer_num     = 1;
     cache_config.layer_all_num = 1;
     if (declare_in_sorted_order) {
-        cache_config.fromGroupedSpecs({full_spec, linear_spec},
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {full_spec, linear_spec},
                                       {layer_ids, layer_ids},
                                       {CacheGroupType::FULL, CacheGroupType::LINEAR},
                                       {"full", "linear"});
     } else {
-        cache_config.fromGroupedSpecs({linear_spec, full_spec},
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {linear_spec, full_spec},
                                       {layer_ids, layer_ids},
                                       {CacheGroupType::LINEAR, CacheGroupType::FULL},
                                       {"linear", "full"});
@@ -233,7 +234,7 @@ TEST_F(NormalBatchStreamProcessorTest, testGathererUsesLargestPerGroupKernelSubd
     cache_config.layer_all_num             = 1;
     cache_config.seq_size_per_block        = 2;
     cache_config.kernel_seq_size_per_block = 2;
-    cache_config.fromGroupedSpecs({linear_spec, full_spec},
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {linear_spec, full_spec},
                                   {{0}, {0}},
                                   {CacheGroupType::LINEAR, CacheGroupType::FULL},
                                   {"linear", "full"});
@@ -262,7 +263,7 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     cache_config.layer_all_num             = 1;
     cache_config.seq_size_per_block        = 2;
     cache_config.kernel_seq_size_per_block = 2;
-    cache_config.fromGroupedSpecs({linear_spec, full_spec},
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {linear_spec, full_spec},
                                   {{0}, {0}},
                                   {CacheGroupType::LINEAR, CacheGroupType::FULL},
                                   {"linear", "full"});
@@ -301,7 +302,7 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMuta
         config.layer_all_num             = 1;
         config.seq_size_per_block        = 2;
         config.kernel_seq_size_per_block = 2;
-        config.fromGroupedSpecs({first_spec, second_spec},
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, {first_spec, second_spec},
                                 {{0}, {0}},
                                 {CacheGroupType::FULL, CacheGroupType::LINEAR},
                                 {"full", second_tag});
@@ -324,7 +325,7 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMuta
         resource.resetBatchSize(1);
         resource.initGroups(resource_config);
         resource.setBatchBlocks(0, "full", {3});
-        resource.setBatchBlocks(0, resource_config.topology().groups()[1].tag, {7});
+        resource.setBatchBlocks(0, resource_config.groups()[1].tag, {7});
         if (make_late_row_oversized) {
             resource.mutableBlockIds(0, "linear").kernel_block_indices_ = {7, 8};
         }

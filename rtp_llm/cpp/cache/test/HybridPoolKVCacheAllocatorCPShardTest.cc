@@ -51,7 +51,7 @@ CacheConfig makeCPHybridConfig() {
                                               "linear");
     auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
 
-    config.fromGroupedSpecs(
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config,
         {linear_spec, full_spec}, {{0, 1}, {2, 3}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
 
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
@@ -153,9 +153,9 @@ TEST_F(HybridPoolKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
 TEST_F(HybridPoolKVCacheAllocatorCPShardTest, HybridPoolCoordinatorPreservesShardedAllocation) {
     auto config                        = makeCPHybridConfig();
     config.use_independent_block_pools = true;
-    config.setGroupBlockLayout(
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config,
         {32, 32},
-        {config.group("linear").kv_block_stride_bytes, config.group("full").kv_block_stride_bytes},
+        {config.group("linear").layout.kv_block_stride_bytes, config.group("full").layout.kv_block_stride_bytes},
         {0, 0});
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());

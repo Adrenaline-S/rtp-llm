@@ -8,7 +8,7 @@ namespace rtp_llm {
 
 class SWAKVCacheGroup: public KVCacheGroup {
 public:
-    SWAKVCacheGroup(const GroupBase&                    cache_group,
+    SWAKVCacheGroup(const CacheGroup&                    cache_group,
                     BlockPoolPtr                        block_pool,
                     int                                 linear_step      = 0,
                     SharedBlockCache*                   shared_cache     = nullptr,

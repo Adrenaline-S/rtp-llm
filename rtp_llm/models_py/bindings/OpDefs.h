@@ -57,25 +57,34 @@ public:
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
-        const auto& group = grouped_layout_.topology().soleGroupForLayer(layer_id);
-        return getLayerCache(layer_id, group.tag);
+        const auto& tags = grouped_layout_.groupTagsForLayer(layer_id);
+        RTP_LLM_CHECK_WITH_INFO(tags.size() == 1,
+                                "layer=%d requires exactly one cache group, got %zu",
+                                layer_id,
+                                tags.size());
+        return getLayerCache(layer_id, tags.front());
     }
 
     LayerKVCache getLayerCache(int layer_id, const std::string& tag) const {
         validateLayer(layer_id);
-        const auto& group        = grouped_layout_.topology().groupForLayer(layer_id, tag);
+        const auto& tags = grouped_layout_.groupTagsForLayer(layer_id);
+        RTP_LLM_CHECK_WITH_INFO(std::find(tags.begin(), tags.end(), tag) != tags.end(),
+                                "layer=%d does not own cache tag=%s",
+                                layer_id,
+                                tag.c_str());
+        const auto& group        = grouped_layout_.groupLayout(tag);
         const auto& group_layout = grouped_layout_.group(tag);
         const auto  layer        = static_cast<size_t>(layer_id);
         if (group_layout.empty() || !group_layout.hasLayer(layer)) {
             throw std::runtime_error("Layer " + std::to_string(layer_id) + " has no KV cache tensor for tag " + tag);
         }
-        return makeLayerCache(layer_id, group, group_layout.at(layer));
+        return makeLayerCache(layer_id, tag, group, group_layout.at(layer));
     }
 
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
         validateLayer(layer_id);
         const auto  layer = static_cast<size_t>(layer_id);
-        const auto& tags  = grouped_layout_.topology().layer(layer_id).group_tags;
+        const auto& tags  = grouped_layout_.groupTagsForLayer(layer_id);
 
         std::vector<LayerKVCache> layer_caches;
         layer_caches.reserve(tags.size());
@@ -96,23 +105,24 @@ public:
     }
 
     size_t layerCount() const {
-        return grouped_layout_.topology().layers().size();
+        return grouped_layout_.layerCount();
     }
 
     int getSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).seq_size_per_block);
+        return static_cast<int>(grouped_layout_.groupLayout(tag).seq_size_per_block);
     }
 
     int getKernelSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).kernel_seq_size_per_block);
+        return static_cast<int>(grouped_layout_.groupLayout(tag).kernel_seq_size_per_block);
     }
 
 private:
     static std::vector<std::string> buildSortedGroupTags(const rtp_llm::GroupedCacheLayerLayout& grouped_layout) {
         std::vector<std::string> tags;
-        tags.reserve(grouped_layout.topology().groups().size());
-        for (const auto& group : grouped_layout.topology().groups()) {
-            tags.push_back(group.tag);
+        tags.reserve(grouped_layout.groups().size());
+        for (const auto& [tag, group] : grouped_layout.groups()) {
+            (void)group;
+            tags.push_back(tag);
         }
         return rtp_llm::sortedCacheGroupTags(tags, "model KV cache");
     }
@@ -123,11 +133,11 @@ private:
         }
     }
 
-    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupBase& group) {
+    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::CacheGroupLayout& group) {
         RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
                                     && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
                                 "invalid block subdivision for tag=%s physical=%zu kernel=%zu",
-                                group.tag.c_str(),
+                                "<projected>",
                                 group.seq_size_per_block,
                                 group.kernel_seq_size_per_block);
         return static_cast<int64_t>(group.seq_size_per_block / group.kernel_seq_size_per_block);
@@ -160,20 +170,23 @@ private:
     }
 
     LayerKVCache
-    makeLayerCache(int layer_id, const rtp_llm::GroupBase& group, const rtp_llm::BlockBufferPtrInfo& buffers) const {
+    makeLayerCache(int                                layer_id,
+                   const std::string&                 tag,
+                   const rtp_llm::CacheGroupLayout&   group,
+                   const rtp_llm::BlockBufferPtrInfo& buffers) const {
         RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.defined(),
                                 "KV cache tensor must be defined for layer=%d tag=%s",
                                 layer_id,
-                                group.tag.c_str());
+                                tag.c_str());
 
         LayerKVCache result(buffers.kv_addr,
                             static_cast<int>(group.seq_size_per_block),
                             layer_id,
-                            group.tag,
+                            tag,
                             buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
-        if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
+        if (grouped_layout_.groupType(tag) == rtp_llm::CacheGroupType::SWA
             || spec_type == rtp_llm::KVCacheSpecType::LinearAttention
             || spec_type == rtp_llm::KVCacheSpecType::OpaqueState) {
             return result;
@@ -187,25 +200,25 @@ private:
 
         if (spec_type == rtp_llm::KVCacheSpecType::MultiHeadAttention) {
             const int64_t local_kv_heads = static_cast<int64_t>(group.local_kv_head_num);
-            RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "MHA tag=%s has no local KV heads", group.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "MHA tag=%s has no local KV heads", tag.c_str());
             const int64_t physical_seq_size = static_cast<int64_t>(group.seq_size_per_block);
             const int64_t k_block_elems     = static_cast<int64_t>(group.spec->k_block_size());
             RTP_LLM_CHECK_WITH_INFO(k_block_elems > 0 && k_block_elems % (local_kv_heads * physical_seq_size) == 0,
                                     "MHA tag=%s cannot derive head dimension from k_block_size=%ld heads=%ld seq=%ld",
-                                    group.tag.c_str(),
+                                    tag.c_str(),
                                     k_block_elems,
                                     local_kv_heads,
                                     physical_seq_size);
             const int64_t head_dim = k_block_elems / (local_kv_heads * physical_seq_size);
             RTP_LLM_CHECK_WITH_INFO(
-                buffers.kv_addr.is_contiguous(), "MHA KV cache base for tag=%s must be contiguous", group.tag.c_str());
+                buffers.kv_addr.is_contiguous(), "MHA KV cache base for tag=%s must be contiguous", tag.c_str());
             const int64_t expected_numel = kernel_block_num * 2 * local_kv_heads * kernel_seq_size * head_dim;
             RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.numel() == expected_numel,
                                     "MHA KV cache elements=%ld expected=%ld for layer=%d tag=%s",
                                     buffers.kv_addr.numel(),
                                     expected_numel,
                                     layer_id,
-                                    group.tag.c_str());
+                                    tag.c_str());
             result.kv_cache_base =
                 buffers.kv_addr.view({kernel_block_num, 2, local_kv_heads, kernel_seq_size, head_dim});
             if (buffers.kv_scale_addr.defined()) {
@@ -214,7 +227,7 @@ private:
                                             && buffers.kv_scale_addr.numel() % kernel_block_num == 0,
                                         "MHA scale tensor cannot be expanded for layer=%d tag=%s",
                                         layer_id,
-                                        group.tag.c_str());
+                                        tag.c_str());
                 result.kv_scale_base =
                     buffers.kv_scale_addr.view({kernel_block_num, buffers.kv_scale_addr.numel() / kernel_block_num});
             }
@@ -227,13 +240,13 @@ private:
                                                     kernel_block_num,
                                                     kernel_seq_size,
                                                     "MLA KV cache tensor",
-                                                    group.tag);
+                                                    tag);
             result.kv_scale_base = reshapeMlaTensor(buffers.kv_scale_addr,
                                                     physical_block_num,
                                                     kernel_block_num,
                                                     kernel_seq_size,
                                                     "MLA scale/indexer tensor",
-                                                    group.tag);
+                                                    tag);
             return result;
         }
 
@@ -241,7 +254,7 @@ private:
             RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.is_contiguous() && buffers.kv_addr.numel() % kernel_block_num == 0,
                                     "opaque KV cache cannot be expanded for layer=%d tag=%s",
                                     layer_id,
-                                    group.tag.c_str());
+                                    tag.c_str());
             result.kv_cache_base = buffers.kv_addr.view({kernel_block_num, buffers.kv_addr.numel() / kernel_block_num});
         }
         return result;

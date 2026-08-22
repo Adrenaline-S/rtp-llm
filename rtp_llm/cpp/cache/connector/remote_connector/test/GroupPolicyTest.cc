@@ -8,6 +8,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 
@@ -54,9 +55,9 @@ KVCacheSpecPtr makeFakeSpec(const std::string& tag) {
 // Build a fake cache plan whose groups are identified only by their semantic
 // tags. Tag order in the returned config is the declaration order, which the
 // policy under test must never treat as identity.
-std::shared_ptr<const CacheTopology> makeFakeTopology(const std::vector<std::string>& full_tags,
-                                                      const std::vector<std::string>& other_tags,
-                                                      size_t                          per_group_layer_num) {
+CacheConfig makeFakeCacheConfig(const std::vector<std::string>& full_tags,
+                                const std::vector<std::string>& other_tags,
+                                size_t                          per_group_layer_num) {
     std::vector<std::string> ordered_tags;
     for (const auto& tags : {full_tags, other_tags}) {
         for (const auto& tag : tags) {
@@ -66,25 +67,25 @@ std::shared_ptr<const CacheTopology> makeFakeTopology(const std::vector<std::str
         }
     }
     if (ordered_tags.empty() || per_group_layer_num == 0) {
-        return nullptr;
+        return {};
     }
 
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers;
+    std::vector<CacheGroup> groups;
+    std::vector<CacheLayerMembership> layers;
     groups.reserve(ordered_tags.size());
     layers.reserve(ordered_tags.size() * per_group_layer_num);
     for (const auto& tag : ordered_tags) {
-        GroupBase group;
+        CacheGroup group;
         group.tag                       = tag;
-        group.spec                      = makeFakeSpec(tag);
+        group.layout.spec                      = makeFakeSpec(tag);
         group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.block_num                 = 8;
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
-        group.kv_block_stride_bytes     = group.spec->block_size_bytes();
-        group.kv_scale_stride_bytes     = group.spec->scale_block_size_bytes();
+        group.layout.block_num                 = 8;
+        group.layout.seq_size_per_block        = 1;
+        group.layout.kernel_seq_size_per_block = 1;
+        group.layout.kv_block_stride_bytes     = group.layout.spec->block_size_bytes();
+        group.layout.kv_scale_stride_bytes     = group.layout.spec->scale_block_size_bytes();
         for (size_t i = 0; i < per_group_layer_num; ++i) {
-            LayerBase layer;
+            CacheLayerMembership layer;
             layer.layer_id = static_cast<int>(layers.size());
             layer.group_tags.push_back(tag);
             group.layer_ids.push_back(layer.layer_id);
@@ -92,27 +93,14 @@ std::shared_ptr<const CacheTopology> makeFakeTopology(const std::vector<std::str
         }
         groups.push_back(std::move(group));
     }
-    return CacheTopology::create(std::move(groups), std::move(layers));
-}
-
-CacheConfig makeFakeConfig(const std::shared_ptr<const CacheTopology>& topology) {
-    CacheConfig config;
-    if (topology == nullptr) {
-        return config;
-    }
-    config.layer_num          = static_cast<uint32_t>(topology->layers().size());
-    config.layer_all_num      = config.layer_num;
-    config.seq_size_per_block = topology->groups().front().seq_size_per_block;
-    config.setTopology(topology->groups(), topology->layers());
-    return config;
+    return rtp_llm::test::TestCacheConfigBuilder::withResolvedData({}, std::move(groups), std::move(layers));
 }
 
 }  // namespace
 
 class FakeKVCacheAllocator: public KVCacheAllocator {
 public:
-    FakeKVCacheAllocator(const CacheConfig& config, std::shared_ptr<const CacheTopology> topology):
-        KVCacheAllocator(config), topology_(std::move(topology)) {}
+    explicit FakeKVCacheAllocator(const CacheConfig& config): KVCacheAllocator(config) {}
     void free(const FreeInfo& free_info) override {
         return;
     }
@@ -133,16 +121,17 @@ public:
         tagged_buffer_requests_.emplace_back(layer_id, tag, block_id);
         BlockInfo info;
         info.addr       = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
-        info.size_bytes = config_.group(tag).kv_block_stride_bytes + config_.group(tag).kv_scale_stride_bytes;
+        info.size_bytes =
+            config_.group(tag).layout.kv_block_stride_bytes + config_.group(tag).layout.kv_scale_stride_bytes;
         return {info};
     }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
-        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
         GroupedCacheLayerLayout::GroupLayouts groups;
-        for (const auto& group : topology_->groups()) {
-            groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(topology_->layers().size())));
+        for (const auto& group : config_.groups()) {
+            groups.emplace(
+                group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config_.layerMemberships().size())));
         }
-        return GroupedCacheLayerLayout(topology_, std::move(groups));
+        return GroupedCacheLayerLayout(config_, std::move(groups));
     }
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
@@ -227,7 +216,6 @@ protected:
     }
 
 private:
-    std::shared_ptr<const CacheTopology> topology_;
     mutable std::vector<std::tuple<int, std::string, int>> tagged_buffer_requests_;
 };
 
@@ -286,9 +274,8 @@ public:
                          uint32_t                        linear_attention_write_interval = 0,
                          size_t                          sink_size                       = 0,
                          size_t                          sw_size                         = 0) {
-        topology_  = makeFakeTopology(full_tags, other_tags, per_group_layer_num);
-        config_    = makeFakeConfig(topology_);
-        allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
+        config_    = makeFakeCacheConfig(full_tags, other_tags, per_group_layer_num);
+        allocator_ = std::make_shared<FakeKVCacheAllocator>(config_);
         switch (group_mode) {
             case RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT: {
                 group_policy_ =
@@ -617,7 +604,6 @@ private:
     }
 
 private:
-    std::shared_ptr<const CacheTopology> topology_;
     std::shared_ptr<KVCacheAllocator>    allocator_;
     std::shared_ptr<GroupPolicy>         group_policy_;
     CacheConfig                          config_;
@@ -725,9 +711,8 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_full_gr
 TEST_F(GroupPolicyTest, test_init_DefaultLayerGroupPolicy_fail_for_duplicate_group) {
     std::vector<std::string> full_tags  = {"0", "1"};
     std::vector<std::string> other_tags = {"0", "1"};
-    topology_                           = makeFakeTopology(full_tags, other_tags, 10);
-    config_                             = makeFakeConfig(topology_);
-    allocator_                          = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
+    config_    = makeFakeCacheConfig(full_tags, other_tags, 10);
+    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_);
     group_policy_ = std::make_shared<remote_connector::DefaultLayerGroupPolicy>(allocator_, full_tags, other_tags);
     ASSERT_FALSE(group_policy_->init());
 }
@@ -735,9 +720,8 @@ TEST_F(GroupPolicyTest, test_init_DefaultLayerGroupPolicy_fail_for_duplicate_gro
 TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_empty_full_group) {
     std::vector<std::string> full_tags;
     std::vector<std::string> other_tags;
-    topology_     = makeFakeTopology(full_tags, other_tags, 10);
-    config_       = makeFakeConfig(topology_);
-    allocator_    = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
+    config_       = makeFakeCacheConfig(full_tags, other_tags, 10);
+    allocator_    = std::make_shared<FakeKVCacheAllocator>(config_);
     group_policy_ = std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_tags, other_tags);
     ASSERT_FALSE(group_policy_->init());
 }
@@ -762,9 +746,8 @@ TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_success_for_multiple_full
 TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_not_empty_other_group) {
     std::vector<std::string> full_tags  = {"0"};
     std::vector<std::string> other_tags = {"1"};
-    topology_                           = makeFakeTopology(full_tags, other_tags, 10);
-    config_                             = makeFakeConfig(topology_);
-    allocator_                          = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
+    config_    = makeFakeCacheConfig(full_tags, other_tags, 10);
+    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_);
     group_policy_ = std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_tags, other_tags);
     ASSERT_FALSE(group_policy_->init());
 }
@@ -773,9 +756,8 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_fail_for_not_empty_
     {
         std::vector<std::string> full_tags;
         std::vector<std::string> other_tags = {"1"};
-        topology_  = makeFakeTopology(full_tags, other_tags, 10);
-        config_    = makeFakeConfig(topology_);
-        allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
+        config_    = makeFakeCacheConfig(full_tags, other_tags, 10);
+        allocator_ = std::make_shared<FakeKVCacheAllocator>(config_);
         group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
             allocator_, full_tags, other_tags, 0);
         ASSERT_FALSE(group_policy_->init());
@@ -783,9 +765,8 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_fail_for_not_empty_
     {
         std::vector<std::string> full_tags = {"0"};
         std::vector<std::string> other_tags;
-        topology_  = makeFakeTopology(full_tags, other_tags, 10);
-        config_    = makeFakeConfig(topology_);
-        allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
+        config_    = makeFakeCacheConfig(full_tags, other_tags, 10);
+        allocator_ = std::make_shared<FakeKVCacheAllocator>(config_);
         group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
             allocator_, full_tags, other_tags, 0);
         ASSERT_FALSE(group_policy_->init());
@@ -993,14 +974,14 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
     {  // resource carries fewer cache groups than the policy
-        const auto narrow_config = makeFakeConfig(makeFakeTopology({"0"}, {"1"}, 4));
+        const auto narrow_config = makeFakeCacheConfig({"0"}, {"1"}, 4);
         auto       resource      = makeResourceForConfig(
             narrow_config, {0, 1, 2, 3, 4}, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, 7, 21}}});
         std::vector<std::string> real;
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
     }
     {  // resource carries more cache groups than the policy
-        const auto wide_config = makeFakeConfig(makeFakeTopology({"0"}, {"1", "2", "3"}, 4));
+        const auto wide_config = makeFakeCacheConfig({"0"}, {"1", "2", "3"}, 4);
         auto       resource    = makeResourceForConfig(wide_config,
                                                  {0, 1, 2, 3, 4},
                                                  {{"0", {0, 1, 2, 3, 20}},

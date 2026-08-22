@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 namespace rtp_llm {
 namespace test {
@@ -19,16 +20,16 @@ protected:
     void TearDown() override {}
 };
 
-static const GroupBase& makeTestFullGroup(KVCacheSpecPtr spec) {
-    static std::deque<GroupBase> groups;
-    GroupBase                    group;
+static const CacheGroup& makeTestFullGroup(KVCacheSpecPtr spec) {
+    static std::deque<CacheGroup> groups;
+    CacheGroup                    group;
     group.tag                       = "full";
-    group.spec                      = std::move(spec);
+    group.layout.spec                      = std::move(spec);
     group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.seq_size_per_block        = group.spec->seq_size_per_block;
-    group.kernel_seq_size_per_block = group.seq_size_per_block;
-    group.kv_block_stride_bytes     = group.spec->block_size_bytes();
-    group.kv_scale_stride_bytes     = group.spec->scale_block_size_bytes();
+    group.layout.seq_size_per_block        = group.layout.spec->seq_size_per_block;
+    group.layout.kernel_seq_size_per_block = group.layout.seq_size_per_block;
+    group.layout.kv_block_stride_bytes     = group.layout.spec->block_size_bytes();
+    group.layout.kv_scale_stride_bytes     = group.layout.spec->scale_block_size_bytes();
     groups.push_back(std::move(group));
     return groups.back();
 }
@@ -55,7 +56,7 @@ TEST_F(FullKVCacheGroupTest, RetainsCanonicalGroupAndSemanticTag) {
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
-    GroupBase cache_group    = makeTestFullGroup(spec);
+    CacheGroup cache_group    = makeTestFullGroup(spec);
 
     FullKVCacheGroup group(cache_group, block_pool);
 
@@ -108,11 +109,11 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
-    GroupBase cache_group    = makeTestFullGroup(spec);
+    CacheGroup cache_group    = makeTestFullGroup(spec);
     cache_group.layer_ids    = {0};
 
     CacheConfig cache_config;
-    cache_config.setTopology({cache_group}, {{0, {"full"}}});
+    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(cache_config, {cache_group}, {{0, {"full"}}});
     auto shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->init(cache_config, {{"full", block_pool}});
 

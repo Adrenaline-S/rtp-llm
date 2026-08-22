@@ -55,12 +55,12 @@ TEST_F(NormalEngineTest, testDecodeWarmUpUsesHybridCacheTagsAndGeometry) {
         const auto& cache_config                 = init_params.cache_manager->cacheConfig();
         const auto& full_group                   = cache_config.group("full");
         observation.full_type                    = full_group.policy.group_type;
-        observation.full_seq_size_per_block      = full_group.seq_size_per_block;
-        observation.full_kernel_size_per_block   = full_group.kernel_seq_size_per_block;
+        observation.full_seq_size_per_block      = full_group.layout.seq_size_per_block;
+        observation.full_kernel_size_per_block   = full_group.layout.kernel_seq_size_per_block;
         const auto& linear_group                 = cache_config.group("linear");
         observation.linear_type                  = linear_group.policy.group_type;
-        observation.linear_seq_size_per_block    = linear_group.seq_size_per_block;
-        observation.linear_kernel_size_per_block = linear_group.kernel_seq_size_per_block;
+        observation.linear_seq_size_per_block    = linear_group.layout.seq_size_per_block;
+        observation.linear_kernel_size_per_block = linear_group.layout.kernel_seq_size_per_block;
         return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
             observation.tags = inputs.kv_cache_group_tags;
             observation.block_shape.assign(inputs.kv_cache_block_id.sizes().begin(),

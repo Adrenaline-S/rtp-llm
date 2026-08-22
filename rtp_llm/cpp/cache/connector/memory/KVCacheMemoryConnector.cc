@@ -503,7 +503,7 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot>
 KVCacheMemoryConnector::buildPoolBlockMemoryLayout(const CacheConfig& cache_config) {
     std::vector<LayerTagSlot> slots;
     for (size_t layer = 0; layer < cache_config.layer_all_num; ++layer) {
-        auto sorted_tags = cache_config.groupsForLayer(static_cast<int>(layer));
+        auto sorted_tags = cache_config.groupTagsForLayer(static_cast<int>(layer));
         RTP_LLM_CHECK_WITH_INFO(!sorted_tags.empty(), "memory connector layer=%zu has no cache group tags", layer);
         std::sort(sorted_tags.begin(), sorted_tags.end());
         RTP_LLM_CHECK_WITH_INFO(std::adjacent_find(sorted_tags.begin(), sorted_tags.end()) == sorted_tags.end(),
@@ -515,21 +515,21 @@ KVCacheMemoryConnector::buildPoolBlockMemoryLayout(const CacheConfig& cache_conf
                 continue;
             }
             RTP_LLM_CHECK_WITH_INFO(
-                group.spec != nullptr, "memory connector group spec is null at layer=%zu tag=%s", layer, tag.c_str());
-            const size_t stride = group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
+                group.layout.spec != nullptr, "memory connector group spec is null at layer=%zu tag=%s", layer, tag.c_str());
+            const size_t stride = group.layout.kv_block_stride_bytes + group.layout.kv_scale_stride_bytes;
             RTP_LLM_CHECK_WITH_INFO(
                 stride > 0, "memory connector group physical stride is zero at layer=%zu tag=%s", layer, tag.c_str());
             CacheBlockKind kind = group.policy.group_type == CacheGroupType::FULL ? CacheBlockKind::COMPRESSED_KV :
                                                                                     CacheBlockKind::STATE_SWA_KV;
-            if (group.spec->type == KVCacheSpecType::OpaqueKV) {
+            if (group.layout.spec->type == KVCacheSpecType::OpaqueKV) {
                 kind = CacheBlockKind::COMPRESSED_KV;
-            } else if (group.spec->type == KVCacheSpecType::OpaqueState) {
+            } else if (group.layout.spec->type == KVCacheSpecType::OpaqueState) {
                 kind = CacheBlockKind::STATE_SWA_KV;
             }
             slots.push_back(LayerTagSlot{static_cast<int>(layer),
                                          tag,
-                                         group.kv_block_stride_bytes,
-                                         group.kv_scale_stride_bytes,
+                                         group.layout.kv_block_stride_bytes,
+                                         group.layout.kv_scale_stride_bytes,
                                          stride,
                                          kind,
                                          group.policy.group_type == CacheGroupType::FULL});
@@ -558,7 +558,7 @@ bool KVCacheMemoryConnector::usesTypedMemoryPoolLayout(const std::vector<LayerTa
     // Semantic tags identify resources in every layout, but only physical multi-group layouts
     // use the typed pool/copy algorithms. FULL+LINEAR hybrids split across layers remain a
     // one-group-per-layer layout even though their tags are non-default.
-    return supportsTypedPrefixCacheLayout(slots) || !cache_config_.topology().hasOneGroupPerLayer();
+    return supportsTypedPrefixCacheLayout(slots) || !cache_config_.hasOneGroupPerLayer();
 }
 
 bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<LayerTagSlot>& slots) const {
@@ -569,23 +569,23 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
         || !cache_config_.use_independent_block_pools) {
         return false;
     }
-    const auto& groups = cache_config_.topology().groups();
-    if (groups.empty() || cache_config_.topology().layers().size() < cache_config_.layer_all_num) {
+    const auto& groups = cache_config_.groups();
+    if (groups.empty() || cache_config_.layerMemberships().size() < cache_config_.layer_all_num) {
         return false;
     }
 
     bool has_compressed = false;
     bool has_state      = false;
     for (const auto& group : groups) {
-        if (group.spec == nullptr) {
+        if (group.layout.spec == nullptr) {
             return false;
         }
-        if (group.kv_block_stride_bytes + group.kv_scale_stride_bytes == 0) {
+        if (group.layout.kv_block_stride_bytes + group.layout.kv_scale_stride_bytes == 0) {
             return false;
         }
-        if (group.spec->type == KVCacheSpecType::OpaqueKV) {
+        if (group.layout.spec->type == KVCacheSpecType::OpaqueKV) {
             has_compressed = true;
-        } else if (group.spec->type == KVCacheSpecType::OpaqueState) {
+        } else if (group.layout.spec->type == KVCacheSpecType::OpaqueState) {
             has_state = true;
         } else {
             return false;
@@ -595,7 +595,7 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
         return false;
     }
     for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-        if (cache_config_.groupsForLayer(static_cast<int>(layer)).empty()) {
+        if (cache_config_.groupTagsForLayer(static_cast<int>(layer)).empty()) {
             return false;
         }
     }
@@ -605,9 +605,9 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
             return false;
         }
         const auto& group = cache_config_.groupForLayer(slot.layer_id, slot.tag);
-        if (slot.stride_bytes != group.kv_block_stride_bytes + group.kv_scale_stride_bytes
-            || slot.kv_block_stride_bytes != group.kv_block_stride_bytes
-            || slot.kv_scale_stride_bytes != group.kv_scale_stride_bytes) {
+        if (slot.stride_bytes != group.layout.kv_block_stride_bytes + group.layout.kv_scale_stride_bytes
+            || slot.kv_block_stride_bytes != group.layout.kv_block_stride_bytes
+            || slot.kv_scale_stride_bytes != group.layout.kv_scale_stride_bytes) {
             return false;
         }
     }

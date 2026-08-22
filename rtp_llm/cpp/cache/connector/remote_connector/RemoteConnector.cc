@@ -186,7 +186,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
 }
 
 void RemoteConnector::validateConfig(const CacheConfig& cache_config) {
-    remote_connector::validateRemoteCacheTopology(cache_config);
+    remote_connector::validateRemoteCacheConfig(cache_config);
 }
 
 RemoteConnector::~RemoteConnector() {
@@ -208,7 +208,7 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
         const auto& cache_tag        = entry.first;
         const auto& config_group     = init_params_->cache_config.group(cache_tag);
         const auto  group_block_size = config_group.layer_ids.size()
-                                      * (config_group.kv_block_stride_bytes + config_group.kv_scale_stride_bytes);
+                                      * (config_group.layout.kv_block_stride_bytes + config_group.layout.kv_scale_stride_bytes);
         const auto& group    = entry.second;
         auto [iter, success] = location_spec_groups_ptr->insert({group.group_name, {}});
         assert(success);
@@ -290,7 +290,7 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     auto [location_spec_info_map, location_spec_groups] = genLocationSpecInfoMapAndGroups(tp_size);
 
     std::string draft_model_info = "";
-    if (init_params_->cache_config.mtp_sub_configs.size() != 0) {
+    if (init_params_->cache_config.mtpModuleCount() != 0) {
         draft_model_info += '{' + init_params_->sp_config.to_string() + '}';
     }
 

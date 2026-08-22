@@ -335,7 +335,7 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
 
 namespace {
 
-std::vector<std::string> buildBoundaryGroupTags(const std::unordered_map<std::string, GroupBase>& groups) {
+std::vector<std::string> buildBoundaryGroupTags(const std::unordered_map<std::string, CacheGroup>& groups) {
     std::vector<std::string> tags;
     tags.reserve(groups.size());
     for (const auto& [tag, group] : groups) {

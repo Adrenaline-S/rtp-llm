@@ -498,7 +498,7 @@ std::vector<size_t> PyWrappedModel::validateTaggedCacheBoundary(const GptModelIn
                                     tag.c_str());
             input_idx = static_cast<size_t>(std::distance(inputs.kv_cache_group_tags.begin(), input_it));
         }
-        const auto expected_type = kv_cache_layer_layout_->topology().group(tag).policy.group_type;
+        const auto expected_type = kv_cache_layer_layout_->groupType(tag);
         RTP_LLM_CHECK_WITH_INFO(input_types[input_idx] == static_cast<int32_t>(expected_type),
                                 "cache group type mismatch for tag=%s: input=%d expected=%d",
                                 tag.c_str(),

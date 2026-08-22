@@ -677,8 +677,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    const auto& cache_groups = cache_config.topology().groups();
-    is_linear_attention_model_ = std::any_of(cache_groups.begin(), cache_groups.end(), [](const GroupBase& group) {
+    const auto& cache_groups = cache_config.groups();
+    is_linear_attention_model_ = std::any_of(cache_groups.begin(), cache_groups.end(), [](const CacheGroup& group) {
         return group.policy.group_type == CacheGroupType::LINEAR;
     });
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
@@ -1761,10 +1761,10 @@ int MtpExecutor::debugLinearSeqSizePerBlock(const CacheConfig& cache_config, std
     RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::LINEAR,
                             "debug linear block geometry requested for non-LINEAR tag=%s",
                             std::string(tag).c_str());
-    RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block > 0,
+    RTP_LLM_CHECK_WITH_INFO(group.layout.seq_size_per_block > 0,
                             "debug linear block geometry has zero seq_size_per_block for tag=%s",
                             std::string(tag).c_str());
-    return static_cast<int>(group.seq_size_per_block);
+    return static_cast<int>(group.layout.seq_size_per_block);
 }
 
 void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,

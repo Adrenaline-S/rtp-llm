@@ -17,6 +17,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #define private public
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
@@ -92,14 +93,14 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     config.use_opaque_kv_cache_store      = true;
     config.group_block_layout_initialized = true;
 
-    std::vector<GroupBase>   topology_groups;
+    std::vector<CacheGroup>   topology_groups;
     std::vector<std::string> layer_tags;
     topology_groups.reserve(groups.size());
     layer_tags.reserve(groups.size());
     for (const auto& spec : groups) {
-        GroupBase group;
+        CacheGroup group;
         group.tag    = spec.tag;
-        group.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
+        group.layout.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
         group.policy = defaultCacheGroupPolicy(spec.tag == "linear" ? CacheGroupType::LINEAR : CacheGroupType::FULL);
         // This integration fixture exercises boundary association, not tail-only
         // transfer policy; retain all four physical rows while using distinct
@@ -107,19 +108,19 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         group.policy.active_tail_blocks = 0;
         group.policy.explicit_block_num = kPhysicalBlocks;
         group.layer_ids                 = {kLayerId};
-        group.block_num                 = kPhysicalBlocks;
-        group.seq_size_per_block        = spec.tokens_per_block;
-        group.kernel_seq_size_per_block = spec.tokens_per_block;
-        group.kv_block_stride_bytes     = spec.stride_bytes;
+        group.layout.block_num                 = kPhysicalBlocks;
+        group.layout.seq_size_per_block        = spec.tokens_per_block;
+        group.layout.kernel_seq_size_per_block = spec.tokens_per_block;
+        group.layout.kv_block_stride_bytes     = spec.stride_bytes;
         topology_groups.push_back(std::move(group));
         layer_tags.push_back(spec.tag);
     }
 
-    LayerBase layer;
+    CacheLayerMembership layer;
     layer.layer_id   = kLayerId;
     layer.group_tags = std::move(layer_tags);
-    config.setTopology(std::move(topology_groups), {std::move(layer)});
-    return config;
+    return TestCacheConfigBuilder::withResolvedData(
+        std::move(config), std::move(topology_groups), {std::move(layer)});
 }
 
 struct LayoutAndBases {
@@ -130,15 +131,15 @@ struct LayoutAndBases {
 LayoutAndBases makeLayout(const CacheConfig& config) {
     GroupedCacheLayerLayout::GroupLayouts layouts;
     std::map<std::string, uintptr_t>      bases;
-    for (const auto& group : config.topology().groups()) {
+    for (const auto& group : config.groups()) {
         auto storage =
-            torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.kv_block_stride_bytes)},
+            torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.layout.kv_block_stride_bytes)},
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         bases.emplace(group.tag, reinterpret_cast<uintptr_t>(storage.data_ptr()));
         layouts.emplace(group.tag,
                         CacheLayerLayout(std::vector<BlockBufferPtrInfo>{{std::move(storage), torch::Tensor()}}));
     }
-    return {GroupedCacheLayerLayout(config.topologyPtr(), std::move(layouts)), std::move(bases)};
+    return {GroupedCacheLayerLayout(config, std::move(layouts)), std::move(bases)};
 }
 
 class RecordingCacheStore: public CacheStore {
@@ -465,9 +466,9 @@ Scenario makeTpNonRootMultiTagScenario() {
 
 Scenario makeMtpScenario() {
     auto main_config  = makeCacheConfig({{"main", 4, 16}});
-    auto draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
-    auto layout       = makeLayout(*draft_config);
-    main_config.mtp_sub_configs.push_back(draft_config);
+    auto draft_config = makeCacheConfig({{"draft", 2, 32}});
+    auto layout       = makeLayout(draft_config);
+    main_config = test::TestCacheConfigBuilder::withMTPModules(std::move(main_config), {std::move(draft_config)});
     auto     inputs = makeInputs(/*input_lengths=*/{4},
                              /*request_ids=*/{401},
                              /*cache_keys=*/{4101, 4102},

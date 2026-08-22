@@ -10,7 +10,7 @@ namespace rtp_llm {
 
 void SharedBlockCache::init(const CacheConfig& config, const std::map<std::string, BlockPoolPtr>& group_pools) {
     std::lock_guard<std::mutex> lock(mu_);
-    const auto&                 groups = config.topology().groups();
+    const auto&                 groups = config.groups();
     RTP_LLM_CHECK_WITH_INFO(group_pools.size() == groups.size(),
                             "group_pools size %zu != cache group count %zu",
                             group_pools.size(),

@@ -112,14 +112,14 @@ size_t KVCacheGroup::freeBlocksNum() const {
 }
 
 int KVCacheGroup::seqSizePerBlock() const {
-    return static_cast<int>(cache_group_.seq_size_per_block);
+    return static_cast<int>(cache_group_.layout.seq_size_per_block);
 }
 
 const std::string& KVCacheGroup::tag() const {
     return cache_group_.tag;
 }
 
-const GroupBase& KVCacheGroup::config() const {
+const CacheGroup& KVCacheGroup::config() const {
     return cache_group_;
 }
 

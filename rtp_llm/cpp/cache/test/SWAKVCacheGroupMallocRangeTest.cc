@@ -83,14 +83,14 @@ TEST(SWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M)
 
     ScopedEnvVar disable_pin_host_pool("RTP_LLM_PIN_HOST_BLOCK_POOL", "0");
     auto         block_pool = createHostBlockPool();
-    GroupBase    group_config;
+    CacheGroup    group_config;
     group_config.tag                       = "swa";
-    group_config.spec                      = makeMHASpec(kSeqSizePerBlock);
+    group_config.layout.spec                      = makeMHASpec(kSeqSizePerBlock);
     group_config.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    group_config.seq_size_per_block        = kSeqSizePerBlock;
-    group_config.kernel_seq_size_per_block = kSeqSizePerBlock;
-    group_config.kv_block_stride_bytes     = group_config.spec->block_size_bytes();
-    group_config.kv_scale_stride_bytes     = group_config.spec->scale_block_size_bytes();
+    group_config.layout.seq_size_per_block        = kSeqSizePerBlock;
+    group_config.layout.kernel_seq_size_per_block = kSeqSizePerBlock;
+    group_config.layout.kv_block_stride_bytes     = group_config.layout.spec->block_size_bytes();
+    group_config.layout.kv_scale_stride_bytes     = group_config.layout.spec->scale_block_size_bytes();
     SWAKVCacheGroup group(std::move(group_config), block_pool, 0);
 
     auto check_seq_len = [&](int seq_len) {

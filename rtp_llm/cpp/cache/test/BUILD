@@ -62,11 +62,13 @@ cc_library(
 )
 
 cc_test(
-    name = "cache_topology_test",
-    srcs = ["CacheTopologyTest.cc"],
-    copts = test_copts,
+    name = "cache_config_structure_test",
+    srcs = ["CacheConfigStructureTest.cc"],
+    # This authority-boundary test must honor C++ access control.
+    copts = copts(),
     deps = [
         "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
@@ -101,6 +103,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
@@ -135,6 +138,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "@com_google_googletest//:gtest",

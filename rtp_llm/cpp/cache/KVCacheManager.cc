@@ -6,11 +6,13 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
@@ -34,14 +36,14 @@ struct GlobalCacheMetricsSnapshot {
     size_t                      connector_ref_blocks = 0;
 };
 
-void validateRemoteCacheTopologyBeforeAllocation(const CacheConfig& cache_config) {
+void validateRemoteCacheConfigBeforeAllocation(const CacheConfig& cache_config) {
     const auto group_num = static_cast<size_t>(cache_config.groupNums());
     const auto full_group_num =
-        std::count_if(cache_config.topology().groups().begin(),
-                      cache_config.topology().groups().end(),
-                      [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::FULL; });
+        std::count_if(cache_config.groups().begin(),
+                      cache_config.groups().end(),
+                      [](const CacheGroup& group) { return group.policy.group_type == CacheGroupType::FULL; });
     RTP_LLM_CHECK_WITH_INFO(group_num == 1 && full_group_num == 1
-                                && cache_config.topology().groups().front().policy.group_type
+                                && cache_config.groups().front().policy.group_type
                                        == CacheGroupType::FULL,
                             "remote cache requires exactly one FULL cache group, groups=%zu full_groups=%zu",
                             group_num,
@@ -53,21 +55,21 @@ void validateSharedPoolTopologyBeforeAllocation(const CacheConfig& cache_config)
         return;
     }
 
-    const auto is_full_attention = [](const GroupBase& group) {
-        return group.policy.group_type == CacheGroupType::FULL && group.spec
-               && (group.spec->type == KVCacheSpecType::MultiHeadAttention
-                   || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+    const auto is_full_attention = [](const CacheGroup& group) {
+        return group.policy.group_type == CacheGroupType::FULL && group.layout.spec
+               && (group.layout.spec->type == KVCacheSpecType::MultiHeadAttention
+                   || group.layout.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
     };
     if (cache_config.groupNums() == 1) {
-        const auto& group = cache_config.topology().groups().front();
-        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "sole cache group tag=%s has null spec", group.tag.c_str());
+        const auto& group = cache_config.groups().front();
+        RTP_LLM_CHECK_WITH_INFO(group.layout.spec != nullptr, "sole cache group tag=%s has null spec", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(is_full_attention(group),
                                 "HybridPoolKVCacheAllocator requires one FULL MHA/MLA cache group");
         return;
     }
 
     const bool has_full_attention = std::any_of(
-        cache_config.topology().groups().begin(), cache_config.topology().groups().end(), is_full_attention);
+        cache_config.groups().begin(), cache_config.groups().end(), is_full_attention);
     RTP_LLM_CHECK_WITH_INFO(has_full_attention,
                             "HybridPoolKVCacheAllocator requires at least one FULL MHA/MLA cache group");
 }
@@ -137,55 +139,46 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
 }
 
-std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
-                                                     const std::vector<size_t>& global_layer_ids) {
-    std::vector<GroupBase> groups = source.groups();
-    // Local vector index over the projected copy built here. The tag remains
-    // the identity; this idx never leaves the function.
-    std::unordered_map<std::string, size_t> tag_to_projected_idx;
-    for (size_t idx = 0; idx < groups.size(); ++idx) {
-        groups[idx].layer_ids.clear();
-        tag_to_projected_idx.emplace(groups[idx].tag, idx);
-    }
-
-    std::vector<LayerBase> layers;
-    layers.reserve(global_layer_ids.size());
-    for (size_t local_layer_id = 0; local_layer_id < global_layer_ids.size(); ++local_layer_id) {
-        const auto& source_layer = source.layer(static_cast<int>(global_layer_ids[local_layer_id]));
-        LayerBase   layer;
-        layer.layer_id   = static_cast<int>(local_layer_id);
-        layer.group_tags = source_layer.group_tags;
-        for (const auto& tag : layer.group_tags) {
-            const auto projected = tag_to_projected_idx.find(tag);
-            RTP_LLM_CHECK_WITH_INFO(
-                projected != tag_to_projected_idx.end(), "projectLayout missing projected cache tag=%s", tag.c_str());
-            groups[projected->second].layer_ids.push_back(static_cast<int>(local_layer_id));
-        }
-        layers.push_back(std::move(layer));
-    }
-    return CacheTopology::create(std::move(groups), std::move(layers));
-}
-
 GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       source,
-                                      std::shared_ptr<const CacheTopology> target_topology,
+                                      const CacheConfig&                  target_config,
                                       const std::vector<size_t>&           global_layer_ids) {
-    RTP_LLM_CHECK_WITH_INFO(target_topology != nullptr, "cache layout projection requires a target topology");
-    RTP_LLM_CHECK_WITH_INFO(target_topology->layers().size() == global_layer_ids.size(),
-                            "cache layout projection topology layers=%zu mapping size=%zu",
-                            target_topology->layers().size(),
+    RTP_LLM_CHECK_WITH_INFO(target_config.layer_num == global_layer_ids.size(),
+                            "cache layout projection config layers=%u mapping size=%zu",
+                            target_config.layer_num,
                             global_layer_ids.size());
 
+    ResolvedCacheConfigData projected_data;
+    projected_data.groups = target_config.groups();
+    std::unordered_map<std::string, size_t> tag_to_projected_group;
+    for (size_t group_index = 0; group_index < projected_data.groups.size(); ++group_index) {
+        projected_data.groups[group_index].layer_ids.clear();
+        tag_to_projected_group.emplace(projected_data.groups[group_index].tag, group_index);
+    }
+    projected_data.layers.reserve(global_layer_ids.size());
+    for (size_t local = 0; local < global_layer_ids.size(); ++local) {
+        CacheLayerMembership membership;
+        membership.layer_id   = static_cast<int>(local);
+        membership.group_tags = target_config.groupTagsForLayer(static_cast<int>(local));
+        for (const auto& tag : membership.group_tags) {
+            const auto projected = tag_to_projected_group.find(tag);
+            RTP_LLM_CHECK_WITH_INFO(projected != tag_to_projected_group.end(),
+                                    "projectLayout missing projected cache tag=%s",
+                                    tag.c_str());
+            projected_data.groups[projected->second].layer_ids.push_back(static_cast<int>(local));
+        }
+        projected_data.layers.push_back(std::move(membership));
+    }
+    const auto projected_config = CacheConfigCreator::buildResolvedConfig(std::move(projected_data));
+
     GroupedCacheLayerLayout::GroupLayouts groups;
-    for (const auto& target_group : target_topology->groups()) {
+    for (const auto& target_group : projected_config.groups()) {
         std::vector<BlockBufferPtrInfo> layers(global_layer_ids.size());
         const auto&                     source_group = source.group(target_group.tag);
-        for (int local_layer_id : target_group.layer_ids) {
-            RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0
-                                        && static_cast<size_t>(local_layer_id) < global_layer_ids.size(),
-                                    "cache layout projection tag=%s invalid local layer=%d",
-                                    target_group.tag.c_str(),
-                                    local_layer_id);
-            const auto local  = static_cast<size_t>(local_layer_id);
+        for (size_t local = 0; local < global_layer_ids.size(); ++local) {
+            const auto& tags = projected_config.groupTagsForLayer(static_cast<int>(local));
+            if (std::find(tags.begin(), tags.end(), target_group.tag) == tags.end()) {
+                continue;
+            }
             const auto global = global_layer_ids[local];
             if (source_group.hasLayer(global)) {
                 layers[local] = source_group.at(global);
@@ -193,7 +186,7 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
         }
         groups.emplace(target_group.tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
+    return GroupedCacheLayerLayout(projected_config, std::move(groups));
 }
 
 bool cacheStatusSnapshotEnabled() {
@@ -223,7 +216,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
     if (warmup) {
-        config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
+        config_ = CacheConfigCreator::finalizeBlockNums(config_, /*global_block_num=*/1, runtime_config_);
     } else {
         allocateAndSync();
     }
@@ -272,7 +265,7 @@ bool KVCacheManager::init() {
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
-        validateRemoteCacheTopologyBeforeAllocation(config_);
+        validateRemoteCacheConfigBeforeAllocation(config_);
     }
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
@@ -313,13 +306,11 @@ const CacheConfig& KVCacheManager::cacheConfig() const {
 }
 
 const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
-    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
+    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtpModuleCount(),
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
                             mtp_module_id,
-                            config_.mtp_sub_configs.size());
-    RTP_LLM_CHECK_WITH_INFO(
-        config_.mtp_sub_configs[mtp_module_id] != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    return *config_.mtp_sub_configs[mtp_module_id];
+                            config_.mtpModuleCount());
+    return config_.mtpModule(static_cast<size_t>(mtp_module_id));
 }
 
 // 显存管理和缓存分配
@@ -469,8 +460,7 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
     const auto          all_layout = allocator_->allLayerCacheBase();
     std::vector<size_t> global_layer_ids(config_.layer_num);
     std::iota(global_layer_ids.begin(), global_layer_ids.end(), 0);
-    auto main_topology = projectTopology(all_layout.topology(), global_layer_ids);
-    return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
+    return projectLayout(all_layout, config_, global_layer_ids);
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
@@ -478,14 +468,13 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const {
-    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
+    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtpModuleCount(),
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
                             mtp_module_id,
-                            config_.mtp_sub_configs.size());
+                            config_.mtpModuleCount());
 
-    const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
-    RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    const uint32_t      mtp_layer_num = mtp_sub_config->layer_num;
+    const auto&    mtp_sub_config = config_.mtpModule(static_cast<size_t>(mtp_module_id));
+    const uint32_t mtp_layer_num  = mtp_sub_config.layer_num;
     std::vector<size_t> global_layer_ids;
     global_layer_ids.reserve(mtp_layer_num);
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
@@ -499,7 +488,7 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
                                 local_layer_id);
         global_layer_ids.push_back(global_layer_id);
     }
-    return projectLayout(allocator_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
+    return projectLayout(allocator_->allLayerCacheBase(), mtp_sub_config, global_layer_ids);
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id) const {
@@ -699,7 +688,8 @@ void KVCacheManager::allocateAndSync() {
             config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
         }
     }
-    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+    config_ = CacheConfigCreator::finalizeBlockNums(
+        config_, static_cast<uint32_t>(config_.block_num), runtime_config_);
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
 
@@ -745,7 +735,7 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                                          const torch::Tensor& k_buffer,
                                          const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.topology().groups().front().spec;
+    auto&  spec             = config_.groups().front().layout.spec;
     size_t expected_k_bytes = spec->k_block_size_bytes();
     size_t expected_v_bytes = spec->v_block_size_bytes();
     size_t src_k_bytes      = k_buffer.nbytes();

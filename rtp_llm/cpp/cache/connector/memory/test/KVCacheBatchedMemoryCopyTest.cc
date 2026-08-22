@@ -213,9 +213,9 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     for (size_t declared = 0; declared < kDsv4PoolNum; ++declared) {
         specs.push_back(make_spec(declared));
     }
-    config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
-    config.setGroupPolicies(group_policies);
-    config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, specs, layers_by_group, group_types, group_tags);
+    rtp_llm::test::TestCacheConfigBuilder::setGroupPolicies(config, group_policies);
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
     return config;
 }
 
@@ -227,13 +227,13 @@ void setGroupStridesForConfig(CacheConfig&               config,
                               const std::vector<size_t>& kv_block_stride_bytes,
                               const std::vector<size_t>& kv_scale_stride_bytes) {
     std::vector<uint32_t> block_nums;
-    for (const auto& group : config.topology().groups()) {
-        block_nums.push_back(group.block_num);
+    for (const auto& group : config.groups()) {
+        block_nums.push_back(group.layout.block_num);
     }
     if (block_nums.empty()) {
         block_nums.assign(static_cast<size_t>(config.groupNums()), config.block_num);
     }
-    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
 }
 
 ModelConfig makeDsv4ProModelConfig() {
@@ -302,12 +302,12 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
     config.kernel_seq_size_per_block   = 4;
     config.use_independent_block_pools = true;
 
-    config.fromGroupedSpecs({makeMhaSpec("csa_kv", config.seq_size_per_block, config.dtype, 1, 4),
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, {makeMhaSpec("csa_kv", config.seq_size_per_block, config.dtype, 1, 4),
                              makeMhaSpec("swa_kv", config.seq_size_per_block, config.dtype, 1, 8)},
                             /*layers_by_group=*/{{0, 1}, {0, 1}},
                             {CacheGroupType::FULL, CacheGroupType::FULL},
                             {"csa_kv", "swa_kv"});
-    config.setGroupBlockLayout({config.block_num, config.block_num}, {16, 32}, {0, 0});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, {config.block_num, config.block_num}, {16, 32}, {0, 0});
     return config;
 }
 
@@ -324,12 +324,12 @@ CacheConfig makeKvOnlyTypedOpaqueConfig() {
     config.use_opaque_kv_cache_store   = true;
 
     const auto seq_size = static_cast<uint32_t>(config.seq_size_per_block);
-    config.fromGroupedSpecs({makeResolvedOpaqueSpec(/*state_cache=*/false, "csa_kv", config.dtype, 64, seq_size),
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, {makeResolvedOpaqueSpec(/*state_cache=*/false, "csa_kv", config.dtype, 64, seq_size),
                              makeResolvedOpaqueSpec(/*state_cache=*/false, "indexer_kv", config.dtype, 32, seq_size)},
                             /*layers_by_group=*/{{0, 1}, {0, 1}},
                             {CacheGroupType::FULL, CacheGroupType::FULL},
                             {"csa_kv", "indexer_kv"});
-    config.setGroupBlockLayout({config.block_num, config.block_num}, {64, 32}, {0, 0});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, {config.block_num, config.block_num}, {64, 32}, {0, 0});
     return config;
 }
 
@@ -409,16 +409,16 @@ public:
         payload_gap_bytes_(payload_gap_bytes) {
         const auto  cuda_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
         const auto  host_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-        const auto& layers       = config.topology().layers();
+        const auto& layers       = config.layerMemberships();
         for (int layer = 0; layer < static_cast<int>(config.layer_all_num); ++layer) {
             if (static_cast<size_t>(layer) >= layers.size()) {
                 continue;
             }
-            for (const auto& tag : config.groupsForLayer(layer)) {
+for (const auto& tag : config.groupTagsForLayer(layer)) {
                 if (tag.empty()) {
                     continue;
                 }
-                const size_t stride = config.group(tag).kv_block_stride_bytes + config.group(tag).kv_scale_stride_bytes;
+                const size_t stride = config.group(tag).layout.kv_block_stride_bytes + config.group(tag).layout.kv_scale_stride_bytes;
                 if (stride == 0) {
                     continue;
                 }
@@ -491,7 +491,7 @@ public:
     GroupedCacheLayerLayout allLayerCacheBase() const override {
         // This fake serves its buffers per (layer, tag) from tensors_, so the layout needs no
         // buffer pointers. It must still carry the cache-plan topology: KVCacheMemoryConnector's
-        // wiring guard reads allLayerCacheBase().topology(), and a default-constructed layout has
+        // wiring guard reads allLayerCacheBase() routing, and a default-constructed layout has
         // none.
         return makeTopologyOnlyLayerLayout(config_);
     }
@@ -1499,14 +1499,14 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     resource.resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
     resource.setCacheKeys(cache_keys);
 
-    for (const auto& layer : config.topology().layers()) {
-        for (const auto& tag : config.groupsForLayer(layer.layer_id)) {
+    for (const auto& layer : config.layerMemberships()) {
+for (const auto& tag : config.groupTagsForLayer(layer.layer_id)) {
             // Distinct block ids per (layer, tag); the offset is a fixture detail.
             const auto offset = static_cast<BlockIdxType>(
-                std::distance(config.topology().groups().begin(),
-                              std::find_if(config.topology().groups().begin(),
-                                           config.topology().groups().end(),
-                                           [&tag](const GroupBase& group) { return group.tag == tag; })));
+                std::distance(config.groups().begin(),
+                              std::find_if(config.groups().begin(),
+                                           config.groups().end(),
+                                           [&tag](const CacheGroup& group) { return group.tag == tag; })));
             auto& blocks = resource.mutableBlockIdsForLayer(layer.layer_id, tag);
             blocks.setAt(0, static_cast<BlockIdxType>(10 + offset));
             blocks.setAt(1, static_cast<BlockIdxType>(20 + offset));

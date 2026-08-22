@@ -25,7 +25,7 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(const GroupBase&                    cache_group,
+    KVCacheGroup(const CacheGroup&                    cache_group,
                  BlockPoolPtr                        block_pool,
                  SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
@@ -80,7 +80,7 @@ public:
     bool                    ensureFreeBlocks(int need_blocks);
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
-    const GroupBase&        config() const;
+    const CacheGroup&        config() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
@@ -94,7 +94,7 @@ public:
     virtual bool isReservable() const;
 
 protected:
-    const GroupBase&             cache_group_;
+    const CacheGroup&             cache_group_;
     BlockPoolPtr                 block_pool_;
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;

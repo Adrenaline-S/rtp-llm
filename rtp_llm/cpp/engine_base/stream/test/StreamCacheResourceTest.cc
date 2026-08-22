@@ -121,9 +121,9 @@ protected:
         // This must stay an accurate expectation: ASSERT_* here only returns from this helper, so a
         // stale value leaves stream_ null and the caller crashes on the next dereference.
         size_t expected_free_blocks = 0;
-        for (const auto& group : cache_config.topology().groups()) {
-            ASSERT_GT(group.block_num, 0u);
-            expected_free_blocks += static_cast<size_t>(group.block_num) - 1;
+        for (const auto& group : cache_config.groups()) {
+            ASSERT_GT(group.layout.block_num, 0u);
+            expected_free_blocks += static_cast<size_t>(group.layout.block_num) - 1;
         }
         ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_free_blocks);
         ResourceContext resource_context;

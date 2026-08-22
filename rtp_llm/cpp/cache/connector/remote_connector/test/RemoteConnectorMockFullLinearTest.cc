@@ -1,7 +1,7 @@
 // Why the end-to-end hybrid full+linear remote coverage that used to live here is gone:
 //
 //   * The approved design authorizes remote cache support for a **single FULL cache group
-//     only**. `validateRemoteCacheTopology()` rejects any other topology and `RemoteConnector`
+//     only**. `validateRemoteCacheConfig()` rejects any other config and `RemoteConnector`
 //     is hard-wired to `FullLayerGroupPolicy` with an empty other-tags list, so the
 //     1-FULL-plus-2-LINEAR remote topology those 19 tests drove is no longer a reachable
 //     configuration — they exercised a premise the design now deliberately refuses.
@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -136,7 +137,8 @@ private:
         cache_config_.seq_size_per_block = seq_size_per_block;
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
 
-        cache_config_.fromGroupedSpecs(specs, layers_by_group, group_types, tags);
+        cache_config_ = buildTestCacheConfigFromGroupedSpecs(
+            std::move(cache_config_), specs, layers_by_group, group_types, tags);
 
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
@@ -159,11 +161,11 @@ private:
 // time — before init(), before any meta client exists. Only the failure stage and category
 // are asserted here; the message text is free to change in this phase.
 TEST_F(RemoteConnectorMockFullLinearTest, test_construct_rejects_full_plus_linear_remote_topology) {
-    const auto& groups = cache_config_.topology().groups();
+    const auto& groups = cache_config_.groups();
     ASSERT_EQ(groups.size(), 3u);
     ASSERT_EQ(std::count_if(groups.begin(),
                             groups.end(),
-                            [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::FULL; }),
+                            [](const CacheGroup& group) { return group.policy.group_type == CacheGroupType::FULL; }),
               1);
 
     // The topology is a legal, allocatable hybrid pool: the rejection below belongs to the

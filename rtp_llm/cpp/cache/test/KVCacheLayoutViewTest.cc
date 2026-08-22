@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,12 @@
 
 namespace rtp_llm {
 namespace {
+
+static_assert(!std::is_constructible_v<GroupedCacheLayerLayout,
+                                       GroupedCacheLayerLayout::GroupLayouts,
+                                       std::map<std::string, CacheGroupLayout>,
+                                       std::vector<std::vector<std::string>>>,
+              "GroupedCacheLayerLayout metadata must be derived from CacheConfig");
 
 class TestKVCacheSpec: public KVCacheSpec {
 public:
@@ -60,7 +67,7 @@ private:
     size_t v_elems_;
 };
 
-GroupBase makeGroup(const std::string& tag,
+CacheGroup makeGroup(const std::string& tag,
                     KVCacheSpecType    spec_type,
                     CacheGroupType     group_type,
                     size_t             physical_seq_size,
@@ -68,30 +75,35 @@ GroupBase makeGroup(const std::string& tag,
                     size_t             k_elems,
                     size_t             v_elems,
                     uint32_t           local_kv_heads = 1) {
-    GroupBase group;
+    CacheGroup group;
     group.tag                       = tag;
-    group.spec                      = std::make_shared<TestKVCacheSpec>(spec_type, physical_seq_size, k_elems, v_elems);
+    group.layout.spec                      = std::make_shared<TestKVCacheSpec>(spec_type, physical_seq_size, k_elems, v_elems);
     group.policy.group_type         = group_type;
     group.layer_ids                 = {0};
-    group.block_num                 = 4;
-    group.local_kv_head_num         = local_kv_heads;
-    group.seq_size_per_block        = physical_seq_size;
-    group.kernel_seq_size_per_block = kernel_seq_size;
+    group.layout.block_num                 = 4;
+    group.layout.local_kv_head_num         = local_kv_heads;
+    group.layout.seq_size_per_block        = physical_seq_size;
+    group.layout.kernel_seq_size_per_block = kernel_seq_size;
     return group;
 }
 
-GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>          groups,
+GroupedCacheLayerLayout makeLayout(std::vector<CacheGroup>          groups,
                                    std::vector<std::string>        layer_tags,
                                    std::vector<BlockBufferPtrInfo> buffers) {
     EXPECT_EQ(groups.size(), buffers.size());
-    auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
+    std::vector<std::string> group_tags;
+    group_tags.reserve(groups.size());
+    for (const auto& group : groups) {
+        group_tags.push_back(group.tag);
+    }
+    auto config = CacheConfigCreator::buildResolvedConfig({std::move(groups), {{0, std::move(layer_tags)}}});
     GroupedCacheLayerLayout::GroupLayouts layouts;
     size_t buffer_ordinal = 0;
-    for (const auto& group : topology->groups()) {
-        layouts.emplace(group.tag,
+    for (const auto& tag : group_tags) {
+        layouts.emplace(tag,
                         CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[buffer_ordinal++])}));
     }
-    return GroupedCacheLayerLayout(std::move(topology), std::move(layouts));
+    return GroupedCacheLayerLayout(config, std::move(layouts));
 }
 
 CacheConfig createSparseIndexerCacheConfig() {
@@ -119,16 +131,15 @@ CacheConfig createSparseIndexerCacheConfig() {
 }
 
 GroupedCacheLayerLayout makeIndexerLayout(const CacheConfig& config, torch::Tensor physical_storage) {
-    const auto topology = config.topologyPtr();
     GroupedCacheLayerLayout::GroupLayouts layouts;
-    for (const auto& group : topology->groups()) {
-        std::vector<BlockBufferPtrInfo> layers(topology->layers().size());
+    for (const auto& group : config.groups()) {
+        std::vector<BlockBufferPtrInfo> layers(config.layerMemberships().size());
         if (group.tag == "indexer_kv") {
             layers[0].kv_addr = std::move(physical_storage);
         }
         layouts.emplace(group.tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout(topology, std::move(layouts));
+    return GroupedCacheLayerLayout(config, std::move(layouts));
 }
 
 CacheConfig createFp8SparseMlaCacheConfig() {
@@ -164,10 +175,9 @@ CacheConfig createFp8SparseMlaCacheConfig() {
 
 GroupedCacheLayerLayout
 makeFp8SparseMlaLayout(const CacheConfig& config, torch::Tensor mla_storage, torch::Tensor compressed_storage) {
-    const auto                            topology = config.topologyPtr();
     GroupedCacheLayerLayout::GroupLayouts layouts;
-    for (const auto& group : topology->groups()) {
-        std::vector<BlockBufferPtrInfo> layers(topology->layers().size());
+    for (const auto& group : config.groups()) {
+        std::vector<BlockBufferPtrInfo> layers(config.layerMemberships().size());
         if (group.tag == "default") {
             layers[0].kv_addr = std::move(mla_storage);
         } else if (group.tag == "indexer_kv") {
@@ -175,7 +185,7 @@ makeFp8SparseMlaLayout(const CacheConfig& config, torch::Tensor mla_storage, tor
         }
         layouts.emplace(group.tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout(topology, std::move(layouts));
+    return GroupedCacheLayerLayout(config, std::move(layouts));
 }
 
 TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
@@ -252,18 +262,18 @@ TEST(KVCacheLayoutViewTest, SparseIndexerSpecOwnsPhysicalBlockAndOpaqueViewPrese
 
     const auto config = createSparseIndexerCacheConfig();
     const auto& group  = config.group("indexer_kv");
-    const auto* spec   = dynamic_cast<const CompressedKVCacheSpec*>(group.spec.get());
+    const auto* spec   = dynamic_cast<const CompressedKVCacheSpec*>(group.layout.spec.get());
     ASSERT_NE(spec, nullptr);
     EXPECT_EQ(spec->block_payload_bytes(), kPhysicalBlockBytes);
     EXPECT_EQ(spec->block_size_bytes(), kPhysicalBlockBytes);
-    EXPECT_EQ(group.seq_size_per_block, kPhysicalTokensPerBlock);
-    EXPECT_EQ(group.kernel_seq_size_per_block, kKernelTokensPerBlock);
-    EXPECT_EQ(group.kv_block_stride_bytes, kPhysicalBlockBytes);
+    EXPECT_EQ(group.layout.seq_size_per_block, kPhysicalTokensPerBlock);
+    EXPECT_EQ(group.layout.kernel_seq_size_per_block, kKernelTokensPerBlock);
+    EXPECT_EQ(group.layout.kv_block_stride_bytes, kPhysicalBlockBytes);
 
     const auto physical =
-        torch::arange(kPhysicalBlocks * static_cast<int64_t>(group.kv_block_stride_bytes),
+        torch::arange(kPhysicalBlocks * static_cast<int64_t>(group.layout.kv_block_stride_bytes),
                       torch::TensorOptions().dtype(torch::kUInt8))
-            .reshape({kPhysicalBlocks, static_cast<int64_t>(group.kv_block_stride_bytes)});
+            .reshape({kPhysicalBlocks, static_cast<int64_t>(group.layout.kv_block_stride_bytes)});
     torch_ext::KVCache cache(makeIndexerLayout(config, physical));
     const auto         layer = cache.getLayerCache(0, "indexer_kv");
     EXPECT_EQ(layer.seq_size_per_block, kKernelTokensPerBlock);
@@ -289,13 +299,13 @@ TEST(KVCacheLayoutViewTest, Fp8MlaAndCompressedSpecsOwnPhysicalBlocksWhileViewsP
     const auto& mla_group        = config.group("default");
     const auto& compressed_group = config.group("indexer_kv");
 
-    ASSERT_EQ(mla_group.spec->type, KVCacheSpecType::MultiHeadLatentAttention);
-    EXPECT_EQ(mla_group.spec->block_size_bytes(), kMlaPhysicalBytes);
-    EXPECT_EQ(mla_group.kv_block_stride_bytes, kMlaPhysicalBytes);
-    ASSERT_EQ(compressed_group.spec->type, KVCacheSpecType::OpaqueKV);
-    EXPECT_EQ(compressed_group.spec->block_payload_bytes(), kCompressedPhysicalBytes);
-    EXPECT_EQ(compressed_group.spec->block_size_bytes(), kCompressedPhysicalBytes);
-    EXPECT_EQ(compressed_group.kv_block_stride_bytes, kCompressedPhysicalBytes);
+    ASSERT_EQ(mla_group.layout.spec->type, KVCacheSpecType::MultiHeadLatentAttention);
+    EXPECT_EQ(mla_group.layout.spec->block_size_bytes(), kMlaPhysicalBytes);
+    EXPECT_EQ(mla_group.layout.kv_block_stride_bytes, kMlaPhysicalBytes);
+    ASSERT_EQ(compressed_group.layout.spec->type, KVCacheSpecType::OpaqueKV);
+    EXPECT_EQ(compressed_group.layout.spec->block_payload_bytes(), kCompressedPhysicalBytes);
+    EXPECT_EQ(compressed_group.layout.spec->block_size_bytes(), kCompressedPhysicalBytes);
+    EXPECT_EQ(compressed_group.layout.kv_block_stride_bytes, kCompressedPhysicalBytes);
 
     const auto mla_storage =
         torch::arange(kPhysicalBlocks * kMlaPhysicalBytes, torch::TensorOptions().dtype(torch::kInt64))
@@ -347,10 +357,10 @@ TEST(KVCacheLayoutViewTest, Fp8MhaSpecAndScaleStridesOwnPhysicalBlock) {
 
     constexpr size_t kPhysicalKvBytes    = 2 * 2 * 8 * 512;
     constexpr size_t kPhysicalScaleBytes = 2 * 2 * sizeof(float) * 512;
-    EXPECT_EQ(group.spec->block_size_bytes(), kPhysicalKvBytes);
-    EXPECT_EQ(group.spec->scale_block_size_bytes(), kPhysicalScaleBytes);
-    EXPECT_EQ(group.kv_block_stride_bytes, kPhysicalKvBytes);
-    EXPECT_EQ(group.kv_scale_stride_bytes, kPhysicalScaleBytes);
+    EXPECT_EQ(group.layout.spec->block_size_bytes(), kPhysicalKvBytes);
+    EXPECT_EQ(group.layout.spec->scale_block_size_bytes(), kPhysicalScaleBytes);
+    EXPECT_EQ(group.layout.kv_block_stride_bytes, kPhysicalKvBytes);
+    EXPECT_EQ(group.layout.kv_scale_stride_bytes, kPhysicalScaleBytes);
 }
 
 TEST(KVCacheLayoutViewTest, Dsv4Fp8CompressedPhysicalBlocksPreserveAlignedKernelPageGeometry) {
@@ -395,25 +405,24 @@ TEST(KVCacheLayoutViewTest, Dsv4Fp8CompressedPhysicalBlocksPreserveAlignedKernel
     const auto& csa_group = config.group("csa_kv");
     const auto& hca_group = config.group("hca_kv");
 
-    ASSERT_EQ(csa_group.spec->block_payload_bytes(), kCsaKernelPayloadBytes * kKernelPagesPerBlock);
-    ASSERT_EQ(csa_group.kv_block_stride_bytes, kCsaKernelStrideBytes * kKernelPagesPerBlock);
-    ASSERT_EQ(hca_group.spec->block_payload_bytes(), kHcaKernelPayloadBytes * kKernelPagesPerBlock);
-    ASSERT_EQ(hca_group.kv_block_stride_bytes, kHcaKernelStrideBytes * kKernelPagesPerBlock);
+    ASSERT_EQ(csa_group.layout.spec->block_payload_bytes(), kCsaKernelPayloadBytes * kKernelPagesPerBlock);
+    ASSERT_EQ(csa_group.layout.kv_block_stride_bytes, kCsaKernelStrideBytes * kKernelPagesPerBlock);
+    ASSERT_EQ(hca_group.layout.spec->block_payload_bytes(), kHcaKernelPayloadBytes * kKernelPagesPerBlock);
+    ASSERT_EQ(hca_group.layout.kv_block_stride_bytes, kHcaKernelStrideBytes * kKernelPagesPerBlock);
 
-    const auto csa_storage = torch::arange(csa_group.kv_block_stride_bytes, torch::TensorOptions().dtype(torch::kInt64))
+    const auto csa_storage = torch::arange(csa_group.layout.kv_block_stride_bytes, torch::TensorOptions().dtype(torch::kInt64))
                                  .to(torch::kUInt8)
-                                 .reshape({1, static_cast<int64_t>(csa_group.kv_block_stride_bytes)});
-    const auto hca_storage = torch::arange(hca_group.kv_block_stride_bytes, torch::TensorOptions().dtype(torch::kInt64))
+                                 .reshape({1, static_cast<int64_t>(csa_group.layout.kv_block_stride_bytes)});
+    const auto hca_storage = torch::arange(hca_group.layout.kv_block_stride_bytes, torch::TensorOptions().dtype(torch::kInt64))
                                  .to(torch::kUInt8)
-                                 .reshape({1, static_cast<int64_t>(hca_group.kv_block_stride_bytes)});
-    const auto                            topology = config.topologyPtr();
+                                 .reshape({1, static_cast<int64_t>(hca_group.layout.kv_block_stride_bytes)});
     GroupedCacheLayerLayout::GroupLayouts layouts;
-    for (const auto& group : topology->groups()) {
+    for (const auto& group : config.groups()) {
         BlockBufferPtrInfo buffer;
         buffer.kv_addr = group.tag == "csa_kv" ? csa_storage : hca_storage;
         layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffer)}));
     }
-    torch_ext::KVCache cache(GroupedCacheLayerLayout(topology, std::move(layouts)));
+    torch_ext::KVCache cache(GroupedCacheLayerLayout(config, std::move(layouts)));
     const auto         csa_view = cache.getLayerCache(0, "csa_kv");
     const auto         hca_view = cache.getLayerCache(0, "hca_kv");
 

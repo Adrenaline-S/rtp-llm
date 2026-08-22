@@ -144,7 +144,23 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersOrdinaryMhaToFixedFinalRecord) {
                                              4,
                                              512,
                                              256,
-                                             0}};
+                                             0,
+                                             2,
+                                             makeExpectedSpecSemanticSnapshot(KVCacheSpecType::MultiHeadAttention,
+                                                                              DataType::TYPE_FP16,
+                                                                              4,
+                                                                              128,
+                                                                              64,
+                                                                              64,
+                                                                              256,
+                                                                              128,
+                                                                              128,
+                                                                              256,
+                                                                              128,
+                                                                              128,
+                                                                              0,
+                                                                              0,
+                                                                              0)}};
 
     const auto config = createFinalConfig(makeMhaModel());
     EXPECT_FALSE(config.use_independent_block_pools);
@@ -169,7 +185,23 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersOrdinaryMlaToFixedFinalRecord) {
                                              4,
                                              192,
                                              96,
-                                             0}};
+                                             0,
+                                             1,
+                                             makeExpectedSpecSemanticSnapshot(KVCacheSpecType::MultiHeadLatentAttention,
+                                                                              DataType::TYPE_FP16,
+                                                                              4,
+                                                                              48,
+                                                                              32,
+                                                                              16,
+                                                                              96,
+                                                                              64,
+                                                                              32,
+                                                                              96,
+                                                                              64,
+                                                                              32,
+                                                                              0,
+                                                                              0,
+                                                                              0)}};
 
     const auto config = createFinalConfig(makeMlaModel());
     EXPECT_FALSE(config.use_independent_block_pools);
@@ -209,14 +241,14 @@ TEST(CacheConfigCreatorTest, CreateConfigIsolatesSparseMlaIndexerPoolAndStride) 
     const std::string indexer_tag = "indexer_kv";
     EXPECT_EQ(config.group(default_tag).policy.group_type, CacheGroupType::FULL);
     EXPECT_EQ(config.group(indexer_tag).policy.group_type, CacheGroupType::FULL);
-    EXPECT_EQ(config.group(default_tag).spec->type, KVCacheSpecType::MultiHeadLatentAttention);
-    EXPECT_EQ(config.group(indexer_tag).spec->type, KVCacheSpecType::OpaqueKV);
-    EXPECT_EQ(config.group(default_tag).kv_block_stride_bytes, 96u);
-    EXPECT_EQ(config.group(default_tag).kv_scale_stride_bytes, 0u);
-    EXPECT_EQ(config.group(indexer_tag).kv_block_stride_bytes, 528u);
-    EXPECT_EQ(config.group(indexer_tag).kv_scale_stride_bytes, 0u);
-    EXPECT_EQ(config.group(default_tag).block_num, kTestBlockNum);
-    EXPECT_EQ(config.group(indexer_tag).block_num, kTestBlockNum);
+    EXPECT_EQ(config.group(default_tag).layout.spec->type, KVCacheSpecType::MultiHeadLatentAttention);
+    EXPECT_EQ(config.group(indexer_tag).layout.spec->type, KVCacheSpecType::OpaqueKV);
+    EXPECT_EQ(config.group(default_tag).layout.kv_block_stride_bytes, 96u);
+    EXPECT_EQ(config.group(default_tag).layout.kv_scale_stride_bytes, 0u);
+    EXPECT_EQ(config.group(indexer_tag).layout.kv_block_stride_bytes, 528u);
+    EXPECT_EQ(config.group(indexer_tag).layout.kv_scale_stride_bytes, 0u);
+    EXPECT_EQ(config.group(default_tag).layout.block_num, kTestBlockNum);
+    EXPECT_EQ(config.group(indexer_tag).layout.block_num, kTestBlockNum);
     EXPECT_EQ(config.group(default_tag).layer_ids, std::vector<int>({0, 1}));
     EXPECT_EQ(config.group(indexer_tag).layer_ids, std::vector<int>({0, 1}));
 }
@@ -230,7 +262,7 @@ TEST(CacheConfigCreatorTest, SparseFlagWithoutIndexerDescriptorDoesNotProjectInd
 
     EXPECT_FALSE(config.use_independent_block_pools);
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"mla"}));
-    EXPECT_EQ(config.group(default_tag).kv_scale_stride_bytes, 0u);
+    EXPECT_EQ(config.group(default_tag).layout.kv_scale_stride_bytes, 0u);
     EXPECT_EQ(config.kv_scale_stride_bytes, 0u);
 }
 
@@ -252,21 +284,21 @@ TEST(CacheConfigCreatorTest, CreateSpConfigAlignsSparseMlaIndexerAcrossTargetAnd
                                                            /*is_eagle=*/false);
 
     ASSERT_EQ(groupTagSet(config), (std::set<std::string>{"default", "indexer_kv"}));
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtpModuleCount(), 2u);
     const std::string target_indexer_tag = "indexer_kv";
     EXPECT_EQ(config.group(target_indexer_tag).layer_ids, std::vector<int>({0, 1, 2, 3}));
-    for (const auto& sub_config : config.mtp_sub_configs) {
-        ASSERT_NE(sub_config, nullptr);
-        ASSERT_EQ(groupTagSet(*sub_config), groupTagSet(config));
+    for (size_t module_index = 0; module_index < config.mtpModuleCount(); ++module_index) {
+        const auto& sub_config = config.mtpModule(module_index);
+        ASSERT_EQ(groupTagSet(sub_config), groupTagSet(config));
         const std::string sub_default_tag = "default";
         const std::string sub_indexer_tag = "indexer_kv";
-        EXPECT_EQ(sub_config->group(sub_default_tag).layer_ids, std::vector<int>({0}));
-        EXPECT_EQ(sub_config->group(sub_indexer_tag).layer_ids, std::vector<int>({0}));
-        EXPECT_EQ(sub_config->group(sub_default_tag).kv_block_stride_bytes,
-                  config.group("default").kv_block_stride_bytes);
-        EXPECT_EQ(sub_config->group(sub_indexer_tag).kv_block_stride_bytes,
-                  config.group(target_indexer_tag).kv_block_stride_bytes);
-        EXPECT_EQ(sub_config->group(sub_indexer_tag).block_num, kTestBlockNum);
+        EXPECT_EQ(sub_config.group(sub_default_tag).layer_ids, std::vector<int>({0}));
+        EXPECT_EQ(sub_config.group(sub_indexer_tag).layer_ids, std::vector<int>({0}));
+        EXPECT_EQ(sub_config.group(sub_default_tag).layout.kv_block_stride_bytes,
+                  config.group("default").layout.kv_block_stride_bytes);
+        EXPECT_EQ(sub_config.group(sub_indexer_tag).layout.kv_block_stride_bytes,
+                  config.group(target_indexer_tag).layout.kv_block_stride_bytes);
+        EXPECT_EQ(sub_config.group(sub_indexer_tag).layout.block_num, kTestBlockNum);
     }
 }
 
@@ -288,7 +320,23 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersKimiHybridToFixedFinalRecords) {
                                              8,
                                              4096,
                                              2048,
-                                             0},
+                                             0,
+                                             2,
+                                             makeExpectedSpecSemanticSnapshot(KVCacheSpecType::MultiHeadAttention,
+                                                                              DataType::TYPE_FP16,
+                                                                              8,
+                                                                              1024,
+                                                                              512,
+                                                                              512,
+                                                                              2048,
+                                                                              1024,
+                                                                              1024,
+                                                                              2048,
+                                                                              1024,
+                                                                              1024,
+                                                                              0,
+                                                                              0,
+                                                                              0)},
                                             {"linear",
                                              KVCacheSpecType::LinearAttention,
                                              CacheGroupType::LINEAR,
@@ -306,7 +354,23 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersKimiHybridToFixedFinalRecords) {
                                              8,
                                              3200,
                                              1600,
-                                             0}};
+                                             0,
+                                             2,
+                                             makeExpectedSpecSemanticSnapshot(KVCacheSpecType::LinearAttention,
+                                                                              DataType::TYPE_FP16,
+                                                                              8,
+                                                                              800,
+                                                                              512,
+                                                                              288,
+                                                                              1600,
+                                                                              1024,
+                                                                              576,
+                                                                              1600,
+                                                                              1024,
+                                                                              576,
+                                                                              0,
+                                                                              0,
+                                                                              0)}};
 
     const auto config = createFinalConfig(makeKimiModel());
     EXPECT_TRUE(config.use_independent_block_pools);
@@ -322,18 +386,18 @@ TEST(CacheConfigCreatorTest, GenericGroupingPreservesLegacyHybridAndIndependentP
         }
     }
     const auto hybrid_config = CacheConfigCreator::createBasicConfig(hybrid, ParallelismConfig{}, false, 0);
-    ASSERT_EQ(hybrid_config.topology().groups().size(), 2u);
-    EXPECT_EQ(hybrid_config.topology().groups()[0].tag, "z_full");
-    EXPECT_EQ(hybrid_config.topology().groups()[0].policy.group_type, CacheGroupType::FULL);
-    EXPECT_EQ(hybrid_config.topology().groups()[1].tag, "a_linear");
+    ASSERT_EQ(hybrid_config.groups().size(), 2u);
+    EXPECT_EQ(hybrid_config.groups()[0].tag, "z_full");
+    EXPECT_EQ(hybrid_config.groups()[0].policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(hybrid_config.groups()[1].tag, "a_linear");
 
     auto independent                          = makeSparseMlaModel(/*layer_num=*/1);
     independent.kv_cache_spec_descs[0][0].tag = "z_first";
     independent.kv_cache_spec_descs[0][1].tag = "a_second";
     const auto independent_config = CacheConfigCreator::createBasicConfig(independent, ParallelismConfig{}, false, 0);
-    ASSERT_EQ(independent_config.topology().groups().size(), 2u);
-    EXPECT_EQ(independent_config.topology().groups()[0].tag, "z_first");
-    EXPECT_EQ(independent_config.topology().groups()[1].tag, "a_second");
+    ASSERT_EQ(independent_config.groups().size(), 2u);
+    EXPECT_EQ(independent_config.groups()[0].tag, "z_first");
+    EXPECT_EQ(independent_config.groups()[1].tag, "a_second");
 }
 
 TEST(CacheConfigCreatorTest, GroupRecordsOwnHeterogeneousPhysicalAndKernelGeometry) {
@@ -360,10 +424,10 @@ TEST(CacheConfigCreatorTest, GroupRecordsOwnHeterogeneousPhysicalAndKernelGeomet
     kv_cache.test_block_num            = kTestBlockNum;
 
     const auto config = CacheConfigCreator::createConfig(model, parallelism, RuntimeConfig{}, kv_cache);
-    EXPECT_EQ(config.group("default").seq_size_per_block, 128u);
-    EXPECT_EQ(config.group("default").kernel_seq_size_per_block, 64u);
-    EXPECT_EQ(config.group("scaled").seq_size_per_block, 256u);
-    EXPECT_EQ(config.group("scaled").kernel_seq_size_per_block, 64u);
+    EXPECT_EQ(config.group("default").layout.seq_size_per_block, 128u);
+    EXPECT_EQ(config.group("default").layout.kernel_seq_size_per_block, 64u);
+    EXPECT_EQ(config.group("scaled").layout.seq_size_per_block, 256u);
+    EXPECT_EQ(config.group("scaled").layout.kernel_seq_size_per_block, 64u);
     EXPECT_EQ(config.kernelBlocksPerKvBlock("default"), 2u);
     EXPECT_EQ(config.kernelBlocksPerKvBlock("scaled"), 4u);
     EXPECT_EQ(config.seq_size_per_block, 128u);
@@ -416,8 +480,8 @@ TEST(CacheConfigCreatorTest, PublicCreatorWrappersPreserveDescriptorTagsAcrossBa
         const auto& group = config.group("wrapper_tag");
         EXPECT_EQ(group.layer_ids, layer_ids);
         EXPECT_EQ(group.policy.group_type, CacheGroupType::FULL);
-        ASSERT_NE(group.spec, nullptr);
-        EXPECT_EQ(group.spec->type, KVCacheSpecType::MultiHeadAttention);
+        ASSERT_NE(group.layout.spec, nullptr);
+        EXPECT_EQ(group.layout.spec->type, KVCacheSpecType::MultiHeadAttention);
     };
     expect_lowered_descriptor(basic, {0});
     expect_lowered_descriptor(final, {0});
@@ -430,8 +494,8 @@ TEST(CacheConfigCreatorTest, PublicCreatorWrappersPreserveDescriptorTagsAcrossBa
     // The target config appends one MTP layer; it must retain the same tagged
     // descriptor while lowering the expected target-layer span.
     expect_lowered_descriptor(speculative, {0, 1});
-    ASSERT_EQ(speculative.mtp_sub_configs.size(), 1u);
-    expect_lowered_descriptor(*speculative.mtp_sub_configs[0], {0});
+    ASSERT_EQ(speculative.mtpModuleCount(), 1u);
+    expect_lowered_descriptor(speculative.mtpModule(0), {0});
 }
 
 TEST(CacheConfigCreatorTest, CreateConfigLowersDsv4SevenGroupPoliciesAndExplicitCapacity) {
@@ -517,15 +581,15 @@ TEST(CacheConfigCreatorTest, CreateSpConfigPreservesExactAndDefaultMtpMappingsWi
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"full", "linear"}));
     EXPECT_EQ(config.group_layer_num, 2);
     EXPECT_EQ(config.group("full").layer_ids, std::vector<int>({1, 3, 4, 5}));
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
-    for (const auto& sub_config : config.mtp_sub_configs) {
-        ASSERT_NE(sub_config, nullptr);
+    ASSERT_EQ(config.mtpModuleCount(), 2u);
+    for (size_t module_index = 0; module_index < config.mtpModuleCount(); ++module_index) {
+        const auto& sub_config = config.mtpModule(module_index);
         const std::string full_tag   = "full";
         const std::string linear_tag = "linear";
-        EXPECT_EQ(sub_config->group(full_tag).tag, "full");
-        EXPECT_EQ(sub_config->group(full_tag).layer_ids, std::vector<int>({0}));
-        EXPECT_TRUE(sub_config->group(linear_tag).layer_ids.empty());
-        EXPECT_EQ(sub_config->group(full_tag).block_num, kTestBlockNum);
+        EXPECT_EQ(sub_config.group(full_tag).tag, "full");
+        EXPECT_EQ(sub_config.group(full_tag).layer_ids, std::vector<int>({0}));
+        EXPECT_TRUE(sub_config.group(linear_tag).layer_ids.empty());
+        EXPECT_EQ(sub_config.group(full_tag).layout.block_num, kTestBlockNum);
     }
 }
 

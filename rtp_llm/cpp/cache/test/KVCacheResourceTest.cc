@@ -14,30 +14,23 @@ namespace test {
 
 namespace {
 
-GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
+CacheGroup makeResourceGroup(std::string tag, CacheGroupType type) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 8;
 
-    GroupBase group;
+    CacheGroup group;
     group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
+    group.layout.spec                      = std::move(spec);
     group.policy                    = defaultCacheGroupPolicy(type);
     group.layer_ids                 = {0};
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    group.layout.block_num                 = 16;
+    group.layout.seq_size_per_block        = 8;
+    group.layout.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
     return group;
 }
 
-CacheConfig makeResourceConfig(std::vector<GroupBase> groups, std::vector<LayerBase> layers) {
-    CacheConfig config;
-    config.layer_num = static_cast<uint32_t>(layers.size());
-    config.setTopology(std::move(groups), std::move(layers));
-    return config;
-}
-
-CacheConfig makeResourceConfig(const std::shared_ptr<const CacheTopology>& topology) {
-    return makeResourceConfig(topology->groups(), topology->layers());
+CacheConfig makeResourceConfig(std::vector<CacheGroup> groups, std::vector<CacheLayerMembership> layers) {
+    return TestCacheConfigBuilder::withResolvedData({}, std::move(groups), std::move(layers));
 }
 
 }  // namespace
@@ -93,12 +86,12 @@ TEST(BlockIdsTest, Full_ExpandsKernelBlocks) {
 
 TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     KVCacheResource resource;
-    resource.initGroups(makeResourceConfig(makeTestCacheTopologyByTag(
+    resource.initGroups(makeTestCacheConfigByTag(
         /*group_num=*/2,
         /*layer_num=*/3,
         /*layer_group_tags=*/{{"group0"}, {"group1"}, {"group0"}},
         /*kernel_blocks_per_kv_block=*/4,
-        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR})));
+        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR}));
 
     ASSERT_EQ(resource.groupNums(), 2);
     ASSERT_EQ(resource.blocksByTag().size(), 2u);
@@ -124,22 +117,21 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
 
 TEST(KVCacheResourceTest, LayerBlocksRejectsMultipleGroupsForOneLayer) {
     KVCacheResource resource;
-    resource.initGroups(makeResourceConfig(makeTestCacheTopologyByTag(
+    resource.initGroups(makeTestCacheConfigByTag(
         /*group_num=*/2,
         /*layer_num=*/1,
         /*layer_group_tags=*/{{"group0", "group1"}},
         /*kernel_blocks_per_kv_block=*/1,
-        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR})));
+        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR}));
 
     EXPECT_THROW(resource.blockIdsForLayer(0, "unknown"), std::exception);
 }
 
 TEST(KVCacheResourceTest, TagAccessKeepsSameLayerGroupsIndependent) {
-    auto topology = CacheTopology::create(
+    KVCacheResource resource;
+    auto config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
         {{0, {"full", "linear"}}});
-    KVCacheResource resource;
-    auto            config = makeResourceConfig(topology);
     resource.initGroups(config);
 
     resource.mutableBlockIdsForLayer(0, "full").add(BlockIndicesType{1, 2});
@@ -257,16 +249,13 @@ TEST(KVCacheResourceTest, TaggedStorageHasOneRecordPerConfigGroupNotPerLayer) {
     EXPECT_EQ(&resource.blockIdsForLayer(2, "full"), &resource.blockIds("full"));
 }
 
-TEST(KVCacheResourceTest, InitializationDoesNotRetainTopology) {
-    KVCacheResource                    resource;
-    std::weak_ptr<const CacheTopology> weak_topology;
+TEST(KVCacheResourceTest, InitializationOwnsRoutingAfterConfigLifetime) {
+    KVCacheResource resource;
     {
-        auto config   = makeResourceConfig(makeTestCacheTopologyByTag(/*group_num=*/1, /*layer_num=*/1, {{"group0"}}));
-        weak_topology = config.topologyPtr();
+        auto config = makeTestCacheConfigByTag(/*group_num=*/1, /*layer_num=*/1, {{"group0"}});
         resource.initGroups(config);
     }
 
-    EXPECT_TRUE(weak_topology.expired());
     EXPECT_EQ(resource.soleGroupTagForLayer(0), "group0");
     resource.mutableBlockIdsForLayer(0, "group0").add(BlockIndicesType{3});
     EXPECT_EQ(resource.blocksForLayer(0, "group0"), (BlockIndicesType{3}));
@@ -354,12 +343,12 @@ TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
-    batch.initGroups(makeResourceConfig(makeTestCacheTopologyByTag(
+    batch.initGroups(makeTestCacheConfigByTag(
         /*group_num=*/2,
         /*layer_num=*/3,
         /*layer_group_tags=*/{{"group0"}, {"group1"}, {"group0"}},
         /*kernel_blocks_per_kv_block=*/4,
-        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR})));
+        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR}));
 
     ASSERT_EQ(batch.batchSize(), 2);
     ASSERT_EQ(batch.groupNums(), 2);
@@ -396,11 +385,11 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     ASSERT_EQ(batch.batchSize(), 1);
 
     KVCacheResource moved;
-    moved.initGroups(makeResourceConfig(makeTestCacheTopologyByTag(/*group_num=*/1,
-                                                              /*layer_num=*/1,
-                                                              /*layer_group_tags=*/{{"group0"}},
-                                                              /*kernel_blocks_per_kv_block=*/2,
-                                                              /*group_types=*/{CacheGroupType::FULL})));
+    moved.initGroups(makeTestCacheConfigByTag(/*group_num=*/1,
+                                              /*layer_num=*/1,
+                                              /*layer_group_tags=*/{{"group0"}},
+                                              /*kernel_blocks_per_kv_block=*/2,
+                                              /*group_types=*/{CacheGroupType::FULL}));
     moved.mutableBlockIds("group0").add(BlockIndicesType{3});
     batch.moveBatchResource(0, std::move(moved));
     ASSERT_EQ(batch.cacheResource(0).groupNums(), 1);

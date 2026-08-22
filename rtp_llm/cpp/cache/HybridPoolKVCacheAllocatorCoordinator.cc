@@ -63,7 +63,7 @@ bool HybridPoolKVCacheAllocator::skipReuseCacheGroup(std::string_view tag) const
 
 std::vector<std::string> HybridPoolKVCacheAllocator::independentEvictionGroupTags() const {
     std::vector<std::string> tags;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         if (groupStrategy(group.tag)->evictPolicy() == CacheEvictPolicy::INDEPENDENT) {
             tags.push_back(group.tag);
         }
@@ -205,9 +205,9 @@ MallocResult HybridPoolKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     std::map<std::string, size_t>                    original_sizes;
     std::map<std::string, std::vector<size_t>>       backfilled_positions;
 
-    const GroupBase* sole_full_group =
+    const CacheGroup* sole_full_group =
         (config_.groupNums() == 1 && full_group_tags_.size() == 1) ? &config_.group(full_group_tags_.front()) : nullptr;
-    const auto sole_spec = sole_full_group != nullptr ? sole_full_group->spec : nullptr;
+    const auto sole_spec = sole_full_group != nullptr ? sole_full_group->layout.spec : nullptr;
     const bool ordinary_single_full_compat =
         !config_.use_independent_block_pools && !(cp_mapper && cp_mapper->isSharded()) && sole_full_group != nullptr
         && sole_full_group->policy.group_type == CacheGroupType::FULL && sole_spec
@@ -227,7 +227,7 @@ MallocResult HybridPoolKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
         match_cost_time_us     = currentTimeUs() - begin_us;
 
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             const auto&      blocks = kv_resource->blocks(0, group.tag);
             BlockIndicesType valid;
             valid.reserve(blocks.size());
@@ -247,7 +247,7 @@ MallocResult HybridPoolKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     // The resource shape after reuse is the transaction's original shape.
     // Capture it before either capacity preflight so rollback never mistakes
     // reused references for newly appended allocations.
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         original_sizes[group.tag] = kv_resource->blocksNum(0, group.tag);
         backfilled_positions[group.tag] = {};
     }
@@ -270,7 +270,7 @@ MallocResult HybridPoolKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         return {false, 0, match_cost_time_us, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
     }
 
-    for (const auto& group_config : config_.topology().groups()) {
+    for (const auto& group_config : config_.groups()) {
         const auto& tag           = group_config.tag;
         auto&       block_ids_0   = kv_resource->mutableBlockIds(0, tag);
         const int   group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, common_seq_len);
@@ -291,7 +291,7 @@ MallocResult HybridPoolKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
 
     for (int b = 1; b < batch_size; ++b) {
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             groupStrategy(group.tag)->reference(kv_resource->mutableBlockIds(b, group.tag),
                                                 kv_resource->blocks(0, group.tag));
         }
@@ -310,7 +310,7 @@ MallocResult HybridPoolKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     std::vector<std::map<std::string, std::vector<size_t>>> batch_backfilled_positions(
         static_cast<size_t>(batch_size));
     for (int b = 0; b < batch_size; ++b) {
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             batch_original_sizes[static_cast<size_t>(b)][group.tag] = kv_resource->blocksNum(b, group.tag);
             batch_backfilled_positions[static_cast<size_t>(b)][group.tag] = {};
         }
@@ -321,7 +321,7 @@ MallocResult HybridPoolKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     std::string failed_tag;
     int         failed_need_blocks = -1;
     for (int b = 0; b < batch_size; ++b) {
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             const auto& tag           = group.tag;
             auto&       block_ids     = kv_resource->mutableBlockIds(b, tag);
             const int   group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
@@ -355,7 +355,7 @@ MallocResult HybridPoolKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
             return {true, 0};
         }
         for (int b = 0; b < batch_size; ++b) {
-            for (const auto& group : config_.topology().groups()) {
+            for (const auto& group : config_.groups()) {
                 groupStrategy(group.tag)->removeSkippedBlocks(
                     kv_resource->mutableBlockIds(b, group.tag), malloc_info.reuse_cache, reserve_step);
             }
@@ -397,9 +397,9 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
     const bool  cp_active  = cp_mapper && cp_mapper->isSharded();
     const int   batch_size = kv_cache_resource->batchSize();
 
-    const GroupBase* sole_full_group =
+    const CacheGroup* sole_full_group =
         (config_.groupNums() == 1 && full_group_tags_.size() == 1) ? &config_.group(full_group_tags_.front()) : nullptr;
-    const auto sole_spec = sole_full_group != nullptr ? sole_full_group->spec : nullptr;
+    const auto sole_spec = sole_full_group != nullptr ? sole_full_group->layout.spec : nullptr;
     const bool legacy_ordinary_single_full =
         !config_.use_independent_block_pools && !cp_active && sole_full_group != nullptr
         && sole_full_group->policy.group_type == CacheGroupType::FULL && sole_spec
@@ -436,7 +436,7 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
                 const size_t                                          i = pos - 1;
                 std::map<std::string, BlockIdxType> groups;
                 bool has_valid = false;
-                for (const auto& group : config_.topology().groups()) {
+                for (const auto& group : config_.groups()) {
                     const auto&  tag      = group.tag;
                     BlockIdxType block_id = NULL_BLOCK_IDX;
                     if (skipReuseCacheGroup(tag)) {
@@ -485,7 +485,7 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         }
         const size_t token_len = token_ids.size() - 1;
 
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             const auto& tag = group.tag;
             if (skipReuseCacheGroup(tag)) {
                 continue;
@@ -514,7 +514,7 @@ void HybridPoolKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
                     continue;
                 }
                 std::map<std::string, BlockIdxType> groups;
-                for (const auto& other_group : config_.topology().groups()) {
+                for (const auto& other_group : config_.groups()) {
                     groups.emplace(other_group.tag, other_group.tag == tag ? blocks[i] : NULL_BLOCK_IDX);
                 }
                 const auto dependency =
@@ -554,7 +554,7 @@ std::shared_ptr<KVCacheResource> HybridPoolKVCacheAllocator::incrKVCacheRef(cons
     CacheKeysType                                     selected_keys;
     BlockDependenciesType                             selected_dependencies;
     std::unordered_map<std::string, BlockIndicesType> selected_blocks;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         selected_blocks.emplace(group.tag, BlockIndicesType{});
     }
 
@@ -568,7 +568,7 @@ std::shared_ptr<KVCacheResource> HybridPoolKVCacheAllocator::incrKVCacheRef(cons
         const size_t                                  pos             = it->second;
         bool                                          any_valid_block = false;
         std::unordered_map<std::string, BlockIdxType> blocks_for_key;
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             const auto& src_blocks = kvcache_resource.blocks(group.tag);
             const auto  block      = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
             blocks_for_key.emplace(group.tag, block);
@@ -581,7 +581,7 @@ std::shared_ptr<KVCacheResource> HybridPoolKVCacheAllocator::incrKVCacheRef(cons
         }
         selected_keys.push_back(key);
         selected_dependencies.push_back(source_dependencies[pos]);
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             selected_blocks.at(group.tag).push_back(blocks_for_key.at(group.tag));
         }
     }
@@ -592,7 +592,7 @@ std::shared_ptr<KVCacheResource> HybridPoolKVCacheAllocator::incrKVCacheRef(cons
 
     selected_resource->setCacheKeysAndBlockDependencies(std::move(selected_keys), std::move(selected_dependencies));
     selected_resource->setCacheKeysAreCpCanonical(kvcache_resource.cacheKeysAreCpCanonical());
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         BlockIndicesType valid;
         for (auto b : selected_blocks.at(group.tag)) {
             if (!isNullBlockIdx(b) && b > 0) {
@@ -643,13 +643,13 @@ bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  b
     }
 
     std::map<std::string, int> new_blocks_num;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         new_blocks_num.emplace(group.tag, 0);
     }
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
         if (fork_count > 1 && copy_last_block) {
-            for (const auto& group : config_.topology().groups()) {
+            for (const auto& group : config_.groups()) {
                 const auto& tag = group.tag;
                 if (!batch_kv_cache_resource->blocks(old_batch_idx, tag).empty()) {
                     new_blocks_num.at(tag) += fork_count - 1;
@@ -664,7 +664,7 @@ bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  b
     std::map<std::string, BlockIndicesType>                      replacement_blocks;
     std::map<std::string, BlockIndicesType>                      allocated_replacements;
     std::map<std::string, std::unordered_map<BlockIdxType, int>> transferred_ref_counts;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto&                           tag = group.tag;
         std::unordered_set<BlockIdxType>      retained_blocks;
         std::unordered_map<BlockIdxType, int> dropped_block_counts;
@@ -703,7 +703,7 @@ bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  b
     }
 
     auto rollback_replacements = [&]() {
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             auto& blocks = allocated_replacements[group.tag];
             if (!blocks.empty()) {
                 groupStrategy(group.tag)->free(blocks);
@@ -711,7 +711,7 @@ bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  b
             }
         }
     };
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& tag         = group.tag;
         const int   need_blocks = new_blocks_num.at(tag);
         auto&       reserved    = replacement_blocks[tag];
@@ -742,7 +742,7 @@ bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  b
         if (batch_fork_count[old_batch_idx] != 0) {
             continue;
         }
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             const auto&      tag = group.tag;
             BlockIndicesType to_free;
             auto&            transferred = transferred_ref_counts[tag];
@@ -781,7 +781,7 @@ bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  b
             fork_resource.setCacheKeysAndBlockDependencies(source_resource.cacheKeys(),
                                                            source_resource.blockDependencies());
             fork_resource.setCacheKeysAreCpCanonical(source_resource.cacheKeysAreCpCanonical());
-            for (const auto& group : config_.topology().groups()) {
+            for (const auto& group : config_.groups()) {
                 const auto& tag       = group.tag;
                 auto&       block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);
                 groupStrategy(tag)->reference(block_ids, old_resources[old_batch_idx].blocks(tag));
@@ -808,7 +808,7 @@ bool HybridPoolKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  b
         }
         --fork_count;
     }
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& tag = group.tag;
         RTP_LLM_CHECK_WITH_INFO(next_replacement[tag] == replacement_blocks[tag].size(),
                                 "unused replacement blocks after hybrid kv cache update, tag=%s used=%zu reserved=%zu",
@@ -857,7 +857,7 @@ void HybridPoolKVCacheAllocator::rollbackInitMalloc(
     const std::map<std::string, BlockIndicesType>&          referenced_blocks,
     const std::map<std::string, size_t>&                    original_sizes,
     const std::map<std::string, std::vector<size_t>>&       backfilled_positions) {
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& tag       = group.tag;
         auto&       block_ids = kv_resource.mutableBlockIds(0, tag);
         rollbackBlockIdsToSize(tag, block_ids, original_sizes.at(tag), backfilled_positions.at(tag));
@@ -877,7 +877,7 @@ void HybridPoolKVCacheAllocator::rollbackIncrMalloc(
     size_t                                                         last_touched_batch) {
     const size_t rollback_end = std::min(last_touched_batch + 1, batch_original_sizes.size());
     for (size_t batch_idx = 0; batch_idx < rollback_end; ++batch_idx) {
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             const auto& tag       = group.tag;
             auto&       block_ids = kv_resource.mutableBlockIds(static_cast<int>(batch_idx), tag);
             rollbackBlockIdsToSize(tag,
@@ -902,7 +902,7 @@ void HybridPoolKVCacheAllocator::copyBlockMappingForGroup(std::string_view      
     const auto   memory_type         = memoryTypeForGroup(tag);
     const auto   copy_type           = BatchCopyParams::get_copy_type(memory_type, memory_type);
     const auto&  group               = config_.group(tag);
-    const auto&  spec                = group.spec;
+    const auto&  spec                = group.layout.spec;
     const size_t kv_block_size_bytes = spec->block_size_bytes();
     const size_t scale_block_bytes   = spec->scale_block_size_bytes();
     const size_t buffers_per_layer   = scale_block_bytes > 0 ? 2 : 1;
@@ -948,7 +948,7 @@ int HybridPoolKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
 
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& tag              = group.tag;
         const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
         const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
@@ -966,7 +966,7 @@ int HybridPoolKVCacheAllocator::estimatePeakNeedBlocks(const KVCacheResource& kv
                                                        int                    reserve_step,
                                                        bool                   enable_reuse_cache) const {
     int need_blocks = 0;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         need_blocks += groupStrategy(group.tag)->estimatePeakNeedBlocks(
             seq_len, kv_cache_resource.blocks(group.tag), remaining_tokens, reserve_step, enable_reuse_cache);
     }
@@ -997,7 +997,7 @@ void HybridPoolKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& ma
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
     for (int batch_id = 0; batch_id < kv_resource->batchSize(); ++batch_id) {
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             const auto& tag = group.tag;
             if (!cpBlockRoundRobinGroup(cp_slot_mapper_, config_, tag)) {
                 continue;
@@ -1027,7 +1027,7 @@ int HybridPoolKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResource
                                                       int                            seq_len,
                                                       int                            reserve_step) const {
     int need_blocks = 0;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& tag               = group.tag;
         const int   effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, seq_len);
         const int   cur_blocks        = batch_kv_cache_resource->blocksNum(0, tag);

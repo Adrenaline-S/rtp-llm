@@ -72,6 +72,7 @@ cc_library(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/utils:core_utils",

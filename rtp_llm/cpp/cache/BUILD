@@ -79,11 +79,9 @@ cc_library(
     name = "cache_config",
     srcs = [
         "CacheConfig.cc",
-        "CacheTopology.cc",
     ],
     hdrs = [
         "CacheConfig.h",
-        "CacheTopology.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
