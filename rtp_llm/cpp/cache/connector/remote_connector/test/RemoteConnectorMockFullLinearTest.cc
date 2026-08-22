@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -164,7 +164,7 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(cache_config_);
+            auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
@@ -233,7 +233,7 @@ private:
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_gpu_reuse_len_zero) {
     // match
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
@@ -318,7 +318,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_gpu_reuse_len_not_zero) {
     // match
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
@@ -399,7 +399,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_with_part_empty_linear) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setCacheKeys({1, 2, 3, 4, 5});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4, 5}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14, 15}));
@@ -445,7 +445,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_with_all_empty_linear) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setCacheKeys({1, 2, 3, 4, 5});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4, 5}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14, 15}));
@@ -806,7 +806,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_match_fail) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
@@ -836,7 +836,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_fail) {
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
@@ -1112,7 +1112,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_grp
 }
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_threadpool_ec) {
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));

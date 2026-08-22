@@ -60,6 +60,10 @@ struct KVCacheSpecDesc {
     OpaqueBlockEntryCountMode entry_count_mode                     = OpaqueBlockEntryCountMode::EXPLICIT;
     uint32_t                  explicit_entry_count                 = 0;
     uint32_t                  compression_ratio                    = 1;
+    // KERNEL_BLOCK_COMPRESSED descriptors may require a model-specific
+    // kernel-page granularity. The default keeps the generic compressed
+    // contract usable by indexer kernels whose native page is 64 tokens.
+    uint32_t                  kernel_tokens_per_block_alignment    = 1;
     uint32_t                  state_ring_overlap                   = 0;
     bool                      state_ring_include_gen_num_per_cycle = false;
 

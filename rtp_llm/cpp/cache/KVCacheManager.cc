@@ -61,14 +61,14 @@ void validateSharedPoolTopologyBeforeAllocation(const CacheConfig& cache_config)
         const auto& group = cache_config.topology().groupById(0);
         RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache spec[0] is null");
         RTP_LLM_CHECK_WITH_INFO(is_full_attention(group),
-                                "SingleTypeKVCacheAllocator requires one FULL MHA/MLA cache group");
+                                "HybridPoolKVCacheAllocator requires one FULL MHA/MLA cache group");
         return;
     }
 
     const bool has_full_attention = std::any_of(
         cache_config.topology().groups().begin(), cache_config.topology().groups().end(), is_full_attention);
     RTP_LLM_CHECK_WITH_INFO(has_full_attention,
-                            "HybridTypeKVCacheAllocator requires at least one FULL MHA/MLA cache group");
+                            "HybridPoolKVCacheAllocator requires at least one FULL MHA/MLA cache group");
 }
 
 GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
