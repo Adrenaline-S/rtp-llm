@@ -107,9 +107,8 @@ public:
     virtual bool                 prefixReusable() const;
     virtual bool                 hasSparseSlots() const;
     virtual bool                 hasKernelBlockSubdiv() const;
-    virtual bool                 transferTailBlocks() const;
-    virtual bool                 isReservable() const;
-    virtual CacheMemoryPlacement memoryPlacement() const;
+    virtual bool transferTailBlocks() const;
+    virtual bool isReservable() const;
 
 protected:
     static GroupBase

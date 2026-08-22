@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -401,7 +402,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TopologyRejectsMissingLayerTagMapping) {
     EXPECT_THROW(config.setTopology(std::move(groups), std::move(layers)), std::runtime_error);
 }
 
-TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigUsesTaggedContiguousLinearGroupsAndFullFirst) {
+TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigUsesOneModelDeclaredHomogeneousLinearTagAndKeepsFullFirst) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/8);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -412,7 +413,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigUsesTaggedContiguousLin
                                  HybridAttentionType::LINEAR,
                                  HybridAttentionType::LINEAR,
                                  HybridAttentionType::NONE},
-                                {"linear0", "linear0", "linear1", "full", "linear1", "linear2", "linear2", "full"});
+                                {"linear", "linear", "linear", "full", "linear", "linear", "linear", "full"});
     cfg.linear_attention_config.linear_conv_kernel_dim = 2;
     cfg.linear_attention_config.linear_key_head_dim    = 8;
     cfg.linear_attention_config.linear_value_head_dim  = 8;
@@ -424,21 +425,67 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigUsesTaggedContiguousLin
     auto cache_config =
         CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
 
-    std::vector<std::string>    expected_tags{"full", "linear0", "linear1", "linear2"};
-    std::vector<CacheGroupType> expected_types{
-        CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::LINEAR};
-    std::vector<int> expected_full{3, 7};
-    std::vector<int> expected_linear0{0, 1};
-    std::vector<int> expected_linear1{2, 4};
-    std::vector<int> expected_linear2{5, 6};
+    std::vector<std::string>    expected_tags{"full", "linear"};
+    std::vector<CacheGroupType> expected_types{CacheGroupType::FULL, CacheGroupType::LINEAR};
+    std::vector<int>            expected_full{3, 7};
+    std::vector<int>            expected_linear{0, 1, 2, 4, 5, 6};
 
-    ASSERT_EQ(cache_config.groupNums(), 4);
+    ASSERT_EQ(cache_config.groupNums(), 2);
     EXPECT_EQ(cache_config.groupTagsSnapshot(), expected_tags);
     EXPECT_EQ(cache_config.groupTypesSnapshot(), expected_types);
     EXPECT_EQ(cache_config.layerIdsForGroup(0), expected_full);
-    EXPECT_EQ(cache_config.layerIdsForGroup(1), expected_linear0);
-    EXPECT_EQ(cache_config.layerIdsForGroup(2), expected_linear1);
-    EXPECT_EQ(cache_config.layerIdsForGroup(3), expected_linear2);
+    EXPECT_EQ(cache_config.layerIdsForGroup(1), expected_linear);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsExplicitPhysicallyHeterogeneousLinearTags) {
+    auto cfg = makeTinyModelConfig(/*num_layers=*/4);
+    setHybridLayerDescsWithTags(cfg,
+                                {HybridAttentionType::LINEAR,
+                                 HybridAttentionType::LINEAR,
+                                 HybridAttentionType::NONE,
+                                 HybridAttentionType::NONE},
+                                {"recurrent_state", "convolution_state", "full", "full"});
+    cfg.linear_attention_config.linear_conv_kernel_dim = 2;
+    cfg.linear_attention_config.linear_key_head_dim    = 8;
+    cfg.linear_attention_config.linear_value_head_dim  = 8;
+    cfg.linear_attention_config.linear_num_key_heads   = 2;
+    cfg.linear_attention_config.linear_num_value_heads = 2;
+    cfg.kv_cache_spec_descs[0][0].dtype                = DataType::TYPE_FP16;
+    cfg.kv_cache_spec_descs[1][0].dtype                = DataType::TYPE_FP32;
+
+    ParallelismConfig parallelism_cfg;
+    auto              config =
+        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+
+    ASSERT_TRUE(config.use_independent_block_pools);
+    ASSERT_EQ(config.groupNums(), 3);
+    EXPECT_EQ(config.groupTagsSnapshot(), (std::vector<std::string>{"full", "recurrent_state", "convolution_state"}));
+    EXPECT_TRUE(config.policyForGroup(1).enable_prefix_reuse);
+    EXPECT_TRUE(config.policyForGroup(2).enable_prefix_reuse);
+    EXPECT_EQ(config.specForGroup(1)->memoryLayoutDType(), DataType::TYPE_FP16);
+    EXPECT_EQ(config.specForGroup(2)->memoryLayoutDType(), DataType::TYPE_FP32);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigRejectsDifferentLayoutsUnderOneLinearTag) {
+    auto cfg = makeTinyModelConfig(/*num_layers=*/4);
+    setHybridLayerDescsWithTags(cfg,
+                                {HybridAttentionType::LINEAR,
+                                 HybridAttentionType::LINEAR,
+                                 HybridAttentionType::NONE,
+                                 HybridAttentionType::NONE},
+                                {"linear", "linear", "full", "full"});
+    cfg.linear_attention_config.linear_conv_kernel_dim = 2;
+    cfg.linear_attention_config.linear_key_head_dim    = 8;
+    cfg.linear_attention_config.linear_value_head_dim  = 8;
+    cfg.linear_attention_config.linear_num_key_heads   = 2;
+    cfg.linear_attention_config.linear_num_value_heads = 2;
+    cfg.kv_cache_spec_descs[0][0].dtype                = DataType::TYPE_FP16;
+    cfg.kv_cache_spec_descs[1][0].dtype                = DataType::TYPE_BF16;
+
+    ParallelismConfig parallelism_cfg;
+    EXPECT_THROW(
+        (void)CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0),
+        std::runtime_error);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
@@ -515,6 +562,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EagleMapsSoleDefaultFullDraftGroupToUniqu
 
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_EQ(allocator->groupBlockPools()[full_gid]->config_.memory_layouts.size(), 2u);
+    EXPECT_EQ(allocator->groupBlockPools()[linear_gid]->config_.memory_layouts.size(), 1u);
     const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(0);
     EXPECT_TRUE(layout.at("full", 0).kv_addr.defined());
     EXPECT_TRUE(layout.group("linear").empty());
@@ -534,6 +586,73 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MtpMapsDefaultFullDraftGroupForEveryModul
         EXPECT_EQ(sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
         EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
         EXPECT_EQ(config.groupIdForLayerTag(static_cast<int>(4 + module_index), "full"), static_cast<int>(full_gid));
+    }
+
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_EQ(allocator->groupBlockPools()[full_gid]->config_.memory_layouts.size(), 3u);
+    EXPECT_EQ(allocator->groupBlockPools()[linear_gid]->config_.memory_layouts.size(), 1u);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, CreateSpConfigPreservesQwenPackingAlignmentForFullMtpLayers) {
+    auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/8);
+    auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
+
+    setHybridLayerDescs(score_model_cfg,
+                        {HybridAttentionType::LINEAR,
+                         HybridAttentionType::LINEAR,
+                         HybridAttentionType::LINEAR,
+                         HybridAttentionType::NONE,
+                         HybridAttentionType::LINEAR,
+                         HybridAttentionType::LINEAR,
+                         HybridAttentionType::LINEAR,
+                         HybridAttentionType::NONE});
+    score_model_cfg.linear_attention_config.linear_conv_kernel_dim = 2;
+    score_model_cfg.linear_attention_config.linear_key_head_dim    = 8;
+    score_model_cfg.linear_attention_config.linear_value_head_dim  = 8;
+    score_model_cfg.linear_attention_config.linear_num_key_heads   = 2;
+    score_model_cfg.linear_attention_config.linear_num_value_heads = 2;
+
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+
+    RuntimeConfig runtime_cfg;
+    KVCacheConfig kv_cache_cfg;
+    kv_cache_cfg.test_block_num = 8;
+
+    SpeculativeExecutionConfig sp_cfg;
+    sp_cfg.type              = SP_TYPE_MTP;
+    sp_cfg.gen_num_per_cycle = 2;
+
+    CacheConfig config;
+    ASSERT_NO_THROW(config = CacheConfigCreator::createSpConfig(score_model_cfg,
+                                                                propose_model_cfg,
+                                                                parallelism_cfg,
+                                                                runtime_cfg,
+                                                                kv_cache_cfg,
+                                                                sp_cfg,
+                                                                /*warm_up_result=*/std::nullopt,
+                                                                /*is_mtp=*/true,
+                                                                /*is_eagle=*/false));
+
+    EXPECT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"full", "linear"}));
+    EXPECT_EQ(config.group_layer_num, 2);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+
+    const auto full_gid   = static_cast<size_t>(config.groupIdForTag("full"));
+    const auto linear_gid = static_cast<size_t>(config.groupIdForTag("linear"));
+    EXPECT_EQ(config.layerIdsForGroup(full_gid), std::vector<int>({3, 7, 8, 9}));
+    EXPECT_EQ(config.groupIdForLayerTag(8, "full"), static_cast<int>(full_gid));
+    EXPECT_EQ(config.groupIdForLayerTag(9, "full"), static_cast<int>(full_gid));
+
+    for (const auto& sub_config : config.mtp_sub_configs) {
+        ASSERT_NE(sub_config, nullptr);
+        EXPECT_EQ(sub_config->groupTagsSnapshot(), std::vector<std::string>({"full", "linear"}));
+        EXPECT_EQ(sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
+        EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
     }
 }
 
@@ -652,8 +771,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGro
 
     auto target_with_different_policy    = target;
     auto target_policy                   = target_with_different_policy.topology().groupById(0).policy;
-    target_policy.explicit_block_num     = 2;
-    target_policy.charge_to_paged_budget = true;
+    target_policy.explicit_block_num = 2;
     target_with_different_policy.setGroupPolicies({target_policy});
     expect_no_compatible_alias(target_with_different_policy, compatible_propose);
 }

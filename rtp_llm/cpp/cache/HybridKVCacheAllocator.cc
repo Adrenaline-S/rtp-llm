@@ -87,6 +87,14 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
                                        const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+    const bool no_reusable_group = full_group_ids_.empty() && linear_group_ids_.empty()
+                                   && std::all_of(swa_group_ids_.begin(), swa_group_ids_.end(), [this](int gid) {
+                                          return skipReuseCacheGroup(gid);
+                                      });
+    if (no_reusable_group) {
+        return 0;
+    }
+
     // Under cp shard, FULL groups index block_ids by cp-virtual-block units
     // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
     // raw block_size logical blocks. So when populating tail blocks for
@@ -409,6 +417,27 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     const bool  cp_active  = cp_mapper && cp_mapper->isSharded();
     const int   group_nums = kv_cache_resource->groupNums();
     const int   batch_size = kv_cache_resource->batchSize();
+
+    const auto& sole_spec = config_.groupNums() == 1 ? config_.specForGroup(0) : nullptr;
+    const bool  legacy_ordinary_single_full =
+        !config_.use_independent_block_pools && !cp_active && config_.groupNums() == 1 && group_nums == 1
+        && full_group_ids_.size() == 1 && config_.typeForGroup(0) == CacheGroupType::FULL && sole_spec
+        && (sole_spec->type == KVCacheSpecType::MultiHeadAttention
+            || sole_spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+    if (legacy_ordinary_single_full) {
+        if (!kv_cache_groups_[0]->prefixReuseEnabled() || batch_size == 0) {
+            return;
+        }
+        const auto& cache_keys = kv_cache_resource->cacheKeys(/*batch_id=*/0);
+        const auto& blocks     = kv_cache_resource->blocks(/*batch_id=*/0, /*group_id=*/0);
+        const auto  block_num  = std::min(cache_keys.size(), blocks.size());
+        if (block_num > 0) {
+            kv_cache_groups_[0]->insertIntoCache(CacheKeysType(cache_keys.begin(), cache_keys.begin() + block_num),
+                                                 BlockIndicesType(blocks.begin(), blocks.begin() + block_num),
+                                                 insert_info.is_resident);
+        }
+        return;
+    }
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         const auto& full_keys = kv_cache_resource->cacheKeys(batch_id);
