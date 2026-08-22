@@ -8,23 +8,12 @@
 #include <string_view>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockExpression.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
 struct CacheConfig;
-
-using CacheKeyType = int64_t;
-using BlockIdxType = int32_t;
-
-constexpr BlockIdxType NULL_BLOCK_IDX = static_cast<BlockIdxType>(-1);
-
-inline bool isNullBlockIdx(BlockIdxType block_idx) {
-    return block_idx == NULL_BLOCK_IDX;
-}
-
-using CacheKeysType    = std::vector<CacheKeyType>;
-using BlockIndicesType = std::vector<BlockIdxType>;
 
 struct BlockDependency {
     // Dependency metadata belongs to the request's global cache-key timeline. Filtered resource views preserve the
@@ -37,65 +26,18 @@ struct BlockDependency {
 
 using BlockDependenciesType = std::vector<BlockDependency>;
 
-class BlockIds {
-public:
-    explicit BlockIds(size_t kernel_blocks_per_kv_block = 1):
-        kernel_blocks_per_kv_block_(kernel_blocks_per_kv_block > 0 ? kernel_blocks_per_kv_block : 1) {}
-
-    size_t blocksNum() const;
-
-    const BlockIndicesType& blocks() const;
-
-    const BlockIndicesType& kernelBlocks() const;
-
-    size_t kernelBlocksPerKvBlock() const;
-
-    // Remove and return the last physical block ID.
-    BlockIdxType popBack();
-
-    // Append new physical block IDs to the tail.
-    void add(const BlockIndicesType& ids);
-    void remove(const std::vector<size_t>& indices);
-
-    // Swap the physical block IDs at positions pos_a and pos_b.
-    // Corresponding kernel slots for both positions are updated incrementally.
-    void swap(size_t pos_a, size_t pos_b);
-
-    void assign(const BlockIndicesType& new_block_indices);
-    void assign(BlockIndicesType&& new_block_indices);
-    void setAt(size_t pos, BlockIdxType val);
-
-    void resize(size_t new_size, BlockIdxType value = NULL_BLOCK_IDX);
-
-private:
-    // Update the kernel slots that correspond to physical block position `pos`.
-    void updateKernelSlotAt(size_t pos, BlockIdxType val);
-    // Update all kernel slots
-    void syncKernelBlocks();
-
-    BlockIndicesType block_indices;
-    // Kernel-granularity block IDs, always maintained.
-    // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
-    // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
-    BlockIndicesType kernel_block_indices_;
-    size_t           kernel_blocks_per_kv_block_ = 1;
-};
-
 class KVCacheResource {
 public:
     void initGroups(const CacheConfig& config);
-    void resizeBlocks(int reserver_blocks, int value = 0);
+    void resizeBlocks(int reserved_blocks, std::optional<PoolBlockId> initial_block = std::nullopt);
 
-    int                     blocksNum(std::string_view tag) const;
-    const BlockIndicesType& blocks(std::string_view tag) const;
-    const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(std::string_view tag) const;
-    const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
-    BlockIds&               mutableBlockIds(std::string_view tag) const;
-    BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
+    int blocksNum(std::string_view tag) const;
 
-    const BlockIds& blockIds(std::string_view tag) const;
-    const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+    GroupBlockToPoolBlockBinding& mutableBlockBinding(std::string_view tag) const;
+    GroupBlockToPoolBlockBinding& mutableBlockBindingForLayer(int layer_id, std::string_view tag) const;
+
+    const GroupBlockToPoolBlockBinding& blockBinding(std::string_view tag) const;
+    const GroupBlockToPoolBlockBinding& blockBindingForLayer(int layer_id, std::string_view tag) const;
 
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
     const std::string&              soleGroupTagForLayer(int layer_id) const;
@@ -103,7 +45,7 @@ public:
     int layerNum() const;
     int groupNums() const;
 
-    const std::map<std::string, BlockIds>& blocksByTag() const;
+    const std::map<std::string, GroupBlockToPoolBlockBinding>& blocksByTag() const;
 
     bool layerOwnsTag(int layer_id, std::string_view tag) const;
 
@@ -121,7 +63,7 @@ public:
     // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
     // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
     // Note: when cacheKeys().size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
-    // localCacheKeys may return fewer entries than blocks().size().  This is
+    // localCacheKeys may return fewer entries than blockBinding().size().  This is
     // intentional — padding blocks carry no real data and must NOT participate in
     // device cache insert, PD transfer, or connector operations.  Downstream code
     // (e.g. insertIntoCache) already uses min(keys, blocks) to handle this.
@@ -155,13 +97,13 @@ public:
     std::string debugString() const;
 
 private:
-    bool               layerContainsTag(int layer_id, std::string_view tag) const;
+    bool layerContainsTag(int layer_id, std::string_view tag) const;
 
-    std::vector<std::vector<std::string>> layer_group_tags_;
-    mutable std::map<std::string, BlockIds> blocks_by_tag_;
-    CacheKeysType                         cache_keys;
-    BlockDependenciesType                 block_dependencies;
-    bool                                  cache_keys_are_cp_canonical_{false};
+    std::vector<std::vector<std::string>>                       layer_group_tags_;
+    mutable std::map<std::string, GroupBlockToPoolBlockBinding> blocks_by_tag_;
+    CacheKeysType                                               cache_keys;
+    BlockDependenciesType                                       block_dependencies;
+    bool                                                        cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

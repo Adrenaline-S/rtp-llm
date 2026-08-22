@@ -24,8 +24,9 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 
 void validateRemoteCacheConfig(const CacheConfig& cache_config) {
     const auto& groups         = cache_config.groups();
-    const auto  full_group_num = std::count_if(
-        groups.begin(), groups.end(), [](const CacheGroup& group) { return group.policy.group_type == CacheGroupType::FULL; });
+    const auto  full_group_num = std::count_if(groups.begin(), groups.end(), [](const CacheGroup& group) {
+        return group.policy.group_type == CacheGroupType::FULL;
+    });
     RTP_LLM_CHECK_WITH_INFO(groups.size() == 1 && full_group_num == 1,
                             "remote cache requires exactly one FULL cache group, groups=%zu full_groups=%zu",
                             groups.size(),
@@ -80,11 +81,8 @@ std::string GroupPolicy::debugString() const {
 
 bool DefaultLayerGroupPolicy::init() {
     std::vector<std::string> intersection;
-    std::set_intersection(full_tags_.begin(),
-                          full_tags_.end(),
-                          other_tags_.begin(),
-                          other_tags_.end(),
-                          std::back_inserter(intersection));
+    std::set_intersection(
+        full_tags_.begin(), full_tags_.end(), other_tags_.begin(), other_tags_.end(), std::back_inserter(intersection));
 
     if (!intersection.empty()) {
         std::stringstream ss;
@@ -94,8 +92,8 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    const auto  layer_layout       = allocator_->allLayerCacheBase();
-    uint64_t    group_name_bithash = 1;
+    const auto layer_layout       = allocator_->allLayerCacheBase();
+    uint64_t   group_name_bithash = 1;
     for (size_t layer_id = 0; layer_id < layer_layout.layerCount(); ++layer_id) {
         const auto& group_tags = layer_layout.groupTagsForLayer(static_cast<int>(layer_id));
         if (group_tags.empty()) {
@@ -113,14 +111,14 @@ bool DefaultLayerGroupPolicy::init() {
                     RTP_LLM_LOG_ERROR("not support bigger than 64 groups");
                     return false;
                 }
-                const auto&       group_layout = layer_layout.groupLayout(cache_tag);
-                const std::string prefix         = is_full_group ? "F" : GetOtherGroupPrefixName();
-                std::string       group_name     = prefix + cache_tag;
+                const auto&       group_layout      = layer_layout.groupLayout(cache_tag);
+                const std::string prefix            = is_full_group ? "F" : GetOtherGroupPrefixName();
+                std::string       group_name        = prefix + cache_tag;
                 size_t            group_layer_count = 0;
                 for (size_t candidate_layer = 0; candidate_layer < layer_layout.layerCount(); ++candidate_layer) {
                     const auto& candidate_tags = layer_layout.groupTagsForLayer(static_cast<int>(candidate_layer));
-                    group_layer_count += std::find(candidate_tags.begin(), candidate_tags.end(), cache_tag)
-                                             != candidate_tags.end();
+                    group_layer_count +=
+                        std::find(candidate_tags.begin(), candidate_tags.end(), cache_tag) != candidate_tags.end();
                 }
                 const size_t block_size_bytes =
                     group_layer_count * (group_layout.kv_block_stride_bytes + group_layout.kv_scale_stride_bytes);
@@ -162,8 +160,8 @@ bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheRe
     for (size_t key_idx = 0; key_idx < valid_keys_size; key_idx++) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [tag, group] : groups_) {
-            const auto gpu_block_idx = resource->blocks(tag).at(key_idx);
-            if (!isNullBlockIdx(gpu_block_idx)) {
+            const auto gpu_block_id = resource->blockBinding(tag).lookup(GroupBlockPosition{key_idx});
+            if (gpu_block_id.has_value()) {
                 groups_name_bithash |= group.group_name_bithash;
             }
         }
@@ -193,9 +191,7 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& ta
     RTP_LLM_CHECK_WITH_INFO(!tags.empty(), "remote cache transfer requires at least one tagged block");
     for (const auto& tag : tags) {
         RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "remote cache transfer requires a non-empty cache tag");
-        RTP_LLM_CHECK_WITH_INFO(groups_.find(tag) != groups_.end(),
-                                "remote cache policy missing tag=%s",
-                                tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(groups_.find(tag) != groups_.end(), "remote cache policy missing tag=%s", tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(tag_to_layer_ids_.find(tag) != tag_to_layer_ids_.end(),
                                 "remote cache policy missing layer route for tag=%s",
                                 tag.c_str());
@@ -204,8 +200,8 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& ta
     kv_cache_manager::BlockBuffers staged_block_buffers;
     staged_block_buffers.reserve(block_ids.size());
     for (size_t i = 0; i < block_ids.size(); ++i) {
-        const auto& tag = tags[i];
-        const auto group_it = groups_.find(tag);
+        const auto& tag      = tags[i];
+        const auto  group_it = groups_.find(tag);
         staged_block_buffers.push_back({});
         const auto& layer_ids          = tag_to_layer_ids_.at(tag);
         auto&       iovs               = staged_block_buffers.back().iovs;
@@ -233,12 +229,11 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& ta
         }
         const size_t expected_block_bytes = group_it->second.block_size_bytes;
         if (actual_block_bytes != expected_block_bytes) {
-            RTP_LLM_LOG_WARNING(
-                "remote cache block size mismatch tag [%s] block_id [%d], expected [%zu] actual [%zu]",
-                tag.c_str(),
-                block_ids[i],
-                expected_block_bytes,
-                actual_block_bytes);
+            RTP_LLM_LOG_WARNING("remote cache block size mismatch tag [%s] block_id [%d], expected [%zu] actual [%zu]",
+                                tag.c_str(),
+                                block_ids[i],
+                                expected_block_bytes,
+                                actual_block_bytes);
             return false;
         }
     }
@@ -347,8 +342,8 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
     for (size_t key_idx = valid_keys_size; key_idx-- > 0;) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [tag, group] : groups_) {
-            const auto gpu_block_idx = resource->blocks(tag).at(key_idx);
-            if (!rtp_llm::isNullBlockIdx(gpu_block_idx)) {
+            const auto gpu_block_id = resource->blockBinding(tag).lookup(GroupBlockPosition{key_idx});
+            if (gpu_block_id.has_value()) {
                 groups_name_bithash |= group.group_name_bithash;
             }
         }

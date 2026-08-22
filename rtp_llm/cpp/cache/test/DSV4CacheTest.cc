@@ -34,15 +34,15 @@ namespace test {
 
 namespace {
 
-constexpr int                  kDsv4PoolNum                = 7;
-constexpr uint32_t             kDsv4TokensPerBlock         = 128;
-constexpr uint32_t             kDsv4KvEntryBytes           = 1024;
-constexpr uint32_t             kDsv4IndexerEntryBytes      = 256;
-constexpr uint32_t             kDsv4Fp8KvEntryBytes        = 584;
-constexpr uint32_t             kDsv4IndexerStateEntryBytes = 512 * 4;
-constexpr uint32_t             kDsv4CsaStateEntryBytes     = 2048 * 4;
-constexpr uint32_t             kDsv4HcaStateEntryBytes     = 1024 * 4;
-const std::set<std::string> kDsv4FlashTags = {
+constexpr int               kDsv4PoolNum                = 7;
+constexpr uint32_t          kDsv4TokensPerBlock         = 128;
+constexpr uint32_t          kDsv4KvEntryBytes           = 1024;
+constexpr uint32_t          kDsv4IndexerEntryBytes      = 256;
+constexpr uint32_t          kDsv4Fp8KvEntryBytes        = 584;
+constexpr uint32_t          kDsv4IndexerStateEntryBytes = 512 * 4;
+constexpr uint32_t          kDsv4CsaStateEntryBytes     = 2048 * 4;
+constexpr uint32_t          kDsv4HcaStateEntryBytes     = 1024 * 4;
+const std::set<std::string> kDsv4FlashTags              = {
     "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
 const std::set<std::string> kDsv4ProTags = {
     "hca_kv", "hca_state", "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state"};
@@ -134,7 +134,7 @@ static CacheConfig makeSingleStateCpConfig(std::string_view tag, const KVCacheSp
     config.layer_all_num      = 1;
     CacheGroup group;
     group.tag                        = tag;
-    group.layout.spec                       = spec.clone();
+    group.layout.spec                = spec.clone();
     group.policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
     group.policy.enable_prefix_reuse = true;
     group.policy.cp_slice = spec.block_size_bytes() == spec.block_payload_bytes() ? CpBlockSliceMode::PAYLOAD_BYTES :
@@ -372,10 +372,10 @@ TEST(CacheConfigCreatorTest, Dsv4SpecOrderControlsFirstSeenGroupOrder) {
 static CacheGroup
 makeTestGroup(std::string tag, const KVCacheSpecPtr& spec, CacheGroupType type, std::vector<int> layer_ids) {
     CacheGroup group;
-    group.tag       = std::move(tag);
-    group.layout.spec      = spec;
-    group.policy    = defaultCacheGroupPolicy(type);
-    group.layer_ids = std::move(layer_ids);
+    group.tag         = std::move(tag);
+    group.layout.spec = spec;
+    group.policy      = defaultCacheGroupPolicy(type);
+    group.layer_ids   = std::move(layer_ids);
     return group;
 }
 
@@ -391,11 +391,10 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
 
     std::vector<CacheLayerMembership> layers = {{0, {"swa"}}, {1, {"swa", "csa"}}, {2, {"swa"}}};
 
-    config = TestCacheConfigBuilder::withResolvedData(
-        std::move(config),
-        {makeTestGroup("swa", swa_spec, CacheGroupType::SWA, {0, 1, 2}),
-         makeTestGroup("csa", csa_spec, CacheGroupType::FULL, {1})},
-        std::move(layers));
+    config = TestCacheConfigBuilder::withResolvedData(std::move(config),
+                                                      {makeTestGroup("swa", swa_spec, CacheGroupType::SWA, {0, 1, 2}),
+                                                       makeTestGroup("csa", csa_spec, CacheGroupType::FULL, {1})},
+                                                      std::move(layers));
 
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"swa", "csa"}));
     EXPECT_EQ(config.groupForLayer(1, "swa").tag, "swa");
@@ -410,14 +409,14 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
     config.layer_all_num = 2;
 
     auto full_spec   = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 4, 8, "full");
-    auto linear_spec = makeResolvedLinearSpec(DataType::TYPE_FP16, 1, 1, 4, 4, 2, 8, DataType::TYPE_FP16,
-                                              DataType::TYPE_FP16, "linear");
+    auto linear_spec = makeResolvedLinearSpec(
+        DataType::TYPE_FP16, 1, 1, 4, 4, 2, 8, DataType::TYPE_FP16, DataType::TYPE_FP16, "linear");
 
-    config = TestCacheConfigBuilder::withResolvedData(
-        std::move(config),
-        {makeTestGroup("full", full_spec, CacheGroupType::FULL, {0}),
-         makeTestGroup("linear", linear_spec, CacheGroupType::LINEAR, {1})},
-        {{0, {"full"}}, {1, {"linear"}}});
+    config =
+        TestCacheConfigBuilder::withResolvedData(std::move(config),
+                                                 {makeTestGroup("full", full_spec, CacheGroupType::FULL, {0}),
+                                                  makeTestGroup("linear", linear_spec, CacheGroupType::LINEAR, {1})},
+                                                 {{0, {"full"}}, {1, {"linear"}}});
     const auto initial_config = config;
 
     std::vector<CacheGroupPolicy> policies;
@@ -425,8 +424,8 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
         policies.push_back(group.policy);
     }
     policies[0].enable_prefix_reuse = !policies[0].enable_prefix_reuse;
-    config = TestCacheConfigBuilder::withGroupPolicies(std::move(config), policies);
-    const auto policy_config = config;
+    config                          = TestCacheConfigBuilder::withGroupPolicies(std::move(config), policies);
+    const auto policy_config        = config;
 
     EXPECT_EQ(config.group("full").policy.enable_prefix_reuse, policies[0].enable_prefix_reuse);
     EXPECT_NE(initial_config.group("full").policy.enable_prefix_reuse, policies[0].enable_prefix_reuse);
@@ -459,7 +458,7 @@ TEST(CacheConfigTest, SetTopologyRejectsMissingLayer) {
     config.layer_num     = 2;
     config.layer_all_num = 2;
 
-    auto                   spec   = std::make_shared<MHAKVCacheSpec>();
+    auto                              spec   = std::make_shared<MHAKVCacheSpec>();
     std::vector<CacheLayerMembership> layers = {{0, {"default"}}, {1, {}}};
     EXPECT_THROW(TestCacheConfigBuilder::withResolvedData(
                      std::move(config), {makeTestGroup("default", spec, CacheGroupType::FULL, {0})}, std::move(layers)),
@@ -471,7 +470,7 @@ TEST(CacheConfigTest, SetTopologyRejectsEmptyTag) {
     config.layer_num     = 1;
     config.layer_all_num = 1;
 
-    auto                   spec   = std::make_shared<MHAKVCacheSpec>();
+    auto                              spec   = std::make_shared<MHAKVCacheSpec>();
     std::vector<CacheLayerMembership> layers = {{0, {""}}};
     EXPECT_THROW(TestCacheConfigBuilder::withResolvedData(
                      std::move(config), {makeTestGroup("", spec, CacheGroupType::FULL, {0})}, std::move(layers)),
@@ -487,11 +486,10 @@ TEST(CacheConfigTest, SetTopologyRejectsDuplicateGroupTag) {
     auto spec1 = std::make_shared<MHAKVCacheSpec>();
 
     std::vector<CacheLayerMembership> layers = {{0, {"dup", "dup"}}};
-    EXPECT_THROW(TestCacheConfigBuilder::withResolvedData(
-                     std::move(config),
-                     {makeTestGroup("dup", spec0, CacheGroupType::FULL, {0}),
-                      makeTestGroup("dup", spec1, CacheGroupType::LINEAR, {0})},
-                     std::move(layers)),
+    EXPECT_THROW(TestCacheConfigBuilder::withResolvedData(std::move(config),
+                                                          {makeTestGroup("dup", spec0, CacheGroupType::FULL, {0}),
+                                                           makeTestGroup("dup", spec1, CacheGroupType::LINEAR, {0})},
+                                                          std::move(layers)),
                  std::exception);
 }
 
@@ -504,11 +502,11 @@ TEST(CacheConfigTest, SetTopologyAllowsDifferentLayerTags) {
     auto spec1 = std::make_shared<MHAKVCacheSpec>();
 
     std::vector<CacheLayerMembership> layers = {{0, {"full", "linear"}}};
-    EXPECT_NO_THROW(config = TestCacheConfigBuilder::withResolvedData(
-                        std::move(config),
-                        {makeTestGroup("full", spec0, CacheGroupType::FULL, {0}),
-                         makeTestGroup("linear", spec1, CacheGroupType::LINEAR, {0})},
-                        std::move(layers)));
+    EXPECT_NO_THROW(
+        config = TestCacheConfigBuilder::withResolvedData(std::move(config),
+                                                          {makeTestGroup("full", spec0, CacheGroupType::FULL, {0}),
+                                                           makeTestGroup("linear", spec1, CacheGroupType::LINEAR, {0})},
+                                                          std::move(layers)));
     EXPECT_EQ(config.groupTagsForLayer(0).size(), 2u);
 }
 
@@ -528,10 +526,8 @@ TEST(CacheConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpecs) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
 
-    const auto* csa_kv =
-        dynamic_cast<const CompressedKVCacheSpec*>(config.group("csa_kv").layout.spec.get());
-    const auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(config.group("swa_kv").layout.spec.get());
+    const auto* csa_kv = dynamic_cast<const CompressedKVCacheSpec*>(config.group("csa_kv").layout.spec.get());
+    const auto* swa_kv = dynamic_cast<const FixedStateCacheSpec*>(config.group("swa_kv").layout.spec.get());
     ASSERT_NE(csa_kv, nullptr);
     ASSERT_NE(swa_kv, nullptr);
     EXPECT_EQ(csa_kv->block_size_bytes() % 1024u, 0u);
@@ -630,8 +626,7 @@ TEST(CacheConfigCreatorTest, ProPoolSpecs) {
     EXPECT_EQ(config.group("hca_state").layout.spec->block_size_bytes(), 128u * 1024u * 4u);
 
     EXPECT_EQ(config.group("swa_kv").layer_ids.size(), 61u);
-    EXPECT_EQ(config.group("swa_kv").layout.spec->block_size_bytes(),
-              kDsv4TokensPerBlock * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.group("swa_kv").layout.spec->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
 TEST(CacheConfigCreatorTest, FlashPoolSpecs) {
@@ -655,8 +650,7 @@ TEST(CacheConfigCreatorTest, BlockSizeBytes) {
     EXPECT_EQ(config.group("indexer_state").layout.spec->block_size_bytes(), 8u * 512u * 4u);
     EXPECT_EQ(config.group("csa_state").layout.spec->block_size_bytes(), 8u * 2048u * 4u);
     EXPECT_EQ(config.group("hca_state").layout.spec->block_size_bytes(), 128u * 1024u * 4u);
-    EXPECT_EQ(config.group("swa_kv").layout.spec->block_size_bytes(),
-              kDsv4TokensPerBlock * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.group("swa_kv").layout.spec->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
 TEST(CacheConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
@@ -693,14 +687,10 @@ TEST(CacheConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBlockSi
     EXPECT_EQ(config.kernel_seq_size_per_block, 128u);
     EXPECT_EQ(config.kernelBlocksPerKvBlock(), 1u);
 
-    const auto* csa_kv =
-        dynamic_cast<const CompressedKVCacheSpec*>(config.group("csa_kv").layout.spec.get());
-    const auto* hca_kv =
-        dynamic_cast<const CompressedKVCacheSpec*>(config.group("hca_kv").layout.spec.get());
-    const auto* idx_kv =
-        dynamic_cast<const CompressedKVCacheSpec*>(config.group("indexer_kv").layout.spec.get());
-    const auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(config.group("swa_kv").layout.spec.get());
+    const auto* csa_kv = dynamic_cast<const CompressedKVCacheSpec*>(config.group("csa_kv").layout.spec.get());
+    const auto* hca_kv = dynamic_cast<const CompressedKVCacheSpec*>(config.group("hca_kv").layout.spec.get());
+    const auto* idx_kv = dynamic_cast<const CompressedKVCacheSpec*>(config.group("indexer_kv").layout.spec.get());
+    const auto* swa_kv = dynamic_cast<const FixedStateCacheSpec*>(config.group("swa_kv").layout.spec.get());
     ASSERT_NE(csa_kv, nullptr);
     ASSERT_NE(hca_kv, nullptr);
     ASSERT_NE(idx_kv, nullptr);
@@ -752,10 +742,10 @@ TEST(CacheConfigCreatorTest, DecoupledPhysicalSpecStrideAndKernelViewUsePerGroup
     const std::string hca_kv_tag = "hca_kv";
     const std::string idx_kv_tag = "indexer_kv";
     const std::string swa_kv_tag = "swa_kv";
-    const auto* csa_kv     = dynamic_cast<const CompressedKVCacheSpec*>(config.group(csa_kv_tag).layout.spec.get());
-    const auto* hca_kv     = dynamic_cast<const CompressedKVCacheSpec*>(config.group(hca_kv_tag).layout.spec.get());
-    const auto* idx_kv     = dynamic_cast<const CompressedKVCacheSpec*>(config.group(idx_kv_tag).layout.spec.get());
-    const auto* swa_kv     = dynamic_cast<const FixedStateCacheSpec*>(config.group(swa_kv_tag).layout.spec.get());
+    const auto*       csa_kv = dynamic_cast<const CompressedKVCacheSpec*>(config.group(csa_kv_tag).layout.spec.get());
+    const auto*       hca_kv = dynamic_cast<const CompressedKVCacheSpec*>(config.group(hca_kv_tag).layout.spec.get());
+    const auto*       idx_kv = dynamic_cast<const CompressedKVCacheSpec*>(config.group(idx_kv_tag).layout.spec.get());
+    const auto*       swa_kv = dynamic_cast<const FixedStateCacheSpec*>(config.group(swa_kv_tag).layout.spec.get());
     ASSERT_NE(csa_kv, nullptr);
     ASSERT_NE(hca_kv, nullptr);
     ASSERT_NE(idx_kv, nullptr);
@@ -812,8 +802,7 @@ TEST(CacheConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
 
     pc.role_type       = RoleType::DECODE;
     auto decode_config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
-    EXPECT_EQ(decode_config.group("indexer_state").layout.spec->block_size_bytes(),
-              8u * 512u * 4u);
+    EXPECT_EQ(decode_config.group("indexer_state").layout.spec->block_size_bytes(), 8u * 512u * 4u);
     EXPECT_EQ(decode_config.group("csa_state").layout.spec->block_size_bytes(), 8u * 2048u * 4u);
     EXPECT_EQ(decode_config.group("hca_state").layout.spec->block_size_bytes(), 128u * 1024u * 4u);
     EXPECT_EQ(decode_config.group("swa_kv").layout.spec->block_size_bytes(), 74880u);
@@ -902,12 +891,11 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig)
 
     const std::string linear_tag = "linear";
     const std::string full_tag   = "full";
-    EXPECT_EQ(config.block_size_bytes,
-              config.blockSizeBytes(linear_tag) + config.blockSizeBytes(full_tag));
+    EXPECT_EQ(config.block_size_bytes, config.blockSizeBytes(linear_tag) + config.blockSizeBytes(full_tag));
 
     RuntimeConfig runtime_config;
     config.linear_step = 4;
-    config = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/37, runtime_config);
+    config             = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/37, runtime_config);
     EXPECT_EQ(config.group(linear_tag).layout.block_num, 37u);
     EXPECT_EQ(config.group(full_tag).layout.block_num, 37u);
 }
@@ -939,12 +927,11 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs
     const std::string full_tag   = "full";
     const std::string swa_tag    = "swa";
     const std::string linear_tag = "linear";
-    EXPECT_EQ(config.block_size_bytes,
-              config.blockSizeBytes(full_tag) + config.blockSizeBytes(linear_tag));
+    EXPECT_EQ(config.block_size_bytes, config.blockSizeBytes(full_tag) + config.blockSizeBytes(linear_tag));
 
     RuntimeConfig runtime_config;
     config.linear_step = 3;
-    config = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/10, runtime_config);
+    config             = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/10, runtime_config);
     EXPECT_EQ(config.group(full_tag).layout.block_num, 10u);
     EXPECT_EQ(config.group(linear_tag).layout.block_num, 10u);
     EXPECT_EQ(config.group(swa_tag).layout.block_num, 4u);
@@ -1375,8 +1362,7 @@ TEST(CacheConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency) {
             EXPECT_EQ(group.layout.block_num, expected)
                 << "tag=" << group.tag << " max_concurrency=" << max_concurrency;
             if (is_fixed) {
-                expected_reserve +=
-                    static_cast<size_t>(kFixedPoolBlocks) * config.blockSizeBytes(group.tag);
+                expected_reserve += static_cast<size_t>(kFixedPoolBlocks) * config.blockSizeBytes(group.tag);
             }
         }
         // DEV also pinned down that every explicitly-sized pool contributes to the paged-budget
@@ -1652,7 +1638,7 @@ TEST(CacheConfigTest, FinalizeBlockNumsUpdatesHybridPerGroupBlockNums) {
     single_model_config.attn_config.tokens_per_block = 1;
     setDefaultKvCacheSpec(single_model_config);
     auto single_config = CacheConfigCreator::createBasicConfig(single_model_config, pc, false, 0);
-    single_config = CacheConfigCreator::finalizeBlockNums(single_config, 123, runtime_config);
+    single_config      = CacheConfigCreator::finalizeBlockNums(single_config, 123, runtime_config);
     EXPECT_EQ(single_config.block_num, 123u);
     // A single-group config publishes no per-group block-layout override; the
     // sole group just inherits the global block count.
@@ -1662,7 +1648,7 @@ TEST(CacheConfigTest, FinalizeBlockNumsUpdatesHybridPerGroupBlockNums) {
     EXPECT_EQ(single_config.explicitly_sized_pool_reserve_bytes, 0u);
 
     auto hybrid_config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
-    hybrid_config = CacheConfigCreator::finalizeBlockNums(hybrid_config, 123, runtime_config);
+    hybrid_config      = CacheConfigCreator::finalizeBlockNums(hybrid_config, 123, runtime_config);
     EXPECT_EQ(hybrid_config.block_num, 123u);
     EXPECT_TRUE(hybrid_config.use_independent_block_pools);
     EXPECT_EQ(hybrid_config.group("full").layout.block_num, 123u);
@@ -1677,7 +1663,7 @@ TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
 
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, false, 0);
-    config = CacheConfigCreator::finalizeBlockNums(config, 100, runtime_config);
+    config                   = CacheConfigCreator::finalizeBlockNums(config, 100, runtime_config);
 
     ASSERT_EQ(config.groups().size(), static_cast<size_t>(kDsv4PoolNum));
     const std::string hca_state_tag = "hca_state";
@@ -1712,14 +1698,11 @@ TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
 
     // More HCA_STATE blocks reserve more HBM and leave fewer blocks for the global pools.
     EXPECT_GT(config_with.block_num, config_without.block_num);
-    EXPECT_EQ(config_with.group("hca_kv").layout.block_num,
-              static_cast<uint32_t>(config_with.block_num));
-    EXPECT_EQ(config_without.group("hca_kv").layout.block_num,
-              static_cast<uint32_t>(config_without.block_num));
+    EXPECT_EQ(config_with.group("hca_kv").layout.block_num, static_cast<uint32_t>(config_with.block_num));
+    EXPECT_EQ(config_without.group("hca_kv").layout.block_num, static_cast<uint32_t>(config_without.block_num));
     EXPECT_EQ(config_with.group("hca_state").layout.block_num, small_hca_state_pool);
     EXPECT_EQ(config_without.group("hca_state").layout.block_num, large_hca_state_pool);
-    const size_t expected_reserve = static_cast<size_t>(small_hca_state_pool)
-                                    * config_with.blockSizeBytes("hca_state");
+    const size_t expected_reserve = static_cast<size_t>(small_hca_state_pool) * config_with.blockSizeBytes("hca_state");
     EXPECT_EQ(config_with.explicitly_sized_pool_reserve_bytes, expected_reserve);
 }
 
@@ -1731,7 +1714,7 @@ TEST(CacheConfigTest, DSV4ExplicitHcaStatePoolBlocksIgnoreLinearStep) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, false, 0);
     config.linear_step       = 4;
-    config = CacheConfigCreator::finalizeBlockNums(config, 100, runtime_config);
+    config                   = CacheConfigCreator::finalizeBlockNums(config, 100, runtime_config);
 
     // The explicit pool keeps its requested capacity. Non-explicit FULL/LINEAR
     // groups keep N, while non-explicit SWA groups use ceil(N / step).
@@ -1842,8 +1825,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     EXPECT_EQ(config.mtpModule(0).group(swa_tag).layout.block_num, 25u);
     EXPECT_EQ(config.mtpModule(1).group(swa_tag).layout.block_num, 25u);
 
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes,
-              256u * config.blockSizeBytes("hca_state"));
+    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 256u * config.blockSizeBytes("hca_state"));
 }
 
 TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
@@ -1921,23 +1903,20 @@ TEST(CacheConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     // Pool 3: INDEXER_STATE (ratio=4, overlap=1) → R=10
-    auto* indexer_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.group("indexer_state").layout.spec.get());
+    auto* indexer_state = dynamic_cast<const FixedStateCacheSpec*>(config.group("indexer_state").layout.spec.get());
     ASSERT_NE(indexer_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*indexer_state, kDsv4IndexerStateEntryBytes), 10u);
     // Pool 4: CSA_STATE (ratio=4, overlap=1) → R=10
-    auto* csa_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.group("csa_state").layout.spec.get());
+    auto* csa_state = dynamic_cast<const FixedStateCacheSpec*>(config.group("csa_state").layout.spec.get());
     ASSERT_NE(csa_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*csa_state, kDsv4CsaStateEntryBytes), 10u);
     // Pool 5: HCA_STATE (ratio=128, overlap=0) → R=130
-    auto* hca_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.group("hca_state").layout.spec.get());
+    auto* hca_state = dynamic_cast<const FixedStateCacheSpec*>(config.group("hca_state").layout.spec.get());
     ASSERT_NE(hca_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*hca_state, kDsv4HcaStateEntryBytes), 130u);
     // Pool 6: SWA_KV (window=128, overlap=0) → R=130, same as HCA_STATE
     const std::string swa_tag = "swa_kv";
-    auto*      swa_kv  = dynamic_cast<const FixedStateCacheSpec*>(config.group(swa_tag).layout.spec.get());
+    auto*             swa_kv  = dynamic_cast<const FixedStateCacheSpec*>(config.group(swa_tag).layout.spec.get());
     ASSERT_NE(swa_kv, nullptr);
     EXPECT_EQ(config.group(swa_tag).tag, "swa_kv");
     EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 130u);
@@ -1953,13 +1932,10 @@ TEST(CacheConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing) {
     auto config = CacheConfigCreator::createBasicConfig(mc, pc, false, 2);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
-    auto* indexer_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.group("indexer_state").layout.spec.get());
-    auto* csa_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.group("csa_state").layout.spec.get());
-    auto* hca_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.group("hca_state").layout.spec.get());
-    auto* swa_kv = dynamic_cast<const FixedStateCacheSpec*>(config.group("swa_kv").layout.spec.get());
+    auto* indexer_state = dynamic_cast<const FixedStateCacheSpec*>(config.group("indexer_state").layout.spec.get());
+    auto* csa_state     = dynamic_cast<const FixedStateCacheSpec*>(config.group("csa_state").layout.spec.get());
+    auto* hca_state     = dynamic_cast<const FixedStateCacheSpec*>(config.group("hca_state").layout.spec.get());
+    auto* swa_kv        = dynamic_cast<const FixedStateCacheSpec*>(config.group("swa_kv").layout.spec.get());
     ASSERT_NE(indexer_state, nullptr);
     ASSERT_NE(csa_state, nullptr);
     ASSERT_NE(hca_state, nullptr);
@@ -2001,32 +1977,28 @@ TEST(CacheConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSlices)
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state"}) {
         const std::string prefill_tag = tag;
         const std::string decode_tag  = tag;
-        auto* prefill_spec = dynamic_cast<const FixedStateCacheSpec*>(prefill_config.group(prefill_tag).layout.spec.get());
-        auto* decode_spec  = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group(decode_tag).layout.spec.get());
+        auto*             prefill_spec =
+            dynamic_cast<const FixedStateCacheSpec*>(prefill_config.group(prefill_tag).layout.spec.get());
+        auto* decode_spec = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group(decode_tag).layout.spec.get());
         ASSERT_NE(prefill_spec, nullptr) << tag;
         ASSERT_NE(decode_spec, nullptr) << tag;
         EXPECT_EQ(decode_config.group(decode_tag).tag, prefill_config.group(prefill_tag).tag) << tag;
         const auto expected_entries = opaqueEntriesPerBlock(*prefill_spec, stateEntryBytesForTag(tag)) * cp_size;
         EXPECT_EQ(opaqueEntriesPerBlock(*decode_spec, stateEntryBytesForTag(tag)), expected_entries) << tag;
     }
-    auto* prefill_swa = dynamic_cast<const FixedStateCacheSpec*>(
-        prefill_config.group("swa_kv").layout.spec.get());
-    auto* decode_swa =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("swa_kv").layout.spec.get());
+    auto* prefill_swa = dynamic_cast<const FixedStateCacheSpec*>(prefill_config.group("swa_kv").layout.spec.get());
+    auto* decode_swa  = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("swa_kv").layout.spec.get());
     ASSERT_NE(prefill_swa, nullptr);
     ASSERT_NE(decode_swa, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes), 136u);
     EXPECT_EQ(opaqueEntriesPerBlock(*decode_swa, kDsv4KvEntryBytes),
               opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes));
 
-    auto* indexer_state = dynamic_cast<const FixedStateCacheSpec*>(
-        decode_config.group("indexer_state").layout.spec.get());
-    auto* csa_state = dynamic_cast<const FixedStateCacheSpec*>(
-        decode_config.group("csa_state").layout.spec.get());
-    auto* hca_state = dynamic_cast<const FixedStateCacheSpec*>(
-        decode_config.group("hca_state").layout.spec.get());
-    auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("swa_kv").layout.spec.get());
+    auto* indexer_state =
+        dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("indexer_state").layout.spec.get());
+    auto* csa_state = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("csa_state").layout.spec.get());
+    auto* hca_state = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("hca_state").layout.spec.get());
+    auto* swa_kv    = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("swa_kv").layout.spec.get());
     ASSERT_NE(indexer_state, nullptr);
     ASSERT_NE(csa_state, nullptr);
     ASSERT_NE(hca_state, nullptr);
@@ -2062,17 +2034,16 @@ TEST(CacheConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state"}) {
         const std::string prefill_tag = tag;
         const std::string decode_tag  = tag;
-        auto* prefill_spec = dynamic_cast<const FixedStateCacheSpec*>(prefill_config.group(prefill_tag).layout.spec.get());
-        auto* decode_spec  = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group(decode_tag).layout.spec.get());
+        auto*             prefill_spec =
+            dynamic_cast<const FixedStateCacheSpec*>(prefill_config.group(prefill_tag).layout.spec.get());
+        auto* decode_spec = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group(decode_tag).layout.spec.get());
         ASSERT_NE(prefill_spec, nullptr) << tag;
         ASSERT_NE(decode_spec, nullptr) << tag;
         const auto expected_entries = opaqueEntriesPerBlock(*prefill_spec, stateEntryBytesForTag(tag)) * cp_size;
         EXPECT_EQ(opaqueEntriesPerBlock(*decode_spec, stateEntryBytesForTag(tag)), expected_entries) << tag;
     }
-    auto* prefill_swa = dynamic_cast<const FixedStateCacheSpec*>(
-        prefill_config.group("swa_kv").layout.spec.get());
-    auto* decode_swa =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("swa_kv").layout.spec.get());
+    auto* prefill_swa = dynamic_cast<const FixedStateCacheSpec*>(prefill_config.group("swa_kv").layout.spec.get());
+    auto* decode_swa  = dynamic_cast<const FixedStateCacheSpec*>(decode_config.group("swa_kv").layout.spec.get());
     ASSERT_NE(prefill_swa, nullptr);
     ASSERT_NE(decode_swa, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes), 136u);
@@ -2116,14 +2087,10 @@ TEST(CacheConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
     }
 
     // Verify group layer ids: each group has the correct layer list.
-    EXPECT_EQ(config.group("csa_kv").layer_ids,
-              config.group("indexer_kv").layer_ids);
-    EXPECT_EQ(config.group("csa_kv").layer_ids,
-              config.group("indexer_state").layer_ids);
-    EXPECT_EQ(config.group("csa_kv").layer_ids,
-              config.group("csa_state").layer_ids);
-    EXPECT_EQ(config.group("hca_kv").layer_ids,
-              config.group("hca_state").layer_ids);
+    EXPECT_EQ(config.group("csa_kv").layer_ids, config.group("indexer_kv").layer_ids);
+    EXPECT_EQ(config.group("csa_kv").layer_ids, config.group("indexer_state").layer_ids);
+    EXPECT_EQ(config.group("csa_kv").layer_ids, config.group("csa_state").layer_ids);
+    EXPECT_EQ(config.group("hca_kv").layer_ids, config.group("hca_state").layer_ids);
 }
 
 // ============================================================
@@ -2136,6 +2103,33 @@ static CacheConfig makeDSV4AllocatorConfig(bool use_flash = false) {
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
     // Set enough blocks for tests (7 groups × N blocks each)
     config = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/200, RuntimeConfig{});
+    return config;
+}
+
+static CacheConfig makeAnchorPublicationConfig(bool reverse_tags = false) {
+    CacheConfig config;
+    config.dtype                       = DataType::TYPE_FP16;
+    config.layer_num                   = 2;
+    config.layer_all_num               = 2;
+    config.block_num                   = 32;
+    config.seq_size_per_block          = 64;
+    config.kernel_seq_size_per_block   = 64;
+    config.use_independent_block_pools = true;
+
+    auto linear = makeResolvedLinearSpec(
+        config.dtype, 1, 1, 1, 1, 2, /*seq_size_per_block=*/64, config.dtype, config.dtype, "linear");
+    auto full = makeResolvedMhaSpec(config.dtype, 1, 1, /*seq_size_per_block=*/512, "full");
+    if (reverse_tags) {
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+            config, {full, linear}, {{1}, {0}}, {CacheGroupType::FULL, CacheGroupType::LINEAR}, {"full", "linear"});
+        rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+            config, {32, 32}, {full->block_size_bytes(), linear->block_size_bytes()}, {0, 0});
+    } else {
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+            config, {linear, full}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
+        rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+            config, {32, 32}, {linear->block_size_bytes(), full->block_size_bytes()}, {0, 0});
+    }
     return config;
 }
 
@@ -2177,7 +2171,6 @@ TEST(CPSlotMapperTest, Dsv4SevenGroupsRouteCpAndTransferByTagIndependentOfRecord
                                              config.seq_size_per_block * static_cast<size_t>(cp_size) :
                                              group.layout.seq_size_per_block;
         EXPECT_EQ(mapper.logicalSeqSizePerBlock(config, tag), expected_key_span) << tag;
-
     }
     EXPECT_ANY_THROW(mapper.layoutForGroup(config, "missing_dsv4_tag"));
 }
@@ -2386,8 +2379,7 @@ TEST_F(DSV4AllocatorTest, SpecBlockSizesMatchPoolSpecs) {
     EXPECT_EQ(config.group("indexer_state").layout.spec->block_size_bytes(), 8u * 512u * 4u);
     EXPECT_EQ(config.group("csa_state").layout.spec->block_size_bytes(), 8u * 2048u * 4u);
     EXPECT_EQ(config.group("hca_state").layout.spec->block_size_bytes(), 128u * 1024u * 4u);
-    EXPECT_EQ(config.group("swa_kv").layout.spec->block_size_bytes(),
-              kDsv4TokensPerBlock * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.group("swa_kv").layout.spec->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
 TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
@@ -2485,8 +2477,7 @@ TEST_F(DSV4AllocatorTest, FlashSpecBlockSizes) {
     EXPECT_EQ(config.group("csa_kv").layout.spec->block_size_bytes(), 32u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.group("hca_kv").layout.spec->block_size_bytes(), 1u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.group("indexer_kv").layout.spec->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
-    EXPECT_EQ(config.group("swa_kv").layout.spec->block_size_bytes(),
-              kDsv4TokensPerBlock * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.group("swa_kv").layout.spec->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
 }
 
 TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
@@ -2534,7 +2525,8 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     for (const auto& group : config.groups()) {
         auto blocks = block_pools.at(group.tag)->malloc(3);
         ASSERT_EQ(blocks.size(), 3u);
-        batch_res->mutableBlockIds(0, group.tag).assign(BlockIndicesType(blocks.begin(), blocks.end()));
+        batch_res->mutableBlockBinding(0, group.tag)
+            .assign(poolBlockSnapshotForTest(BlockIndicesType(blocks.begin(), blocks.end())));
     }
 
     // Create CompleteTokenIds: 3 full blocks * seq_size_per_block tokens + partial
@@ -2549,27 +2541,230 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    // HCA_STATE is runtime scratch state and must not be persisted as reusable prefix cache.
+    // Each group block is published at the last global cache-key position covered by its
+    // physical B/G span. A geometric partial range does not make a partial physical block
+    // eligible for publication.
+    const size_t token_len = static_cast<size_t>(total_tokens - 1);
     for (const auto& group : config.groups()) {
-        const auto& tag = group.tag;
-        if (tag == "hca_state") {
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(200, tag))) << "HCA_STATE should skip key 200";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(201, tag))) << "HCA_STATE should skip tail key 201";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(202, tag))) << "HCA_STATE should skip tail key 202";
-            continue;
+        const auto&                    tag = group.tag;
+        std::map<size_t, BlockIdxType> expected_by_key_position;
+        if (tag != "hca_state") {
+            CacheKeyToGroupBlockMapping mapping(config.seq_size_per_block, group.layout.seq_size_per_block);
+            const auto&                 blocks = encodedPoolBlocksForTest(batch_res->blockBinding(0, tag));
+            const size_t                eligible_group_blocks = token_len / group.layout.seq_size_per_block;
+            const size_t                publish_count         = std::min(blocks.size(), eligible_group_blocks);
+            for (size_t group_block_position = 0; group_block_position < publish_count; ++group_block_position) {
+                const auto anchor = mapping.toCacheKeyAnchor(GroupBlockPosition{group_block_position}, keys.size());
+                expected_by_key_position.emplace(anchor.value, blocks[group_block_position]);
+            }
         }
-        EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(200, tag))) << tag;
-        if (group.policy.group_type != CacheGroupType::FULL) {
-            EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(201, tag))) << tag;
-            EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(202, tag))) << tag;
+
+        for (size_t key_position = 0; key_position < keys.size(); ++key_position) {
+            const auto expected = expected_by_key_position.find(key_position);
+            const auto actual   = shared_cache->matchGroup(keys[key_position], tag);
+            if (expected == expected_by_key_position.end()) {
+                EXPECT_TRUE(isNullBlockIdx(actual)) << "tag=" << tag << " key_position=" << key_position;
+            } else {
+                EXPECT_EQ(actual, expected->second) << "tag=" << tag << " key_position=" << key_position;
+            }
         }
     }
 
     // Free all blocks
     for (const auto& group : config.groups()) {
-        const auto& blocks = batch_res->blocks(0, group.tag);
+        const auto& blocks = encodedPoolBlocksForTest(batch_res->blockBinding(0, group.tag));
         block_pools.at(group.tag)->requestFree(blocks);
     }
+}
+
+TEST_F(DSV4AllocatorTest, SharedPublicationUsesPerTagAnchorsAndSeparatesPartialTailEligibility) {
+    auto config       = makeAnchorPublicationConfig();
+    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto shared_cache = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    CacheKeysType keys;
+    for (CacheKeyType key = 1000; key < 1015; ++key) {
+        keys.push_back(key);
+    }
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(config);
+    batch_res->setBatchCacheKeys(0, keys);
+
+    const auto linear_blocks = allocator->blockPool("linear")->malloc(15);
+    const auto full_blocks   = allocator->blockPool("full")->malloc(2);
+    ASSERT_EQ(linear_blocks.size(), 15u);
+    ASSERT_EQ(full_blocks.size(), 2u);
+    batch_res->mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest(linear_blocks));
+    batch_res->mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest(full_blocks));
+
+    auto complete_token_ids         = std::make_shared<CompleteTokenIds>(1, 1, 1024, 64);
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = torch::arange(/*end=*/15 * 64, torch::kInt32);
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    complete_token_ids->init(generate_input);
+
+    allocator->insertIntoCache(InsertInfo{batch_res, complete_token_ids, /*is_resident=*/false});
+
+    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(keys[6], "full")));
+    EXPECT_EQ(shared_cache->matchGroup(keys[7], "full"), full_blocks[0]);
+    EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(keys[14], "full")))
+        << "the second FULL block has a geometric anchor but is not physically complete";
+    EXPECT_EQ(shared_cache->matchGroup(keys[7], "linear"), linear_blocks[7]);
+
+    allocator->blockPool("linear")->requestFree(linear_blocks);
+    allocator->blockPool("full")->requestFree(full_blocks);
+}
+
+TEST_F(DSV4AllocatorTest, AnchorPublishedFullBlocksRoundTripThroughAllocatorReuse) {
+    auto config      = makeAnchorPublicationConfig();
+    config.block_num = 64;
+    setGroupBlockNumsForTest(config, {{"linear", 64}, {"full", 64}});
+    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto shared_cache = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    CacheKeysType seed_keys;
+    for (CacheKeyType key = 3000; key < 3016; ++key) {
+        seed_keys.push_back(key);
+    }
+    auto seed_res = std::make_shared<BatchKVCacheResource>();
+    seed_res->resetBatchSize(1);
+    seed_res->initGroups(config);
+    seed_res->setBatchCacheKeys(0, seed_keys);
+
+    const auto linear_blocks = allocator->blockPool("linear")->malloc(16);
+    const auto full_blocks   = allocator->blockPool("full")->malloc(2);
+    ASSERT_EQ(linear_blocks.size(), 16u);
+    ASSERT_EQ(full_blocks.size(), 2u);
+    seed_res->mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest(linear_blocks));
+    seed_res->mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest(full_blocks));
+
+    auto seed_tokens            = std::make_shared<CompleteTokenIds>(1, 1, 1089, 64);
+    auto seed_input             = std::make_shared<GenerateInput>();
+    seed_input->input_ids       = torch::arange(/*end=*/1025, torch::kInt32);
+    seed_input->generate_config = std::make_shared<GenerateConfig>();
+    seed_tokens->init(seed_input);
+    allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
+
+    EXPECT_EQ(shared_cache->matchGroup(seed_keys[7], "full"), full_blocks[0]);
+    EXPECT_EQ(shared_cache->matchGroup(seed_keys[15], "full"), full_blocks[1]);
+    EXPECT_EQ(shared_cache->matchGroup(seed_keys[15], "linear"), linear_blocks[15]);
+
+    CacheKeysType hit_keys = seed_keys;
+    hit_keys.push_back(3016);
+    auto hit_res = std::make_shared<BatchKVCacheResource>();
+    hit_res->resetBatchSize(1);
+    hit_res->initGroups(config);
+    hit_res->setBatchCacheKeys(0, hit_keys);
+
+    auto hit_tokens            = std::make_shared<CompleteTokenIds>(1, 1, 1089, 64);
+    auto hit_input             = std::make_shared<GenerateInput>();
+    hit_input->input_ids       = torch::arange(/*end=*/1025, torch::kInt32);
+    hit_input->generate_config = std::make_shared<GenerateConfig>();
+    hit_tokens->init(hit_input);
+
+    MallocInfo hit_malloc{hit_res, hit_tokens};
+    hit_malloc.enable_device_cache = true;
+    hit_malloc.reuse_cache         = true;
+    const auto result              = allocator->malloc(hit_malloc);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 16 * 64);
+    EXPECT_EQ(hit_res->cacheResource(0).deviceReuseBlockNum(), 16u);
+    EXPECT_EQ(hit_res->blockBinding(0, "full").lookup(GroupBlockPosition{0}), PoolBlockId{full_blocks[0]});
+    EXPECT_EQ(hit_res->blockBinding(0, "full").lookup(GroupBlockPosition{1}), PoolBlockId{full_blocks[1]});
+    EXPECT_EQ(hit_res->blockBinding(0, "linear").lookup(GroupBlockPosition{15}), PoolBlockId{linear_blocks[15]});
+
+    allocator->free(FreeInfo{hit_res});
+    allocator->blockPool("linear")->requestFree(linear_blocks);
+    allocator->blockPool("full")->requestFree(full_blocks);
+}
+
+TEST_F(DSV4AllocatorTest, SharedPublicationTraceIsIndependentOfTagDeclarationOrder) {
+    struct PublicationTrace {
+        std::vector<BlockIdxType> linear_matches;
+        std::vector<BlockIdxType> full_matches;
+        CacheKeysType             evicted_keys;
+        int64_t                   version;
+        size_t                    linear_refs_before_evict;
+        size_t                    full_refs_before_evict;
+        size_t                    freed_full_blocks;
+        size_t                    linear_refs_after_evict;
+        size_t                    full_refs_after_evict;
+    };
+
+    const auto run = [](bool reverse_tags) {
+        auto config       = makeAnchorPublicationConfig(reverse_tags);
+        auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+        auto shared_cache = std::make_shared<SharedBlockCache>();
+        allocator->setSharedBlockCache(shared_cache);
+        RTP_LLM_CHECK(allocator->init());
+        shared_cache->setPrefixTreeEnabled(false);
+
+        CacheKeysType keys;
+        for (CacheKeyType key = 2000; key < 2016; ++key) {
+            keys.push_back(key);
+        }
+        auto batch_res = std::make_shared<BatchKVCacheResource>();
+        batch_res->resetBatchSize(1);
+        batch_res->initGroups(config);
+        batch_res->setBatchCacheKeys(0, keys);
+
+        const auto linear_pool   = allocator->blockPool("linear");
+        const auto full_pool     = allocator->blockPool("full");
+        const auto linear_blocks = linear_pool->malloc(16);
+        const auto full_blocks   = full_pool->malloc(2);
+        RTP_LLM_CHECK(linear_blocks.size() == 16);
+        RTP_LLM_CHECK(full_blocks.size() == 2);
+        batch_res->mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest(linear_blocks));
+        batch_res->mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest(full_blocks));
+
+        auto token_ids                  = std::make_shared<CompleteTokenIds>(1, 1, 2048, 64);
+        auto generate_input             = std::make_shared<GenerateInput>();
+        generate_input->input_ids       = torch::arange(/*end=*/16 * 64, torch::kInt32);
+        generate_input->generate_config = std::make_shared<GenerateConfig>();
+        token_ids->init(generate_input);
+        allocator->insertIntoCache(InsertInfo{batch_res, token_ids, /*is_resident=*/false});
+
+        PublicationTrace trace;
+        trace.version = shared_cache->version();
+        for (const auto key : keys) {
+            trace.linear_matches.push_back(shared_cache->matchGroup(key, "linear"));
+            trace.full_matches.push_back(shared_cache->matchGroup(key, "full"));
+        }
+        trace.linear_refs_before_evict = linear_pool->blockCacheRefBlocksNum();
+        trace.full_refs_before_evict   = full_pool->blockCacheRefBlocksNum();
+        SharedBlockCache::EvictResult evicted;
+        trace.freed_full_blocks       = shared_cache->evictAndFreeForGroup("full", 2, &evicted);
+        trace.evicted_keys            = std::move(evicted.evicted_keys);
+        trace.linear_refs_after_evict = linear_pool->blockCacheRefBlocksNum();
+        trace.full_refs_after_evict   = full_pool->blockCacheRefBlocksNum();
+
+        linear_pool->requestFree(linear_blocks);
+        full_pool->requestFree(full_blocks);
+        return trace;
+    };
+
+    const auto declared_linear_first = run(/*reverse_tags=*/false);
+    const auto declared_full_first   = run(/*reverse_tags=*/true);
+
+    EXPECT_EQ(declared_linear_first.linear_matches, declared_full_first.linear_matches);
+    EXPECT_EQ(declared_linear_first.full_matches, declared_full_first.full_matches);
+    EXPECT_EQ(declared_linear_first.full_matches[6], NULL_BLOCK_IDX);
+    EXPECT_EQ(declared_linear_first.full_matches[7], 1);
+    EXPECT_EQ(declared_linear_first.full_matches[15], 2);
+    EXPECT_EQ(declared_linear_first.linear_matches[7], 8);
+    EXPECT_EQ(declared_linear_first.evicted_keys, declared_full_first.evicted_keys);
+    EXPECT_EQ(declared_linear_first.version, declared_full_first.version);
+    EXPECT_EQ(declared_linear_first.linear_refs_before_evict, declared_full_first.linear_refs_before_evict);
+    EXPECT_EQ(declared_linear_first.full_refs_before_evict, declared_full_first.full_refs_before_evict);
+    EXPECT_EQ(declared_linear_first.freed_full_blocks, declared_full_first.freed_full_blocks);
+    EXPECT_EQ(declared_linear_first.linear_refs_after_evict, declared_full_first.linear_refs_after_evict);
+    EXPECT_EQ(declared_linear_first.full_refs_after_evict, declared_full_first.full_refs_after_evict);
 }
 
 // ============================================================
@@ -2596,7 +2791,8 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     for (const auto& group : config.groups()) {
         auto blocks = block_pools.at(group.tag)->malloc(3);
         ASSERT_EQ(blocks.size(), 3u);
-        batch_res->mutableBlockIds(0, group.tag).assign(BlockIndicesType(blocks.begin(), blocks.end()));
+        batch_res->mutableBlockBinding(0, group.tag)
+            .assign(poolBlockSnapshotForTest(BlockIndicesType(blocks.begin(), blocks.end())));
     }
 
     int  seq_size_per_block         = allocator->seqSizePerBlock();
@@ -2628,7 +2824,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     }
 
     for (const auto& group : config.groups()) {
-        block_pools.at(group.tag)->requestFree(batch_res->blocks(0, group.tag));
+        block_pools.at(group.tag)->requestFree(encodedPoolBlocksForTest(batch_res->blockBinding(0, group.tag)));
     }
 }
 
@@ -2647,7 +2843,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     ASSERT_EQ(block_pools.size(), 7u);
 
     // Pre-populate cache for ALL 7 groups with keys {100,101,102}
-    CacheKeysType                          cached_keys = {100, 101, 102};
+    CacheKeysType                                    cached_keys = {100, 101, 102};
     std::map<std::string, std::vector<BlockIdxType>> cached_blocks;
     for (const auto& group : config.groups()) {
         auto blocks = block_pools.at(group.tag)->malloc(static_cast<int>(cached_keys.size()));
@@ -2682,7 +2878,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     EXPECT_GT(result.reuse_len, 0) << "Prefix cache reuse should work with paged DSV4 groups";
 
     for (const auto& group : config.groups()) {
-        const auto& out_blocks = batch_res->blocks(0, group.tag);
+        const auto& out_blocks = encodedPoolBlocksForTest(batch_res->blockBinding(0, group.tag));
         ASSERT_GE(out_blocks.size(), 3u) << group.tag;
         if (group.policy.group_type == CacheGroupType::FULL) {
             EXPECT_EQ(out_blocks[0], cached_blocks[group.tag][0]) << group.tag;
@@ -2712,7 +2908,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     const auto block_pools = blockPoolsByTag(allocator, config);
     ASSERT_EQ(block_pools.size(), 7u);
 
-    CacheKeysType                          cached_keys = {100, 101, 102};
+    CacheKeysType                                    cached_keys = {100, 101, 102};
     std::map<std::string, std::vector<BlockIdxType>> cached_blocks;
     // Populate only these three groups, so the remaining paged groups miss and
     // veto reuse. These are the groups the pre-tag form reached positionally.
@@ -2761,7 +2957,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     const auto block_pools = blockPoolsByTag(allocator, config);
     ASSERT_EQ(block_pools.size(), 7u);
 
-    CacheKeysType                          cached_keys = {1100, 1101, 1102};
+    CacheKeysType                                    cached_keys = {1100, 1101, 1102};
     std::map<std::string, std::vector<BlockIdxType>> cached_blocks;
     for (const auto& group : config.groups()) {
         if (group.tag == "hca_state") {
@@ -2800,8 +2996,10 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     EXPECT_GT(result.reuse_len, 0) << "HCA_STATE miss should not veto DSV4 prefix reuse";
     const std::string hca_state_tag = "hca_state";
     const std::string swa_tag       = "swa_kv";
-    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, hca_state_tag).at(2))) << "HCA_STATE should remain non-reused";
-    EXPECT_EQ(batch_res->blocks(0, swa_tag).at(2), cached_blocks[swa_tag][2]) << "SWA_KV tail should still gate reuse";
+    EXPECT_TRUE(isNullBlockIdx(encodedPoolBlocksForTest(batch_res->blockBinding(0, hca_state_tag)).at(2)))
+        << "HCA_STATE should remain non-reused";
+    EXPECT_EQ(encodedPoolBlocksForTest(batch_res->blockBinding(0, swa_tag)).at(2), cached_blocks[swa_tag][2])
+        << "SWA_KV tail should still gate reuse";
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
@@ -2864,7 +3062,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     const auto block_pools = blockPoolsByTag(allocator, config);
     ASSERT_EQ(block_pools.size(), 7u);
 
-    CacheKeysType                          cached_keys = {500, 501, 502};
+    CacheKeysType                                    cached_keys = {500, 501, 502};
     std::map<std::string, std::vector<BlockIdxType>> cached_blocks;
     for (const auto& group : config.groups()) {
         auto blocks = block_pools.at(group.tag)->malloc(static_cast<int>(cached_keys.size()));
@@ -2898,7 +3096,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     EXPECT_GT(result.reuse_len, 0) << "Flash prefix cache reuse should work for paged groups";
 
     for (const auto& group : config.groups()) {
-        const auto& out_blocks = batch_res->blocks(0, group.tag);
+        const auto& out_blocks = encodedPoolBlocksForTest(batch_res->blockBinding(0, group.tag));
         ASSERT_GE(out_blocks.size(), 3u) << group.tag;
         if (group.policy.group_type == CacheGroupType::FULL) {
             EXPECT_EQ(out_blocks[0], cached_blocks[group.tag][0]) << group.tag;
@@ -3034,8 +3232,8 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitFixedPoolCap
 // ============================================================
 
 TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
-    auto config = makeDSV4AllocatorConfig();
-    config = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/100, RuntimeConfig{});
+    auto config       = makeDSV4AllocatorConfig();
+    config            = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/100, RuntimeConfig{});
     auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
@@ -3095,7 +3293,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     ASSERT_EQ(block_pools.size(), 7u);
 
     // Populate ALL 7 groups with same keys
-    CacheKeysType                          cached_keys = {800, 801};
+    CacheKeysType                                    cached_keys = {800, 801};
     std::map<std::string, std::vector<BlockIdxType>> cached_blocks;
     for (const auto& group : config.groups()) {
         auto blocks = block_pools.at(group.tag)->malloc(2);
@@ -3129,7 +3327,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
 
     // Slot 6 of the DSV4 Pro topology is csa_state; the pre-tag form reached it
     // positionally under a "swa" local name.
-    const auto& tail_out = batch_res->blocks(0, "csa_state");
+    const auto& tail_out = encodedPoolBlocksForTest(batch_res->blockBinding(0, "csa_state"));
     ASSERT_GE(tail_out.size(), 2u);
     EXPECT_TRUE(isNullBlockIdx(tail_out[0])) << "previous matched tail is evicted after new tail allocation";
     EXPECT_EQ(tail_out[1], cached_blocks["csa_state"][1]) << "last matched tail block should remain";
@@ -3182,7 +3380,8 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
 
     // All 7 groups should now have 2 blocks each
     for (const auto& group : config.groups()) {
-        EXPECT_EQ(batch_res->blocksNum(0, group.tag), 2u) << "group " << group.tag << " should have 2 blocks after incr";
+        EXPECT_EQ(batch_res->blocksNum(0, group.tag), 2u)
+            << "group " << group.tag << " should have 2 blocks after incr";
     }
 
     // HCA_STATE is not reusable: decode may materialize a new tail, but the

@@ -277,7 +277,8 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
                                     mapping.dst);
             copy_params.add(dst_addr.kv_addr, src_addr.kv_addr, group.layout.kv_block_stride_bytes, copy_type);
             if (group.layout.kv_scale_stride_bytes > 0 && src_addr.kv_scale_addr && dst_addr.kv_scale_addr) {
-                copy_params.add(dst_addr.kv_scale_addr, src_addr.kv_scale_addr, group.layout.kv_scale_stride_bytes, copy_type);
+                copy_params.add(
+                    dst_addr.kv_scale_addr, src_addr.kv_scale_addr, group.layout.kv_scale_stride_bytes, copy_type);
             }
         }
     }
@@ -324,7 +325,7 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     batch_resource->setLastBlockAligned(true);
 
     for (const auto& group : config_.groups()) {
-        batch_resource->mutableBlockIds(0, group.tag).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
+        batch_resource->mutableBlockBinding(0, group.tag).resize(evict_result.evicted_keys.size());
     }
 
     CacheKeysType         evicted_keys;
@@ -349,7 +350,8 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
         }
         for (const auto& [tag, block_id] : groups) {
             if (!isNullBlockIdx(block_id)) {
-                batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
+                batch_resource->mutableBlockBinding(0, tag).bind(GroupBlockPosition{evicted_idx},
+                                                                 PoolBlockId{block_id});
             }
         }
     }
@@ -370,13 +372,13 @@ void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_ca
     BlockIndicesType                 blocks_to_free;
     std::unordered_set<BlockIdxType> seen_blocks;
     for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (const auto& [tag, block_ids] : batch_kv_cache_resource->blocksByTag(batch_id)) {
+        for (const auto& [tag, binding] : batch_kv_cache_resource->blocksByTag(batch_id)) {
             (void)tag;
-            for (const auto block_idx : block_ids.blocks()) {
-                if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
+            for (const auto& pool_block_id : binding.snapshot()) {
+                if (!pool_block_id.has_value() || !seen_blocks.insert(pool_block_id->value).second) {
                     continue;
                 }
-                blocks_to_free.push_back(block_idx);
+                blocks_to_free.push_back(pool_block_id->value);
             }
         }
     }

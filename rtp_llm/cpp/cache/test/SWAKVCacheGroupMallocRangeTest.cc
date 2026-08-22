@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 namespace rtp_llm {
 namespace test {
@@ -83,10 +84,10 @@ TEST(SWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M)
 
     ScopedEnvVar disable_pin_host_pool("RTP_LLM_PIN_HOST_BLOCK_POOL", "0");
     auto         block_pool = createHostBlockPool();
-    CacheGroup    group_config;
-    group_config.tag                       = "swa";
+    CacheGroup   group_config;
+    group_config.tag                              = "swa";
     group_config.layout.spec                      = makeMHASpec(kSeqSizePerBlock);
-    group_config.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    group_config.policy                           = defaultCacheGroupPolicy(CacheGroupType::SWA);
     group_config.layout.seq_size_per_block        = kSeqSizePerBlock;
     group_config.layout.kernel_seq_size_per_block = kSeqSizePerBlock;
     group_config.layout.kv_block_stride_bytes     = group_config.layout.spec->block_size_bytes();
@@ -94,13 +95,13 @@ TEST(SWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M)
     SWAKVCacheGroup group(std::move(group_config), block_pool, 0);
 
     auto check_seq_len = [&](int seq_len) {
-        BlockIds block_ids;
-        ASSERT_EQ(block_ids.blocksNum(), 0u) << "seq_len=" << seq_len;
+        GroupBlockToPoolBlockBinding block_ids;
+        ASSERT_EQ(block_ids.size(), 0u) << "seq_len=" << seq_len;
 
         ASSERT_TRUE(group.malloc(block_ids, seq_len, /*enable_reuse_cache=*/false, /*reserve_step=*/0))
             << "seq_len=" << seq_len;
 
-        const auto& blocks = block_ids.blocks();
+        const auto& blocks = encodedPoolBlocksForTest(block_ids);
         ASSERT_EQ(blocks.size(), static_cast<size_t>((seq_len + kSeqSizePerBlock - 1) / kSeqSizePerBlock))
             << "seq_len=" << seq_len;
         if (blocks.size() == 1) {

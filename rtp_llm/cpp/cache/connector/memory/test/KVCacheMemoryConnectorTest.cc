@@ -259,7 +259,9 @@ CacheConfig createDsv4TypedConnectorConfig() {
 
     rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, specs, layers_by_group, types, tags, policies);
     rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config,
-        std::vector<uint32_t>(kDsv4PoolNum, config.block_num), kv_strides, std::vector<size_t>(kDsv4PoolNum, 0));
+                                                               std::vector<uint32_t>(kDsv4PoolNum, config.block_num),
+                                                               kv_strides,
+                                                               std::vector<size_t>(kDsv4PoolNum, 0));
     // layer 0: hca_kv(24) + hca_state(20) + swa_kv(28) = 72
     // layer 1: csa_kv(16) + indexer_kv(32) + indexer_state(8) + csa_state(12) + swa_kv(28) = 96
     config.layer_to_block_stride_bytes = {72, 96};
@@ -269,17 +271,40 @@ CacheConfig createDsv4TypedConnectorConfig() {
 // Assign `stride_bytes` to a single group of an already-built topology, keeping every other
 // group untouched.  Replaces DEV's direct per-group stride vector writes.
 void setGroupKvStrideBytes(CacheConfig& config, const std::string& tag, size_t stride_bytes) {
-    // setGroupBlockLayout is an internal finalization mutator that still takes
-    // slot-parallel vectors, so they are rebuilt here in topology order and only the
-    // named tag's stride is overridden.
-    std::vector<uint32_t> block_nums;
-    std::vector<size_t>   kv_strides;
-    std::vector<size_t>   scale_strides;
-    for (const auto& group : config.groups()) {
+    // Keep each handcrafted opaque spec and its physical layout authoritative together.
+    const auto                    groups = config.groups();
+    std::vector<uint32_t>         block_nums;
+    std::vector<size_t>           kv_strides;
+    std::vector<size_t>           scale_strides;
+    std::vector<KVCacheSpecPtr>   specs;
+    std::vector<std::vector<int>> layers_by_group;
+    std::vector<CacheGroupType>   group_types;
+    std::vector<std::string>      tags;
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : groups) {
+        const auto group_stride = group.tag == tag ? stride_bytes : group.layout.kv_block_stride_bytes;
         block_nums.push_back(group.layout.block_num);
-        kv_strides.push_back(group.tag == tag ? stride_bytes : group.layout.kv_block_stride_bytes);
+        kv_strides.push_back(group_stride);
         scale_strides.push_back(group.layout.kv_scale_stride_bytes);
+        specs.push_back(makeResolvedOpaqueSpec(group.layout.spec->type == KVCacheSpecType::OpaqueState,
+                                               group.tag,
+                                               group.layout.spec->memoryLayoutDType(),
+                                               group_stride,
+                                               static_cast<uint32_t>(config.seq_size_per_block)));
+        std::vector<int> layers;
+        for (const auto& membership : config.layerMemberships()) {
+            const auto layer_tags = config.groupTagsForLayer(membership.layer_id);
+            if (std::find(layer_tags.begin(), layer_tags.end(), group.tag) != layer_tags.end()) {
+                layers.push_back(membership.layer_id);
+            }
+        }
+        layers_by_group.push_back(std::move(layers));
+        group_types.push_back(group.policy.group_type);
+        tags.push_back(group.tag);
+        policies.push_back(group.policy);
     }
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+        config, specs, layers_by_group, group_types, tags, policies);
     rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
 }
 
@@ -409,7 +434,7 @@ private:
             if (layer >= layers.size()) {
                 continue;
             }
-for (const auto& tag : cfg.groupTagsForLayer(static_cast<int>(layer))) {
+            for (const auto& tag : cfg.groupTagsForLayer(static_cast<int>(layer))) {
                 if (tag.empty()) {
                     continue;
                 }
@@ -426,9 +451,29 @@ for (const auto& tag : cfg.groupTagsForLayer(static_cast<int>(layer))) {
         return memoryCacheBlockBytes(cache_config_);
     }
     void setGroupBlockBytes(CacheConfig& cfg, size_t stride_bytes) const {
-        rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cfg, std::vector<uint32_t>(cfg.groupNums(), cfg.block_num),
-                                std::vector<size_t>(cfg.groupNums(), stride_bytes),
-                                std::vector<size_t>(cfg.groupNums(), 0));
+        if (stride_bytes > 0) {
+            RTP_LLM_CHECK(cfg.groupNums() == 1);
+            const auto       group = cfg.groups().front();
+            std::vector<int> layers;
+            for (const auto& membership : cfg.layerMemberships()) {
+                const auto tags = cfg.groupTagsForLayer(membership.layer_id);
+                if (std::find(tags.begin(), tags.end(), group.tag) != tags.end()) {
+                    layers.push_back(membership.layer_id);
+                }
+            }
+            auto spec = makeResolvedOpaqueSpec(/*state_cache=*/false,
+                                               group.tag,
+                                               cfg.dtype,
+                                               stride_bytes,
+                                               static_cast<uint32_t>(cfg.seq_size_per_block));
+            rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+                cfg, {spec}, {layers}, {group.policy.group_type}, {group.tag}, {group.policy});
+        }
+        rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+            cfg,
+            std::vector<uint32_t>(cfg.groupNums(), cfg.block_num),
+            std::vector<size_t>(cfg.groupNums(), stride_bytes),
+            std::vector<size_t>(cfg.groupNums(), 0));
     }
 
     void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) const {
@@ -664,7 +709,7 @@ for (const auto& tag : cfg.groupTagsForLayer(static_cast<int>(layer))) {
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         res->initGroups(cache_config_);
         const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
-        res->mutableBlockIds("default").assign(default_blocks);
+        res->mutableBlockBinding("default").assign(poolBlockSnapshotForTest(default_blocks));
         (void)layer_num;
         // reuse_len in these tests means "GPU already-reused prefix length".
         // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
@@ -689,7 +734,7 @@ for (const auto& tag : cfg.groupTagsForLayer(static_cast<int>(layer))) {
         if (block_indices.size() < cache_keys.size()) {
             block_indices.resize(cache_keys.size(), NULL_BLOCK_IDX);
         }
-        res->mutableBlockIds("default").assign(block_indices);
+        res->mutableBlockBinding("default").assign(poolBlockSnapshotForTest(block_indices));
         res->setDeviceReuseBlockNum(reuse_len);
         res->setLastBlockAligned(true);
         return res;
@@ -1414,12 +1459,12 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
         res->initGroups(cfg);
         for (int layer = 0; layer < static_cast<int>(cfg.layer_all_num); ++layer) {
             for (const auto& tag : layerTagsOf(cfg, layer)) {
-                res->mutableBlockIdsForLayer(layer, tag).assign({NULL_BLOCK_IDX});
+                res->mutableBlockBindingForLayer(layer, tag).assign(poolBlockSnapshotForTest({NULL_BLOCK_IDX}));
             }
         }
         auto set_if = [&](bool enabled, int layer, const std::string& tag, BlockIdxType block) {
             if (enabled) {
-                res->mutableBlockIdsForLayer(layer, tag).assign({block});
+                res->mutableBlockBindingForLayer(layer, tag).assign(poolBlockSnapshotForTest({block}));
             }
         };
         set_if(compressed_required, 0, "hca_kv", 11);
@@ -1629,10 +1674,10 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsPartialMe
     resource->initGroups(cfg);
     for (int layer = 0; layer < static_cast<int>(cfg.layer_all_num); ++layer) {
         for (const auto& tag : layerTagsOf(cfg, layer)) {
-            resource->mutableBlockIdsForLayer(layer, tag).assign({NULL_BLOCK_IDX});
+            resource->mutableBlockBindingForLayer(layer, tag).assign(poolBlockSnapshotForTest({NULL_BLOCK_IDX}));
         }
     }
-    resource->mutableBlockIdsForLayer(1, "csa_state").assign({7001});
+    resource->mutableBlockBindingForLayer(1, "csa_state").assign(poolBlockSnapshotForTest({7001}));
     resource->setLastBlockAligned(true);
 
     auto layer_blocks  = conn->resourceLayerTagPoolBlockTables(*resource, slots);
@@ -1748,10 +1793,10 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
     resource->initGroups(cfg);
     for (int layer = 0; layer < static_cast<int>(cfg.layer_all_num); ++layer) {
         for (const auto& tag : layerTagsOf(cfg, layer)) {
-            resource->mutableBlockIdsForLayer(layer, tag).assign({NULL_BLOCK_IDX});
+            resource->mutableBlockBindingForLayer(layer, tag).assign(poolBlockSnapshotForTest({NULL_BLOCK_IDX}));
         }
     }
-    resource->mutableBlockIdsForLayer(1, "csa_state").assign({7001});
+    resource->mutableBlockBindingForLayer(1, "csa_state").assign(poolBlockSnapshotForTest({7001}));
     resource->setLastBlockAligned(true);
 
     auto layer_blocks  = conn->resourceLayerTagPoolBlockTables(*resource, slots);
@@ -1805,10 +1850,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
     resource->initGroups(cfg);
     for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
         const auto& slot = slots[slot_idx];
-        resource->mutableBlockIdsForLayer(slot.layer_id, slot.tag)
-            .assign({static_cast<BlockIdxType>(100 + slot_idx),
-                     static_cast<BlockIdxType>(200 + slot_idx),
-                     static_cast<BlockIdxType>(300 + slot_idx)});
+        resource->mutableBlockBindingForLayer(slot.layer_id, slot.tag)
+            .assign(poolBlockSnapshotForTest({static_cast<BlockIdxType>(100 + slot_idx),
+                                              static_cast<BlockIdxType>(200 + slot_idx),
+                                              static_cast<BlockIdxType>(300 + slot_idx)}));
     }
     resource->setLastBlockAligned(false);
 
@@ -1859,15 +1904,21 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     // One layer carrying two prefix-reusable tags with different byte strides: the copy plan must
     // emit one slot per (layer, tag), not one slot per layer.  layer_to_block_stride_bytes is left
     // deliberately bogus (999) so a per-layer fallback would be visible in the asserted strides.
-    auto cfg          = cache_config_;
-    cfg.layer_num     = 1;
-    cfg.layer_all_num = 1;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cfg, {makeMhaSpec("csa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 8),
-                          makeMhaSpec("swa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 16)},
-                         /*layers_by_group=*/{{0}, {0}},
-                         {CacheGroupType::FULL, CacheGroupType::FULL},
-                         {"csa_kv", "swa_kv"});
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cfg, {cfg.block_num, cfg.block_num}, {16, 32}, {0, 0});
+    auto cfg            = cache_config_;
+    cfg.layer_num       = 1;
+    cfg.layer_all_num   = 1;
+    const auto csa_spec = makeMhaSpec("csa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 8);
+    const auto swa_spec = makeMhaSpec("swa_kv", cfg.seq_size_per_block, cfg.dtype, 1, 16);
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cfg,
+                                                            {csa_spec, swa_spec},
+                                                            /*layers_by_group=*/{{0}, {0}},
+                                                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                                                            {"csa_kv", "swa_kv"});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+        cfg,
+        {cfg.block_num, cfg.block_num},
+        {csa_spec->block_size_bytes(), swa_spec->block_size_bytes()},
+        {csa_spec->scale_block_size_bytes(), swa_spec->scale_block_size_bytes()});
     cfg.layer_to_block_stride_bytes = {999};
 
     auto kv_cfg                         = kv_cache_config_;
@@ -1882,20 +1933,20 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     EXPECT_TRUE(conn->usesTypedMemoryPoolLayout(slots));
     EXPECT_EQ(slots[0].layer_id, 0);
     EXPECT_EQ(slots[0].tag, "csa_kv");
-    EXPECT_EQ(slots[0].kv_block_stride_bytes, 16u);
+    EXPECT_EQ(slots[0].kv_block_stride_bytes, csa_spec->block_size_bytes());
     EXPECT_EQ(slots[0].kv_scale_stride_bytes, 0u);
-    EXPECT_EQ(slots[0].stride_bytes, 16u);
+    EXPECT_EQ(slots[0].stride_bytes, csa_spec->block_size_bytes());
     EXPECT_EQ(slots[1].layer_id, 0);
     EXPECT_EQ(slots[1].tag, "swa_kv");
-    EXPECT_EQ(slots[1].kv_block_stride_bytes, 32u);
+    EXPECT_EQ(slots[1].kv_block_stride_bytes, swa_spec->block_size_bytes());
     EXPECT_EQ(slots[1].kv_scale_stride_bytes, 0u);
-    EXPECT_EQ(slots[1].stride_bytes, 32u);
+    EXPECT_EQ(slots[1].stride_bytes, swa_spec->block_size_bytes());
 
     auto resource = std::make_shared<KVCacheResource>();
     resource->setCacheKeys({101, 102, 103});
     resource->initGroups(cfg);
-    resource->mutableBlockIds("csa_kv").assign({11, 12, 13});
-    resource->mutableBlockIds("swa_kv").assign({21, NULL_BLOCK_IDX, 23});
+    resource->mutableBlockBinding("csa_kv").assign(poolBlockSnapshotForTest({11, 12, 13}));
+    resource->mutableBlockBinding("swa_kv").assign(poolBlockSnapshotForTest({21, NULL_BLOCK_IDX, 23}));
     bool no_need_write = true;
     auto plan          = conn->buildCopyPlanForWrite(resource->cacheKeys(),
                                             conn->resourceLayerTagPoolBlockTables(*resource, slots),
@@ -1926,15 +1977,21 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
 }
 
 TEST_F(KVCacheMemoryConnectorTest, WireRowsSortTagsIndependentlyOfLocalGroupDeclarationOrder) {
-    auto cfg          = cache_config_;
-    cfg.layer_num     = 1;
-    cfg.layer_all_num = 1;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cfg, {makeMhaSpec("zeta", cfg.seq_size_per_block, cfg.dtype, 1, 8),
-                          makeMhaSpec("alpha", cfg.seq_size_per_block, cfg.dtype, 1, 16)},
-                         /*layers_by_group=*/{{0}, {0}},
-                         {CacheGroupType::FULL, CacheGroupType::FULL},
-                         {"zeta", "alpha"});
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cfg, {cfg.block_num, cfg.block_num}, {16, 32}, {0, 0});
+    auto cfg              = cache_config_;
+    cfg.layer_num         = 1;
+    cfg.layer_all_num     = 1;
+    const auto zeta_spec  = makeMhaSpec("zeta", cfg.seq_size_per_block, cfg.dtype, 1, 8);
+    const auto alpha_spec = makeMhaSpec("alpha", cfg.seq_size_per_block, cfg.dtype, 1, 16);
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cfg,
+                                                            {zeta_spec, alpha_spec},
+                                                            /*layers_by_group=*/{{0}, {0}},
+                                                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                                                            {"zeta", "alpha"});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+        cfg,
+        {cfg.block_num, cfg.block_num},
+        {zeta_spec->block_size_bytes(), alpha_spec->block_size_bytes()},
+        {zeta_spec->scale_block_size_bytes(), alpha_spec->scale_block_size_bytes()});
 
     const auto slots = KVCacheMemoryConnector::buildPoolBlockMemoryLayout(cfg);
     ASSERT_EQ(slots.size(), 2u);
@@ -1948,24 +2005,28 @@ TEST_F(KVCacheMemoryConnectorTest, PoolBlockMemoryLayoutCarriesResolvedPhysicalL
     auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cfg, {makeMhaSpec("full", cfg.seq_size_per_block, cfg.dtype, 1, 8)},
-                         /*layers_by_group=*/{{0}},
-                         {CacheGroupType::FULL},
-                         {"full"});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+        cfg,
+        {makeMhaSpec("full", cfg.seq_size_per_block, cfg.dtype, 1, 8)},
+        /*layers_by_group=*/{{0}},
+        {CacheGroupType::FULL},
+        {"full"});
     auto policy       = defaultCacheGroupPolicy(CacheGroupType::FULL);
     policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
     rtp_llm::test::TestCacheConfigBuilder::setGroupPolicies(cfg, {policy});
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cfg, {cfg.block_num}, {64}, {8});
+    const auto full_spec = cfg.group("full").layout.spec;
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+        cfg, {cfg.block_num}, {full_spec->block_size_bytes()}, {full_spec->scale_block_size_bytes()});
     cfg.layer_to_block_stride_bytes = {999};
 
     auto conn  = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cache_config_, allocator_, server_addrs_);
     auto slots = conn->poolBlockMemoryLayout();
     ASSERT_EQ(slots.size(), 1u);
     EXPECT_EQ(slots[0].tag, "full");
-    EXPECT_EQ(slots[0].kv_block_stride_bytes, 64u);
-    EXPECT_EQ(slots[0].kv_scale_stride_bytes, 8u);
-    EXPECT_EQ(slots[0].stride_bytes, 72u);
+    EXPECT_EQ(slots[0].kv_block_stride_bytes, full_spec->block_size_bytes());
+    EXPECT_EQ(slots[0].kv_scale_stride_bytes, full_spec->scale_block_size_bytes());
+    EXPECT_EQ(slots[0].stride_bytes, full_spec->block_size_bytes() + full_spec->scale_block_size_bytes());
     EXPECT_EQ(slots[0].block_kind, CacheBlockKind::COMPRESSED_KV);
     EXPECT_TRUE(slots[0].is_full_only);
 }
@@ -1975,33 +2036,45 @@ TEST_F(KVCacheMemoryConnectorTest, PoolBlockMemoryLayoutPreserveMtpGlobalLayerAn
     main_cfg.layer_num       = 1;
     main_cfg.layer_all_num   = 1;
     main_cfg.group_layer_num = 1;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(main_cfg, {makeMhaSpec("full", main_cfg.seq_size_per_block, main_cfg.dtype, 1, 8)},
-                              /*layers_by_group=*/{{0}},
-                              {CacheGroupType::FULL},
-                              {"full"});
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(main_cfg, {main_cfg.block_num}, {48}, {0});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+        main_cfg,
+        {makeMhaSpec("full", main_cfg.seq_size_per_block, main_cfg.dtype, 1, 8)},
+        /*layers_by_group=*/{{0}},
+        {CacheGroupType::FULL},
+        {"full"});
+    const auto main_spec = main_cfg.group("full").layout.spec;
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+        main_cfg, {main_cfg.block_num}, {main_spec->block_size_bytes()}, {main_spec->scale_block_size_bytes()});
     main_cfg.layer_to_block_stride_bytes = {999, 999};
 
     auto propose_cfg          = main_cfg;
     propose_cfg.layer_num     = 1;
     propose_cfg.layer_all_num = 1;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(propose_cfg, {makeMhaSpec("full", propose_cfg.seq_size_per_block, propose_cfg.dtype, 1, 8)},
-                                 /*layers_by_group=*/{{0}},
-                                 {CacheGroupType::FULL},
-                                 {"full"});
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(propose_cfg, {propose_cfg.block_num}, {48}, {0});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+        propose_cfg,
+        {makeMhaSpec("full", propose_cfg.seq_size_per_block, propose_cfg.dtype, 1, 8)},
+        /*layers_by_group=*/{{0}},
+        {CacheGroupType::FULL},
+        {"full"});
+    const auto propose_spec = propose_cfg.group("full").layout.spec;
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(propose_cfg,
+                                                               {propose_cfg.block_num},
+                                                               {propose_spec->block_size_bytes()},
+                                                               {propose_spec->scale_block_size_bytes()});
     propose_cfg.layer_to_block_stride_bytes = {777};
-    ASSERT_NE(rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(main_cfg, propose_cfg, /*module_index=*/0, /*main_layer_num=*/1), nullptr);
+    ASSERT_NE(rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
+                  main_cfg, propose_cfg, /*module_index=*/0, /*main_layer_num=*/1),
+              nullptr);
 
     auto conn  = std::make_shared<KVCacheMemoryConnector>(main_cfg, kv_cache_config_, allocator_, server_addrs_);
     auto slots = conn->poolBlockMemoryLayout();
     ASSERT_EQ(slots.size(), 2u);
     EXPECT_EQ(slots[0].layer_id, 0);
     EXPECT_EQ(slots[0].tag, "full");
-    EXPECT_EQ(slots[0].stride_bytes, 48u);
+    EXPECT_EQ(slots[0].stride_bytes, main_spec->block_size_bytes() + main_spec->scale_block_size_bytes());
     EXPECT_EQ(slots[1].layer_id, 1);
     EXPECT_EQ(slots[1].tag, "full");
-    EXPECT_EQ(slots[1].stride_bytes, 48u);
+    EXPECT_EQ(slots[1].stride_bytes, propose_spec->block_size_bytes() + propose_spec->scale_block_size_bytes());
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
@@ -2030,13 +2103,14 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->setCacheKeys({1001, 1002});
     resource->initGroups(cfg);
-    resource->mutableBlockIdsForLayer(0, "hca_kv").assign({11, 12});
-    resource->mutableBlockIdsForLayer(0, "hca_state").assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
-    resource->mutableBlockIdsForLayer(0, "swa_kv").assign({61, 62});
-    resource->mutableBlockIdsForLayer(1, "csa_kv").assign({1, 2});
-    resource->mutableBlockIdsForLayer(1, "indexer_kv").assign({21, 22});
-    resource->mutableBlockIdsForLayer(1, "indexer_state").assign({31, 32});
-    resource->mutableBlockIdsForLayer(1, "csa_state").assign({41, 42});
+    resource->mutableBlockBindingForLayer(0, "hca_kv").assign(poolBlockSnapshotForTest({11, 12}));
+    resource->mutableBlockBindingForLayer(0, "hca_state")
+        .assign(poolBlockSnapshotForTest({NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
+    resource->mutableBlockBindingForLayer(0, "swa_kv").assign(poolBlockSnapshotForTest({61, 62}));
+    resource->mutableBlockBindingForLayer(1, "csa_kv").assign(poolBlockSnapshotForTest({1, 2}));
+    resource->mutableBlockBindingForLayer(1, "indexer_kv").assign(poolBlockSnapshotForTest({21, 22}));
+    resource->mutableBlockBindingForLayer(1, "indexer_state").assign(poolBlockSnapshotForTest({31, 32}));
+    resource->mutableBlockBindingForLayer(1, "csa_state").assign(poolBlockSnapshotForTest({41, 42}));
 
     bool no_need_write = true;
     auto plan          = conn->buildCopyPlanForWrite(resource->cacheKeys(),
@@ -3224,19 +3298,18 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
     verifyBlockInfosContent(gpu_bufs, 'a');
 }
 
-// MLA FP8 online-style: separate kv + kv-scale blobs per layer (656 + 132 bytes/token at seq_size_per_block=512).
-// copyCache uses execNoBlockCopy split KV path (sm_copy scatter/gather) when eligible.
+// MLA FP8 online-style: the resolved spec carries its quant metadata inline in the physical block stride.
+// copyCache uses the no-block-copy path (sm_copy scatter/gather) when eligible.
 // ~40k prompt tokens => 79 full blocks in one request.
-TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlockCopyOpt) {
+TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_ResolvedMlaLayout_NoBlockCopyOpt) {
     constexpr int      kLayerNum    = 78;
     constexpr uint32_t kSeqPerBlock = 512;
     constexpr int      kCopySeqLen  = 40000;
     constexpr int kCopyBlockCount = (kCopySeqLen + static_cast<int>(kSeqPerBlock) - 1) / static_cast<int>(kSeqPerBlock);
     constexpr int kGpuBlockBase   = 2;
     // Block pool must include GPU indices [kGpuBlockBase, kGpuBlockBase + kCopyBlockCount - 1] (from kCopySeqLen).
-    constexpr int    kBlockNum         = kGpuBlockBase + kCopyBlockCount;
-    constexpr size_t kKvBytesPerTok    = 656;
-    constexpr size_t kScaleBytesPerTok = 132;
+    constexpr int    kBlockNum      = kGpuBlockBase + kCopyBlockCount;
+    constexpr size_t kKvBytesPerTok = 656;
 
     AttentionConfigs attn_config;
     attn_config.kv_lora_rank     = 512;
@@ -3260,7 +3333,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     cache_config_.is_sparse             = false;
     cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP8_E4M3;
     cache_config_.kv_block_stride_bytes = kKvBytesPerTok * kSeqPerBlock;
-    cache_config_.kv_scale_stride_bytes = kScaleBytesPerTok * kSeqPerBlock;
+    cache_config_.kv_scale_stride_bytes = mla_spec->scale_block_size_bytes();
     cache_config_.kv_block_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_block_stride_bytes;
     cache_config_.kv_scale_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_scale_stride_bytes;
     cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
@@ -3271,11 +3344,14 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config_, {mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cache_config_, {static_cast<uint32_t>(kBlockNum)},
-                                      {cache_config_.kv_block_stride_bytes},
-                                      {cache_config_.kv_scale_stride_bytes});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+        cache_config_, {mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(cache_config_,
+                                                               {static_cast<uint32_t>(kBlockNum)},
+                                                               {cache_config_.kv_block_stride_bytes},
+                                                               {cache_config_.kv_scale_stride_bytes});
     ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
+    ASSERT_EQ(mla_spec->scale_block_size_bytes(), cache_config_.kv_scale_stride_bytes);
 
     const size_t merged_one_key = memoryCacheBlockBytes(cache_config_);
     ASSERT_EQ(merged_one_key, static_cast<size_t>(kLayerNum) * kPerLayerStrideBytes);
@@ -3321,7 +3397,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
         const char tag = static_cast<char>(0x21 + (i % 94));
         for (int l = 0; l < kLayerNum; ++l) {
             const auto gpu_bufs = allocator_->convertIndexToBuffer(l, kGpuBlockBase + i);
-            ASSERT_GE(gpu_bufs.size(), 2u);
+            ASSERT_FALSE(gpu_bufs.empty());
             verifyBlockInfosContent(gpu_bufs, tag);
         }
     }
@@ -3581,8 +3657,8 @@ TEST_F(KVCacheMemoryConnectorTest, CreatorFullLinearSplitSharesBackingAndRefsFor
     KVCacheResource resource;
     resource.initGroups(cfg);
     resource.setCacheKeys({8101, 8102});
-    resource.mutableBlockIds("full").assign({1, 2});
-    resource.mutableBlockIds("linear").assign({NULL_BLOCK_IDX, 2});
+    resource.mutableBlockBinding("full").assign(poolBlockSnapshotForTest({1, 2}));
+    resource.mutableBlockBinding("linear").assign(poolBlockSnapshotForTest({NULL_BLOCK_IDX, 2}));
 
     const auto initial_free  = conn->block_pool_->freeBlocksNum();
     bool       no_need_write = true;
@@ -3744,16 +3820,20 @@ protected:
 
         std::vector<int> all_layer_ids(static_cast<size_t>(layer_num));
         std::iota(all_layer_ids.begin(), all_layer_ids.end(), 0);
-        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, {full_spec, swa_spec},
-                                {all_layer_ids, all_layer_ids},
-                                {CacheGroupType::FULL, CacheGroupType::SWA},
-                                {"default", "swa_kv"},
-                                {full_policy, swa_policy});
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config,
+                                                                {full_spec, swa_spec},
+                                                                {all_layer_ids, all_layer_ids},
+                                                                {CacheGroupType::FULL, CacheGroupType::SWA},
+                                                                {"default", "swa_kv"},
+                                                                {full_policy, swa_policy});
 
         const size_t full_stride = full_spec->block_size_bytes();
         const size_t swa_stride  = swa_spec->block_size_bytes();
-        rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config,
-            {static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_num)}, {full_stride, swa_stride}, {0, 0});
+        rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+            config,
+            {static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_num)},
+            {full_stride, swa_stride},
+            {0, 0});
 
         config.dtype                 = rtp_llm::DataType::TYPE_FP16;
         config.kv_block_stride_bytes = std::max(full_stride, swa_stride);
@@ -3805,7 +3885,7 @@ protected:
 
         res->initGroups(cfg);
 
-        res->resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
+        res->resizeBlocks(static_cast<int>(cache_keys.size()));
 
         auto set_group_blocks = [&](const std::string& tag, const std::vector<std::vector<BlockIdxType>>& per_layer) {
             BlockIndicesType padded(cache_keys.size(), NULL_BLOCK_IDX);
@@ -3814,7 +3894,7 @@ protected:
                     padded[k] = per_layer.front()[k];
                 }
             }
-            res->mutableBlockIdsForLayer(0, tag).assign(padded);
+            res->mutableBlockBindingForLayer(0, tag).assign(poolBlockSnapshotForTest(padded));
         };
         set_group_blocks("default", full_blocks);
         set_group_blocks("swa_kv", swa_blocks);

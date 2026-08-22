@@ -16,13 +16,9 @@ void KVCacheResource::initGroups(const CacheConfig& config) {
     for (const auto& group : groups) {
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "KVCacheResource requires a non-empty cache group tag");
 
-        const size_t blocks_per_kv_block = group.layout.seq_size_per_block / group.layout.kernel_seq_size_per_block;
-        const size_t stored_blocks_per_kv_block =
-            group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
-        RTP_LLM_CHECK_WITH_INFO(
-            blocks_by_tag_.emplace(group.tag, BlockIds(stored_blocks_per_kv_block)).second,
-            "KVCacheResource has duplicate tag=%s",
-            group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(blocks_by_tag_.emplace(group.tag, GroupBlockToPoolBlockBinding{}).second,
+                                "KVCacheResource has duplicate tag=%s",
+                                group.tag.c_str());
     }
 
     const auto& layers = config.layerMemberships();
@@ -35,171 +31,46 @@ void KVCacheResource::initGroups(const CacheConfig& config) {
     }
 }
 
-size_t BlockIds::blocksNum() const {
-    return block_indices.size();
-}
-
-const BlockIndicesType& BlockIds::blocks() const {
-    return block_indices;
-}
-
-const BlockIndicesType& BlockIds::kernelBlocks() const {
-    return kernel_block_indices_;
-}
-
-size_t BlockIds::kernelBlocksPerKvBlock() const {
-    return kernel_blocks_per_kv_block_;
-}
-
-BlockIdxType BlockIds::popBack() {
-    RTP_LLM_CHECK(!block_indices.empty());
-    const BlockIdxType val = block_indices.back();
-    block_indices.pop_back();
-    kernel_block_indices_.resize(block_indices.size() * kernel_blocks_per_kv_block_);
-    return val;
-}
-
-void BlockIds::add(const BlockIndicesType& ids) {
-    const size_t old_size = block_indices.size();
-    block_indices.insert(block_indices.end(), ids.begin(), ids.end());
-    kernel_block_indices_.resize((old_size + ids.size()) * kernel_blocks_per_kv_block_);
-    for (size_t i = 0; i < ids.size(); ++i) {
-        updateKernelSlotAt(old_size + i, ids[i]);
-    }
-}
-
-void BlockIds::remove(const std::vector<size_t>& indices) {
-    for (auto idx : indices) {
-        RTP_LLM_CHECK(idx < block_indices.size());
-        block_indices[idx] = NULL_BLOCK_IDX;
-        updateKernelSlotAt(idx, NULL_BLOCK_IDX);
-    }
-}
-
-void BlockIds::swap(size_t pos_a, size_t pos_b) {
-    if (pos_a >= block_indices.size() || pos_b >= block_indices.size()) {
-        RTP_LLM_LOG_ERROR("BlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_indices.size()=%zu",
-                          pos_a,
-                          pos_b,
-                          block_indices.size());
-        RTP_LLM_CHECK_WITH_INFO(false,
-                                "BlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_indices.size()=%zu",
-                                pos_a,
-                                pos_b,
-                                block_indices.size());
-    }
-
-    if (pos_a == pos_b) {
-        return;
-    }
-    std::swap(block_indices[pos_a], block_indices[pos_b]);
-    updateKernelSlotAt(pos_a, block_indices[pos_a]);
-    updateKernelSlotAt(pos_b, block_indices[pos_b]);
-}
-
-void BlockIds::assign(const BlockIndicesType& new_block_indices) {
-    block_indices = new_block_indices;
-    syncKernelBlocks();
-}
-
-void BlockIds::assign(BlockIndicesType&& new_block_indices) {
-    block_indices = std::move(new_block_indices);
-    syncKernelBlocks();
-}
-
-void BlockIds::setAt(size_t pos, BlockIdxType val) {
-    RTP_LLM_CHECK(pos < block_indices.size());
-    block_indices[pos] = val;
-    updateKernelSlotAt(pos, val);
-}
-
-void BlockIds::resize(size_t new_size, BlockIdxType value) {
-    const size_t old_size = block_indices.size();
-    block_indices.resize(new_size, value);
-    kernel_block_indices_.resize(new_size * kernel_blocks_per_kv_block_);
-    for (size_t i = old_size; i < new_size; ++i) {
-        updateKernelSlotAt(i, value);
-    }
-}
-
-void BlockIds::updateKernelSlotAt(size_t pos, BlockIdxType val) {
-    const size_t bpk      = kernel_blocks_per_kv_block_;
-    const size_t base_pos = pos * bpk;
-    RTP_LLM_CHECK_WITH_INFO(base_pos + bpk <= kernel_block_indices_.size(),
-                            "OOB: base_pos=%zu + bpk=%zu > kernel size=%zu (physical_blocks=%zu)",
-                            base_pos,
-                            bpk,
-                            kernel_block_indices_.size(),
-                            block_indices.size());
-    if (isNullBlockIdx(val)) {
-        for (size_t j = 0; j < bpk; ++j) {
-            kernel_block_indices_[base_pos + j] = NULL_BLOCK_IDX;
-        }
-    } else {
-        const BlockIdxType base = val * static_cast<BlockIdxType>(bpk);
-        for (size_t j = 0; j < bpk; ++j) {
-            kernel_block_indices_[base_pos + j] = base + static_cast<BlockIdxType>(j);
-        }
-    }
-}
-
-void BlockIds::syncKernelBlocks() {
-    const size_t n   = block_indices.size();
-    const size_t bpk = kernel_blocks_per_kv_block_;
-    kernel_block_indices_.resize(n * bpk);
-    for (size_t i = 0; i < n; ++i) {
-        updateKernelSlotAt(i, block_indices[i]);
-    }
-}
-
-void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
-    for (auto& [tag, block_ids] : blocks_by_tag_) {
+void KVCacheResource::resizeBlocks(int reserved_blocks, std::optional<PoolBlockId> initial_block) {
+    RTP_LLM_CHECK_WITH_INFO(reserved_blocks >= 0, "reserved_blocks must be nonnegative, got %d", reserved_blocks);
+    for (auto& [tag, binding] : blocks_by_tag_) {
         (void)tag;
-        block_ids.resize(reserver_blocks, value);
+        const size_t old_size = binding.size();
+        binding.resize(static_cast<size_t>(reserved_blocks));
+        if (initial_block.has_value()) {
+            for (size_t group_block_position = old_size; group_block_position < binding.size();
+                 ++group_block_position) {
+                binding.bind(GroupBlockPosition{group_block_position}, *initial_block);
+            }
+        }
     }
 }
 
 int KVCacheResource::blocksNum(std::string_view tag) const {
-    return static_cast<int>(blockIds(tag).blocksNum());
+    return static_cast<int>(blockBinding(tag).size());
 }
 
-const BlockIndicesType& KVCacheResource::blocks(std::string_view tag) const {
-    return blockIds(tag).blocks();
-}
-
-const BlockIndicesType& KVCacheResource::blocksForLayer(int layer_id, std::string_view tag) const {
-    return mutableBlockIdsForLayer(layer_id, tag).blocks();
-}
-
-const BlockIndicesType& KVCacheResource::kernelBlocks(std::string_view tag) const {
-    return blockIds(tag).kernelBlocks();
-}
-
-const BlockIndicesType& KVCacheResource::kernelBlocksForLayer(int layer_id, std::string_view tag) const {
-    return mutableBlockIdsForLayer(layer_id, tag).kernelBlocks();
-}
-
-BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
+GroupBlockToPoolBlockBinding& KVCacheResource::mutableBlockBinding(std::string_view tag) const {
     const auto value = std::string(tag);
     const auto it    = blocks_by_tag_.find(value);
     RTP_LLM_CHECK_WITH_INFO(it != blocks_by_tag_.end(), "KVCacheResource missing tag=%s", value.c_str());
     return it->second;
 }
 
-BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) const {
+GroupBlockToPoolBlockBinding& KVCacheResource::mutableBlockBindingForLayer(int layer_id, std::string_view tag) const {
     RTP_LLM_CHECK_WITH_INFO(layerContainsTag(layer_id, tag),
                             "KVCacheResource layer=%d does not own tag=%s",
                             layer_id,
                             std::string(tag).c_str());
-    return mutableBlockIds(tag);
+    return mutableBlockBinding(tag);
 }
 
-const BlockIds& KVCacheResource::blockIds(std::string_view tag) const {
-    return mutableBlockIds(tag);
+const GroupBlockToPoolBlockBinding& KVCacheResource::blockBinding(std::string_view tag) const {
+    return mutableBlockBinding(tag);
 }
 
-const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view tag) const {
-    return mutableBlockIdsForLayer(layer_id, tag);
+const GroupBlockToPoolBlockBinding& KVCacheResource::blockBindingForLayer(int layer_id, std::string_view tag) const {
+    return mutableBlockBindingForLayer(layer_id, tag);
 }
 
 bool KVCacheResource::layerContainsTag(int layer_id, std::string_view tag) const {
@@ -231,7 +102,7 @@ int KVCacheResource::groupNums() const {
     return static_cast<int>(blocks_by_tag_.size());
 }
 
-const std::map<std::string, BlockIds>& KVCacheResource::blocksByTag() const {
+const std::map<std::string, GroupBlockToPoolBlockBinding>& KVCacheResource::blocksByTag() const {
     return blocks_by_tag_;
 }
 
@@ -363,11 +234,14 @@ void KVCacheResource::setLastBlockAligned(bool last_block_aligned) {
 
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
-    for (const auto& [tag, block_ids] : blocks_by_tag_) {
+    for (const auto& [tag, binding] : blocks_by_tag_) {
         debug_string << "group:[" << tag << "], block:[";
-        const auto& block_indices = block_ids.blocks();
-        for (auto& block : block_indices) {
-            debug_string << block << ", ";
+        for (const auto& block : binding.snapshot()) {
+            if (block.has_value()) {
+                debug_string << block->value << ", ";
+            } else {
+                debug_string << "missing, ";
+            }
         }
         debug_string << "], ";
     }
@@ -376,7 +250,7 @@ std::string KVCacheResource::debugString() const {
 }
 
 void KVCacheResource::swapBlocks(std::string_view tag, size_t rhs, size_t lhs) {
-    mutableBlockIds(tag).swap(rhs, lhs);
+    mutableBlockBinding(tag).swap(GroupBlockPosition{rhs}, GroupBlockPosition{lhs});
 }
 
 }  // namespace rtp_llm

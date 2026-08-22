@@ -105,11 +105,12 @@ CacheConfig makeCpFullPlusSwaCacheConfig(bool cp_compact_swa_group, size_t cp_si
         swa_policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
     }
 
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, {full_spec, swa_spec},
-                            /*layers_by_group=*/{{0}, {1}},
-                            {CacheGroupType::FULL, CacheGroupType::SWA},
-                            /*tags=*/{"full_kv", "swa_kv"},
-                            /*policies=*/{full_policy, swa_policy});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config,
+                                                            {full_spec, swa_spec},
+                                                            /*layers_by_group=*/{{0}, {1}},
+                                                            {CacheGroupType::FULL, CacheGroupType::SWA},
+                                                            /*tags=*/{"full_kv", "swa_kv"},
+                                                            /*policies=*/{full_policy, swa_policy});
 
     config.kv_block_stride_bytes = full_spec->block_size_bytes();
     config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
@@ -638,20 +639,21 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsIn
     resource.initGroups(cp_cache_config);
     resource.setCacheKeys(CacheKeysType{10, 11, 12, 13});
     resource.setLastBlockAligned(false);
-    resource.mutableBlockIds("full_kv").assign(BlockIndicesType{100, 101});            // FULL: compact local blocks
-    resource.mutableBlockIds("swa_kv").assign(BlockIndicesType{200, 201, 202, 203});  // SWA: full logical slots
+    resource.mutableBlockBinding("full_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{100, 101}));
+    resource.mutableBlockBinding("swa_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{200, 201, 202, 203}));
 
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::Eq(true)))
-        .WillOnce(
-            testing::Invoke([](const KVCacheResource& ref_resource, const CacheKeysType& ref_keys, bool is_connector) {
-                (void)is_connector;
-                EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
-                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
-                EXPECT_FALSE(ref_resource.lastBlockAligned());
-                EXPECT_THAT(ref_resource.blocks("full_kv"), testing::ElementsAre(100, 101));
-                EXPECT_THAT(ref_resource.blocks("swa_kv"), testing::ElementsAre(201, 203));
-                return std::make_shared<KVCacheResource>();
-            }));
+        .WillOnce(testing::Invoke([](const KVCacheResource& ref_resource,
+                                     const CacheKeysType&   ref_keys,
+                                     bool                   is_connector) {
+            (void)is_connector;
+            EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
+            EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
+            EXPECT_FALSE(ref_resource.lastBlockAligned());
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("full_kv")), testing::ElementsAre(100, 101));
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("swa_kv")), testing::ElementsAre(201, 203));
+            return std::make_shared<KVCacheResource>();
+        }));
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
@@ -696,28 +698,29 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonic
     resource.setCacheKeysAndBlockDependencies(CacheKeysType{11, 13}, BlockDependenciesType{root_dep, child_dep});
     resource.setCacheKeysAreCpCanonical(true);
     resource.setLastBlockAligned(true);
-    resource.mutableBlockIds("full_kv").assign(BlockIndicesType{100, 101});
-    resource.mutableBlockIds("swa_kv").assign(BlockIndicesType{201, 203});
+    resource.mutableBlockBinding("full_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{100, 101}));
+    resource.mutableBlockBinding("swa_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{201, 203}));
 
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::Eq(true)))
-        .WillOnce(
-            testing::Invoke([](const KVCacheResource& ref_resource, const CacheKeysType& ref_keys, bool is_connector) {
-                (void)is_connector;
-                EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
-                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
-                EXPECT_TRUE(ref_resource.cacheKeysAreCpCanonical());
-                EXPECT_EQ(ref_resource.blockDependencies().size(), 2u);
-                if (ref_resource.blockDependencies().size() == 2u) {
-                    EXPECT_FALSE(ref_resource.blockDependencies()[0].has_parent);
-                    EXPECT_EQ(ref_resource.blockDependencies()[0].ordinal, 0u);
-                    EXPECT_TRUE(ref_resource.blockDependencies()[1].has_parent);
-                    EXPECT_EQ(ref_resource.blockDependencies()[1].parent_key, 11);
-                    EXPECT_EQ(ref_resource.blockDependencies()[1].ordinal, 1u);
-                }
-                EXPECT_THAT(ref_resource.blocks("full_kv"), testing::ElementsAre(100, 101));
-                EXPECT_THAT(ref_resource.blocks("swa_kv"), testing::ElementsAre(201, 203));
-                return std::make_shared<KVCacheResource>();
-            }));
+        .WillOnce(testing::Invoke([](const KVCacheResource& ref_resource,
+                                     const CacheKeysType&   ref_keys,
+                                     bool                   is_connector) {
+            (void)is_connector;
+            EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
+            EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
+            EXPECT_TRUE(ref_resource.cacheKeysAreCpCanonical());
+            EXPECT_EQ(ref_resource.blockDependencies().size(), 2u);
+            if (ref_resource.blockDependencies().size() == 2u) {
+                EXPECT_FALSE(ref_resource.blockDependencies()[0].has_parent);
+                EXPECT_EQ(ref_resource.blockDependencies()[0].ordinal, 0u);
+                EXPECT_TRUE(ref_resource.blockDependencies()[1].has_parent);
+                EXPECT_EQ(ref_resource.blockDependencies()[1].parent_key, 11);
+                EXPECT_EQ(ref_resource.blockDependencies()[1].ordinal, 1u);
+            }
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("full_kv")), testing::ElementsAre(100, 101));
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("swa_kv")), testing::ElementsAre(201, 203));
+            return std::make_shared<KVCacheResource>();
+        }));
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
@@ -755,20 +758,21 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGro
     resource.initGroups(cp_cache_config);
     resource.setCacheKeys(CacheKeysType{10, 11, 12, 13});
     resource.setLastBlockAligned(false);
-    resource.mutableBlockIds("full_kv").assign(BlockIndicesType{100, 101});
-    resource.mutableBlockIds("swa_kv").assign(BlockIndicesType{200, 201});
+    resource.mutableBlockBinding("full_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{100, 101}));
+    resource.mutableBlockBinding("swa_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{200, 201}));
 
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::Eq(true)))
-        .WillOnce(
-            testing::Invoke([](const KVCacheResource& ref_resource, const CacheKeysType& ref_keys, bool is_connector) {
-                (void)is_connector;
-                EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
-                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
-                EXPECT_FALSE(ref_resource.lastBlockAligned());
-                EXPECT_THAT(ref_resource.blocks("full_kv"), testing::ElementsAre(100, 101));
-                EXPECT_THAT(ref_resource.blocks("swa_kv"), testing::ElementsAre(200, 201));
-                return std::make_shared<KVCacheResource>();
-            }));
+        .WillOnce(testing::Invoke([](const KVCacheResource& ref_resource,
+                                     const CacheKeysType&   ref_keys,
+                                     bool                   is_connector) {
+            (void)is_connector;
+            EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
+            EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
+            EXPECT_FALSE(ref_resource.lastBlockAligned());
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("full_kv")), testing::ElementsAre(100, 101));
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("swa_kv")), testing::ElementsAre(200, 201));
+            return std::make_shared<KVCacheResource>();
+        }));
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
@@ -809,20 +813,21 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndC
     resource.initGroups(cp_cache_config);
     resource.setCacheKeys(CacheKeysType{10, 11, 12, 13, 14});
     resource.setLastBlockAligned(false);
-    resource.mutableBlockIds("full_kv").assign(BlockIndicesType{100, 101, 102, 103, 104});
-    resource.mutableBlockIds("swa_kv").assign(BlockIndicesType{200, 201, 202});
+    resource.mutableBlockBinding("full_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{100, 101, 102, 103, 104}));
+    resource.mutableBlockBinding("swa_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{200, 201, 202}));
 
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::Eq(true)))
-        .WillOnce(
-            testing::Invoke([](const KVCacheResource& ref_resource, const CacheKeysType& ref_keys, bool is_connector) {
-                (void)is_connector;
-                EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13, 14));
-                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13, 14));
-                EXPECT_FALSE(ref_resource.lastBlockAligned());
-                EXPECT_THAT(ref_resource.blocks("full_kv"), testing::ElementsAre(101, 103));
-                EXPECT_THAT(ref_resource.blocks("swa_kv"), testing::ElementsAre(200, 201));
-                return std::make_shared<KVCacheResource>();
-            }));
+        .WillOnce(testing::Invoke([](const KVCacheResource& ref_resource,
+                                     const CacheKeysType&   ref_keys,
+                                     bool                   is_connector) {
+            (void)is_connector;
+            EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13, 14));
+            EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13, 14));
+            EXPECT_FALSE(ref_resource.lastBlockAligned());
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("full_kv")), testing::ElementsAre(101, 103));
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("swa_kv")), testing::ElementsAre(200, 201));
+            return std::make_shared<KVCacheResource>();
+        }));
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));
@@ -865,20 +870,21 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedAppendsDummyTailWhen
     resource.initGroups(cp_cache_config);
     resource.setCacheKeys(CacheKeysType{10, 11, 12, 13, 14});
     resource.setLastBlockAligned(false);
-    resource.mutableBlockIds("full_kv").assign(BlockIndicesType{100, 101, 102});
-    resource.mutableBlockIds("swa_kv").assign(BlockIndicesType{200, 201, 202, 203, 204});
+    resource.mutableBlockBinding("full_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{100, 101, 102}));
+    resource.mutableBlockBinding("swa_kv").assign(poolBlockSnapshotForTest(BlockIndicesType{200, 201, 202, 203, 204}));
 
     EXPECT_CALL(*allocator_, incrKVCacheRef(testing::_, testing::_, testing::Eq(true)))
-        .WillOnce(
-            testing::Invoke([](const KVCacheResource& ref_resource, const CacheKeysType& ref_keys, bool is_connector) {
-                (void)is_connector;
-                EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13, 14));
-                EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13, 14));
-                EXPECT_FALSE(ref_resource.lastBlockAligned());
-                EXPECT_THAT(ref_resource.blocks("full_kv"), testing::ElementsAre(100, 101));
-                EXPECT_THAT(ref_resource.blocks("swa_kv"), testing::ElementsAre(201, 203));
-                return std::make_shared<KVCacheResource>();
-            }));
+        .WillOnce(testing::Invoke([](const KVCacheResource& ref_resource,
+                                     const CacheKeysType&   ref_keys,
+                                     bool                   is_connector) {
+            (void)is_connector;
+            EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13, 14));
+            EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13, 14));
+            EXPECT_FALSE(ref_resource.lastBlockAligned());
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("full_kv")), testing::ElementsAre(100, 101));
+            EXPECT_THAT(encodedPoolBlocksForTest(ref_resource.blockBinding("swa_kv")), testing::ElementsAre(201, 203));
+            return std::make_shared<KVCacheResource>();
+        }));
 
     auto rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     ON_CALL(*rw_ctx, kvCacheResource()).WillByDefault(testing::ReturnRef(resource));

@@ -401,6 +401,19 @@ cc_test(
 )
 
 cc_test(
+    name = "block_expression_test",
+    srcs = ["BlockExpressionTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_expression",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "kv_cache_resource_test",
     srcs = [
         "KVCacheResourceTest.cc",

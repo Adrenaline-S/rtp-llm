@@ -167,11 +167,13 @@ protected:
     static void initializeSingleGroup(rtp_llm::CacheConfig& cache_config, const KVCacheSpecPtr& spec) {
         std::vector<int> layer_ids(cache_config.layer_num);
         std::iota(layer_ids.begin(), layer_ids.end(), 0);
-        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+            cache_config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
         if (auto test_spec = std::dynamic_pointer_cast<TestKVCacheSpec>(spec)) {
-            auto groups                 = cache_config.groups();
+            auto groups                        = cache_config.groups();
             groups[0].layout.local_kv_head_num = test_spec->local_kv_head_num;
-            rtp_llm::test::TestCacheConfigBuilder::setResolvedData(cache_config, std::move(groups), cache_config.layerMemberships());
+            rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
+                cache_config, std::move(groups), cache_config.layerMemberships());
         }
     }
 
@@ -706,6 +708,25 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferUsesPhysicalStrideWithKerne
     const auto addr0 = reinterpret_cast<uintptr_t>(block0[0].addr);
     const auto addr1 = reinterpret_cast<uintptr_t>(block1[0].addr);
     EXPECT_EQ(addr1 - addr0, ctx.config.kv_block_stride_bytes);
+}
+
+TEST_F(MemoryLayoutStrategyTest, PoolBlockSegmentsUsePhysicalPoolIdentityAndSpecStride) {
+    auto config                       = createTestConfig(/*layer_num=*/2, /*block_num=*/4, 64, 64);
+    config.kernel_blocks_per_kv_block = 4;
+    auto ctx                          = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Arange);
+
+    MemoryLayoutStrategy strategy;
+    torch::Tensor        empty_scale;
+    ASSERT_TRUE(strategy.init(ctx.config, ctx.kv_cache_buffer, empty_scale, ctx.cache_ptr));
+
+    const auto block0 = strategy.segments(PoolBlockId{0}, /*layer_id=*/1);
+    const auto block1 = strategy.segments(PoolBlockId{1}, /*layer_id=*/1);
+    ASSERT_TRUE(block0.kv.defined());
+    ASSERT_TRUE(block1.kv.defined());
+    EXPECT_FALSE(block0.scale.defined());
+    EXPECT_EQ(static_cast<size_t>(block0.kv.nbytes()), ctx.config.kv_block_stride_bytes);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(block1.kv.data_ptr()) - reinterpret_cast<uintptr_t>(block0.kv.data_ptr()),
+              ctx.config.kv_block_stride_bytes);
 }
 
 // Layout Comparison Test

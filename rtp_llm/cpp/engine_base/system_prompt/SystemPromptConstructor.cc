@@ -37,8 +37,15 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
             // from the authoritative cache configuration, then access runtime allocation by tag.
             const auto& groups = cache_manager->cacheConfig().groups();
             RTP_LLM_CHECK(groups.size() == 1);
-            auto& blocks = kv_cache.blocks(0, groups.front().tag);
-            RTP_LLM_CHECK(blocks.size() > 0);
+            const auto& binding = kv_cache.blockBinding(0, groups.front().tag);
+            RTP_LLM_CHECK(binding.size() > 0);
+            BlockIndicesType blocks;
+            blocks.reserve(binding.size());
+            for (const auto& pool_block_id : binding.snapshot()) {
+                RTP_LLM_CHECK_WITH_INFO(pool_block_id.has_value(),
+                                        "system prompt FULL binding cannot contain a missing pool block");
+                blocks.push_back(pool_block_id->value);
+            }
             rtp_llm::InsertInfo insert_info{
                 stream->kvCachePtr(),
                 stream->completeTokenIdsPtr(),

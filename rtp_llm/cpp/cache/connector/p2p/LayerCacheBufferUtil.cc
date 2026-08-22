@@ -10,8 +10,7 @@ namespace {
 
 bool validRangeArguments(
     int layer_id, std::string_view tag, int start_key_ordinal, int key_count, int cp_rank, int cp_size) {
-    if (start_key_ordinal < 0 || key_count == 0 || key_count < -1 || cp_size < 1 || cp_rank < 0
-        || cp_rank >= cp_size) {
+    if (start_key_ordinal < 0 || key_count == 0 || key_count < -1 || cp_size < 1 || cp_rank < 0 || cp_rank >= cp_size) {
         RTP_LLM_LOG_WARNING("invalid tagged cache conversion arguments for layer=%d tag=%.*s",
                             layer_id,
                             static_cast<int>(tag.size()),
@@ -21,8 +20,10 @@ bool validRangeArguments(
     return true;
 }
 
-void validateGroupPacking(
-    const CacheConfig& config, const KVCacheResource& resource, int layer_id, std::string_view tag) {
+void validateGroupPacking(const CacheConfig&     config,
+                          const KVCacheResource& resource,
+                          int                    layer_id,
+                          std::string_view       tag) {
     RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "P2P transfer requires a non-empty cache group tag");
     const auto& group = config.groupForLayer(layer_id, tag);
     RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block > 0 && group.layout.seq_size_per_block > 0
@@ -40,16 +41,7 @@ void validateGroupPacking(
                             group.layout.seq_size_per_block,
                             group.layout.kernel_seq_size_per_block);
 
-    const auto&  block_ids              = resource.blockIdsForLayer(layer_id, tag);
-    const size_t physical_kernel_blocks = group.layout.seq_size_per_block / group.layout.kernel_seq_size_per_block;
-    const size_t stored_kernel_blocks = group.policy.group_type == CacheGroupType::FULL ? physical_kernel_blocks : 1;
-    RTP_LLM_CHECK_WITH_INFO(block_ids.kernelBlocksPerKvBlock() == stored_kernel_blocks,
-                            "P2P transfer tag=%.*s block table K=%zu does not match stored/group K=%zu/%zu",
-                            static_cast<int>(tag.size()),
-                            tag.data(),
-                            block_ids.kernelBlocksPerKvBlock(),
-                            stored_kernel_blocks,
-                            physical_kernel_blocks);
+    (void)PoolBlockToKernelBlockProjection(group.layout.seq_size_per_block, group.layout.kernel_seq_size_per_block);
 }
 
 template<typename Visitor>
@@ -67,14 +59,14 @@ bool visitSelectedBlocks(const CacheConfig&     config,
     }
     validateGroupPacking(config, resource, layer_id, tag);
 
-    const auto& group      = config.groupForLayer(layer_id, tag);
-    const auto& block_ids  = resource.blockIdsForLayer(layer_id, tag);
-    const auto& cache_keys = resource.cacheKeys();
-    const auto  mapping    = cp_size > 1 ? group.policy.cp_mapping : CpBlockMappingMode::NONE;
-    const auto  world_size = static_cast<size_t>(cp_size);
-    const auto  rank       = static_cast<size_t>(cp_rank);
+    const auto& group        = config.groupForLayer(layer_id, tag);
+    const auto& pool_binding = resource.blockBindingForLayer(layer_id, tag);
+    const auto& cache_keys   = resource.cacheKeys();
+    const auto  mapping      = cp_size > 1 ? group.policy.cp_mapping : CpBlockMappingMode::NONE;
+    const auto  world_size   = static_cast<size_t>(cp_size);
+    const auto  rank         = static_cast<size_t>(cp_rank);
 
-    const size_t local_block_count = block_ids.blocks().size();
+    const size_t local_block_count = pool_binding.size();
     size_t       physical_capacity = local_block_count;
     if (mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN && local_block_count > 0) {
         physical_capacity = rank + (local_block_count - 1) * world_size + 1;
@@ -83,8 +75,8 @@ bool visitSelectedBlocks(const CacheConfig&     config,
     }
 
     const size_t keys_per_physical_block = group.layout.seq_size_per_block / config.seq_size_per_block;
-    const size_t available_key_count = std::min(cache_keys.size(), physical_capacity * keys_per_physical_block);
-    const size_t key_begin           = static_cast<size_t>(start_key_ordinal);
+    const size_t available_key_count     = std::min(cache_keys.size(), physical_capacity * keys_per_physical_block);
+    const size_t key_begin               = static_cast<size_t>(start_key_ordinal);
     if (key_begin >= available_key_count) {
         return false;
     }
@@ -111,28 +103,27 @@ bool visitSelectedBlocks(const CacheConfig&     config,
         }
         const size_t local_position =
             mapping == CpBlockMappingMode::NONE ? physical_position : physical_position / world_size;
-        RTP_LLM_CHECK_WITH_INFO(local_position < block_ids.blocks().size(),
+        RTP_LLM_CHECK_WITH_INFO(local_position < pool_binding.size(),
                                 "P2P transfer physical block=%zu maps past tag=%.*s local blocks=%zu",
                                 physical_position,
                                 static_cast<int>(tag.size()),
                                 tag.data(),
-                                block_ids.blocks().size());
-        const size_t global_key =
-            std::min((physical_position + 1) * keys_per_physical_block - 1, last_key);
+                                pool_binding.size());
+        const size_t global_key = std::min((physical_position + 1) * keys_per_physical_block - 1, last_key);
         RTP_LLM_CHECK_WITH_INFO(global_key < cache_keys.size(),
                                 "P2P transfer key ordinal=%zu is past request cache keys=%zu",
                                 global_key,
                                 cache_keys.size());
-        const BlockIdxType block_id = block_ids.blocks()[local_position];
-        if (!isNullBlockIdx(block_id)) {
-            visitor(cache_keys[global_key], block_id);
+        const auto pool_block_id = pool_binding.lookup(GroupBlockPosition{local_position});
+        if (pool_block_id.has_value()) {
+            visitor(cache_keys[global_key], pool_block_id->value);
             found = true;
         }
     };
 
     if (mapping == CpBlockMappingMode::COMPACT_LAST_RANK) {
-        const size_t compact_begin = physical_begin / world_size;
-        const size_t compact_end   = (physical_end + world_size - 1) / world_size;
+        const size_t compact_begin  = physical_begin / world_size;
+        const size_t compact_end    = (physical_end + world_size - 1) / world_size;
         size_t       selected_begin = compact_begin;
         if (group.policy.group_type != CacheGroupType::FULL) {
             const size_t tail =
@@ -165,20 +156,20 @@ bool visitSelectedBlocks(const CacheConfig&     config,
 std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(const CacheConfig& config,
                                                                              KVCacheResource&   resource,
                                                                              int                batch_id,
-                                                                             int start_key_ordinal,
-                                                                             int key_count,
-                                                                             int cp_rank,
-                                                                             int cp_size) {
+                                                                             int                start_key_ordinal,
+                                                                             int                key_count,
+                                                                             int                cp_rank,
+                                                                             int                cp_size) {
     return convert(config, resource, batch_id, start_key_ordinal, key_count, cp_rank, cp_size, nullptr);
 }
 
-std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(const CacheConfig& config,
-                                                                             KVCacheResource&   resource,
-                                                                             int                batch_id,
-                                                                             int start_key_ordinal,
-                                                                             int key_count,
-                                                                             int cp_rank,
-                                                                             int cp_size,
+std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(const CacheConfig&  config,
+                                                                             KVCacheResource&    resource,
+                                                                             int                 batch_id,
+                                                                             int                 start_key_ordinal,
+                                                                             int                 key_count,
+                                                                             int                 cp_rank,
+                                                                             int                 cp_size,
                                                                              ConversionObserver* observer) {
     for (const auto& [tag, block_ids] : resource.blocksByTag()) {
         (void)block_ids;
@@ -214,16 +205,8 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(con
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
         for (const auto& tag : sorted_tags_by_layer[static_cast<size_t>(layer_id)]) {
-            auto buffer = convertLayer(config,
-                                       resource,
-                                       batch_id,
-                                       layer_id,
-                                       tag,
-                                       start_key_ordinal,
-                                       key_count,
-                                       cp_rank,
-                                       cp_size,
-                                       observer);
+            auto buffer = convertLayer(
+                config, resource, batch_id, layer_id, tag, start_key_ordinal, key_count, cp_rank, cp_size, observer);
             if (buffer) {
                 layer_cache_buffers.push_back(std::move(buffer));
                 if (observer != nullptr) {
@@ -240,23 +223,23 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const Cache
                                                                      int                batch_id,
                                                                      int                layer_id,
                                                                      std::string_view   tag,
-                                                                     int start_key_ordinal,
-                                                                     int key_count,
-                                                                     int cp_rank,
-                                                                     int cp_size) {
+                                                                     int                start_key_ordinal,
+                                                                     int                key_count,
+                                                                     int                cp_rank,
+                                                                     int                cp_size) {
     return convertLayer(
         config, resource, batch_id, layer_id, tag, start_key_ordinal, key_count, cp_rank, cp_size, nullptr);
 }
 
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const CacheConfig& config,
-                                                                     KVCacheResource&   resource,
-                                                                     int                batch_id,
-                                                                     int                layer_id,
-                                                                     std::string_view   tag,
-                                                                     int start_key_ordinal,
-                                                                     int key_count,
-                                                                     int cp_rank,
-                                                                     int cp_size,
+std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const CacheConfig&  config,
+                                                                     KVCacheResource&    resource,
+                                                                     int                 batch_id,
+                                                                     int                 layer_id,
+                                                                     std::string_view    tag,
+                                                                     int                 start_key_ordinal,
+                                                                     int                 key_count,
+                                                                     int                 cp_rank,
+                                                                     int                 cp_size,
                                                                      ConversionObserver* observer) {
     (void)batch_id;
     if (!validRangeArguments(layer_id, tag, start_key_ordinal, key_count, cp_rank, cp_size)) {
@@ -267,17 +250,16 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const Cache
     if (observer != nullptr) {
         observer->onLayerCacheBufferConstructed();
     }
-    visitSelectedBlocks(config,
-                        resource,
-                        layer_id,
-                        tag,
-                        start_key_ordinal,
-                        key_count,
-                        cp_rank,
-                        cp_size,
-                        [&](CacheKeyType cache_key, BlockIdxType block_id) {
-                            layer_cache_buffer->addBlockId(cache_key, block_id);
-                        });
+    visitSelectedBlocks(
+        config,
+        resource,
+        layer_id,
+        tag,
+        start_key_ordinal,
+        key_count,
+        cp_rank,
+        cp_size,
+        [&](CacheKeyType cache_key, BlockIdxType block_id) { layer_cache_buffer->addBlockId(cache_key, block_id); });
     return layer_cache_buffer->blockIdMap().empty() ? nullptr : layer_cache_buffer;
 }
 
@@ -285,10 +267,10 @@ bool LayerCacheBufferUtil::hasTransferableBlocks(const CacheConfig&     config,
                                                  const KVCacheResource& resource,
                                                  int                    layer_id,
                                                  std::string_view       tag,
-                                                 int start_key_ordinal,
-                                                 int key_count,
-                                                 int cp_rank,
-                                                 int cp_size) {
+                                                 int                    start_key_ordinal,
+                                                 int                    key_count,
+                                                 int                    cp_rank,
+                                                 int                    cp_size) {
     return visitSelectedBlocks(config,
                                resource,
                                layer_id,

@@ -8,34 +8,36 @@ namespace rtp_llm {
 
 class SWAKVCacheGroup: public KVCacheGroup {
 public:
-    SWAKVCacheGroup(const CacheGroup&                    cache_group,
+    SWAKVCacheGroup(const CacheGroup&                   cache_group,
                     BlockPoolPtr                        block_pool,
                     int                                 linear_step      = 0,
                     SharedBlockCache*                   shared_cache     = nullptr,
                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         KVCacheGroup(cache_group, std::move(block_pool), shared_cache, metrics_reporter), linear_step_(linear_step) {}
 
-    MatchResult matchSingleKey(CacheKeyType cache_key) const override;
-    bool        malloc(BlockIds&            block_ids,
-                       int                  seq_len,
-                       bool                 enable_reuse_cache   = false,
-                       int                  reserve_step         = 0,
-                       std::vector<size_t>* backfilled_positions = nullptr) override;
-    void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    void free(const BlockIndicesType& block_indices) override;
-    void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
-    int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
-    int  estimatePeakNeedBlocks(int                     seq_len,
-                                const BlockIndicesType& current_block_indices,
-                                int                     remaining_tokens,
-                                int                     reserve_step,
-                                bool                    enable_reuse_cache) const override;
-    int  estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                            int  common_seq_len,
-                                            int  remaining_tokens,
-                                            int  reserve_step,
-                                            bool enable_reuse_cache,
-                                            int  target_batch_size) const override;
+    MatchResult    matchSingleKey(CacheKeyType cache_key) const override;
+    bool           malloc(GroupBlockToPoolBlockBinding& binding,
+                          int                           seq_len,
+                          bool                          enable_reuse_cache   = false,
+                          int                           reserve_step         = 0,
+                          std::vector<size_t>*          backfilled_positions = nullptr) override;
+    void           removeSkippedBlocks(GroupBlockToPoolBlockBinding& binding,
+                                       bool                          enable_reuse_cache = false,
+                                       int                           reserve_step       = 0) override;
+    void           free(const BlockIndicesType& block_indices) override;
+    void           reference(GroupBlockToPoolBlockBinding& binding, const BlockIndicesType& new_block_indices) override;
+    int            needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
+    int            estimatePeakNeedBlocks(int                     seq_len,
+                                          const BlockIndicesType& current_block_indices,
+                                          int                     remaining_tokens,
+                                          int                     reserve_step,
+                                          bool                    enable_reuse_cache) const override;
+    int            estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                      int  common_seq_len,
+                                                      int  remaining_tokens,
+                                                      int  reserve_step,
+                                                      bool enable_reuse_cache,
+                                                      int  target_batch_size) const override;
     NeedBlocksInfo getNeedBlocks(int  common_seq_len,
                                  int  seq_len,
                                  int  reserve_step,
@@ -47,7 +49,7 @@ private:
     int  activeTailBlockCount() const;
     bool effectiveReuseCacheForAllocation(bool enable_reuse_cache) const;
     bool shouldCheckSWATailBlockIds() const;
-    void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
+    void checkSWATailBindings(const GroupBlockToPoolBlockBinding& binding, const char* caller) const;
 
     int linear_step_ = 0;
 };

@@ -4,6 +4,7 @@
 #include <vector>
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/cache/BlockExpression.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
@@ -11,7 +12,18 @@
 
 namespace rtp_llm {
 
-class MemoryLayoutStrategy {
+struct PoolBlockMemorySegments {
+    torch::Tensor kv;
+    torch::Tensor scale;
+};
+
+class PoolBlockMemoryLayout {
+public:
+    virtual ~PoolBlockMemoryLayout()                                                   = default;
+    virtual PoolBlockMemorySegments segments(PoolBlockId block_id, int layer_id) const = 0;
+};
+
+class MemoryLayoutStrategy: public PoolBlockMemoryLayout {
 public:
     ~MemoryLayoutStrategy() = default;
 
@@ -22,6 +34,8 @@ public:
 
     std::vector<torch::Tensor> getLayerCacheTensors() const;
     std::vector<torch::Tensor> getLayerScaleCacheTensors() const;
+
+    PoolBlockMemorySegments segments(PoolBlockId block_id, int layer_id) const override;
 
     BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const;
 

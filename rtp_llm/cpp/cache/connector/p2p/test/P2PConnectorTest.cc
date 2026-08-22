@@ -88,7 +88,7 @@ protected:
 
     // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
-        auto                          resource = std::make_shared<KVCacheResource>();
+        auto                                  resource = std::make_shared<KVCacheResource>();
         std::vector<std::vector<std::string>> layer_to_group_tags(num_layers);
         for (int i = 0; i < num_layers; ++i) {
             layer_to_group_tags[i] = {"group" + std::to_string(i)};
@@ -99,7 +99,7 @@ protected:
             // Each layer owns exactly one group; layer_to_group_tags records its tag.
             const auto& tag = layer_to_group_tags[layer_id].front();
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(tag).add({i});
+                resource->mutableBlockBinding(tag).append(poolBlockSnapshotForTest({i}));
             }
         }
 
@@ -220,8 +220,8 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
     auto resource = std::make_shared<KVCacheResource>();
     resource->setCacheKeys({1000, 1001, 1002});
     resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/4, /*layer_num=*/2, {{"group1"}, {"group3"}}));
-    resource->mutableBlockIds("group1").assign({10, 11, 12});
-    resource->mutableBlockIds("group3").assign({30, 31, 32});
+    resource->mutableBlockBinding("group1").assign(poolBlockSnapshotForTest({10, 11, 12}));
+    resource->mutableBlockBinding("group3").assign(poolBlockSnapshotForTest({30, 31, 32}));
     ASSERT_GT(resource->groupNums(), 1);
 
     P2PConnectorAsyncMatchContext ctx(resource);
@@ -231,8 +231,8 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
 TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesCacheKeyTimelineInsteadOfAnyGroupBlockCount) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
-    resource->mutableBlockIds("group0").assign({10, 11});
-    resource->mutableBlockIds("group1").assign({20, 21, 22, 23});
+    resource->mutableBlockBinding("group0").assign(poolBlockSnapshotForTest({10, 11}));
+    resource->mutableBlockBinding("group1").assign(poolBlockSnapshotForTest({20, 21, 22, 23}));
     resource->setCacheKeys({100, 101, 102});
 
     P2PConnectorAsyncMatchContext ctx(resource);
@@ -245,7 +245,7 @@ TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountIsZeroForNullOrEmptyTim
 
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/1, /*layer_num=*/1, {{"group0"}}));
-    resource->mutableBlockIds("group0").assign({10, 11});
+    resource->mutableBlockBinding("group0").assign(poolBlockSnapshotForTest({10, 11}));
     P2PConnectorAsyncMatchContext empty_ctx(resource);
     EXPECT_EQ(empty_ctx.matchedBlockCount(), 0u);
 }

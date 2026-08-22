@@ -65,8 +65,7 @@ BlockPoolPtr HybridPoolKVCacheAllocator::soleGroupBlockPool() const {
 
 size_t HybridPoolKVCacheAllocator::storageIdxForTag(std::string_view tag) const {
     const auto it = tag_to_idx_.find(std::string(tag));
-    RTP_LLM_CHECK_WITH_INFO(
-        it != tag_to_idx_.end(), "missing allocator cache group tag=%s", std::string(tag).c_str());
+    RTP_LLM_CHECK_WITH_INFO(it != tag_to_idx_.end(), "missing allocator cache group tag=%s", std::string(tag).c_str());
     return it->second;
 }
 
@@ -83,8 +82,7 @@ bool HybridPoolKVCacheAllocator::initGroup(const KVCacheGroupPtr& group) {
 
 BlockPoolPtr HybridPoolKVCacheAllocator::blockPool(std::string_view tag) const {
     const auto idx = storageIdxForTag(tag);
-    RTP_LLM_CHECK_WITH_INFO(
-        idx < group_block_pools_.size(), "missing block pool for tag=%s", std::string(tag).c_str());
+    RTP_LLM_CHECK_WITH_INFO(idx < group_block_pools_.size(), "missing block pool for tag=%s", std::string(tag).c_str());
     return group_block_pools_[idx];
 }
 
@@ -402,7 +400,7 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     batch_resource->setLastBlockAligned(true);
 
     for (const auto& group : config_.groups()) {
-        batch_resource->mutableBlockIds(0, group.tag).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
+        batch_resource->mutableBlockBinding(0, group.tag).resize(evict_result.evicted_keys.size());
     }
 
     CacheKeysType         evicted_keys;
@@ -427,7 +425,8 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
         }
         for (const auto& [tag, block_id] : groups) {
             if (!isNullBlockIdx(block_id)) {
-                batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
+                batch_resource->mutableBlockBinding(0, tag).bind(GroupBlockPosition{evicted_idx},
+                                                                 PoolBlockId{block_id});
             }
         }
     }
@@ -445,14 +444,14 @@ void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& b
         return;
     }
     for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (const auto& [tag, block_ids] : batch_kv_cache_resource->blocksByTag(batch_id)) {
+        for (const auto& [tag, binding] : batch_kv_cache_resource->blocksByTag(batch_id)) {
             BlockIndicesType                 blocks_to_free;
             std::unordered_set<BlockIdxType> seen_blocks;
-            for (auto block_idx : block_ids.blocks()) {
-                if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
+            for (const auto& pool_block_id : binding.snapshot()) {
+                if (!pool_block_id.has_value() || !seen_blocks.insert(pool_block_id->value).second) {
                     continue;
                 }
-                blocks_to_free.push_back(block_idx);
+                blocks_to_free.push_back(pool_block_id->value);
             }
             if (!blocks_to_free.empty()) {
                 blockPool(tag)->blockCacheFree(blocks_to_free);
@@ -587,9 +586,9 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
         snapshot.request_ref_blocks   = pool->requestRefBlocksNum();
         snapshot.connector_ref_blocks = pool->connectorRefBlocksNum();
         snapshot.reserve_blocks = reserveBlocksForPool(group.tag, reserve_blocks, total_reservable_available_blocks);
-        snapshot.used_ratio = (snapshot.total_blocks == 0) ?
-                                  0.0f :
-                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+        snapshot.used_ratio     = (snapshot.total_blocks == 0) ?
+                                      0.0f :
+                                      static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
                                                      / static_cast<double>(snapshot.total_blocks));
         snapshots.push_back(snapshot);
     }
@@ -664,13 +663,13 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
     }
 
     MallocStatus status = MallocStatus::NONE;
-    const auto& groups = config_.groups();
+    const auto&  groups = config_.groups();
     for (size_t idx = 0; idx < groups.size(); ++idx) {
         const auto& group = groups[idx];
         // Diagnostic-only positional column in the rejection logs; never an identity.
-        const int    group_common_seq = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, raw_common_seq_len);
-        const int    group_seq_len    = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, raw_seq_len);
-        const int    group_reuse_blocks_len =
+        const int group_common_seq = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, raw_common_seq_len);
+        const int group_seq_len    = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, raw_seq_len);
+        const int group_reuse_blocks_len =
             reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, group.tag) : 0;
         const auto need = groupStrategy(group.tag)->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
@@ -793,17 +792,17 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
             before_failed_tag = false;
         }
         // Diagnostic-only positional column in the failure log; never an identity.
-        const int    group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, planning_raw_seq_len);
+        const int group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, planning_raw_seq_len);
 
         int    need_blocks          = 0;
         int    need_slots           = 0;
         size_t current_slots        = 0;
         size_t current_valid_blocks = 0;
         for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-            const auto& blocks = resource->blocks(batch_id, tag);
+            const auto blocks = resource->blockBinding(batch_id, tag).snapshot();
             current_slots += blocks.size();
-            current_valid_blocks += static_cast<size_t>(std::count_if(
-                blocks.begin(), blocks.end(), [](auto block) { return !isNullBlockIdx(block) && block > 0; }));
+            current_valid_blocks += static_cast<size_t>(
+                std::count_if(blocks.begin(), blocks.end(), [](const auto& block) { return block.has_value(); }));
             need_slots +=
                 groupStrategy(tag)->needBlocksNum(group_seq_len, static_cast<int>(blocks.size()), reserve_step);
         }

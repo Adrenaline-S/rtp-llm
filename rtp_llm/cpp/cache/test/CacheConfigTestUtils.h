@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <ostream>
 #include <set>
 #include <sstream>
@@ -22,22 +23,49 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
-namespace rtp_llm::test {
+namespace rtp_llm {
+
+inline GroupBlockToPoolBlockBinding::Snapshot poolBlockSnapshotForTest(const BlockIndicesType& encoded) {
+    GroupBlockToPoolBlockBinding::Snapshot snapshot;
+    snapshot.reserve(encoded.size());
+    for (const auto block_idx : encoded) {
+        RTP_LLM_CHECK_WITH_INFO(block_idx >= 0 || isNullBlockIdx(block_idx),
+                                "test pool block id must be nonnegative or missing, got %d",
+                                block_idx);
+        snapshot.push_back(isNullBlockIdx(block_idx) ? std::nullopt :
+                                                       std::optional<PoolBlockId>{PoolBlockId{block_idx}});
+    }
+    return snapshot;
+}
+
+inline BlockIndicesType encodedPoolBlocksForTest(const GroupBlockToPoolBlockBinding& binding) {
+    BlockIndicesType encoded;
+    encoded.reserve(binding.size());
+    for (const auto& pool_block_id : binding.snapshot()) {
+        encoded.push_back(pool_block_id.has_value() ? pool_block_id->value : NULL_BLOCK_IDX);
+    }
+    return encoded;
+}
+
+namespace test {
+
+using ::rtp_llm::encodedPoolBlocksForTest;
+using ::rtp_llm::poolBlockSnapshotForTest;
 
 struct CacheSpecSemanticSnapshot {
-    DataType   dtype = DataType::TYPE_INVALID;
-    size_t     block_elems = 0;
-    size_t     k_block_elems = 0;
-    size_t     v_block_elems = 0;
-    size_t     block_bytes = 0;
-    size_t     k_block_bytes = 0;
-    size_t     v_block_bytes = 0;
-    size_t     block_payload_bytes = 0;
-    size_t     k_block_payload_bytes = 0;
-    size_t     v_block_payload_bytes = 0;
-    size_t     scale_block_bytes = 0;
-    size_t     k_scale_block_bytes = 0;
-    size_t     v_scale_block_bytes = 0;
+    DataType    dtype                 = DataType::TYPE_INVALID;
+    size_t      block_elems           = 0;
+    size_t      k_block_elems         = 0;
+    size_t      v_block_elems         = 0;
+    size_t      block_bytes           = 0;
+    size_t      k_block_bytes         = 0;
+    size_t      v_block_bytes         = 0;
+    size_t      block_payload_bytes   = 0;
+    size_t      k_block_payload_bytes = 0;
+    size_t      v_block_payload_bytes = 0;
+    size_t      scale_block_bytes     = 0;
+    size_t      k_scale_block_bytes   = 0;
+    size_t      v_scale_block_bytes   = 0;
     std::string fingerprint;
 
     bool operator==(const CacheSpecSemanticSnapshot& other) const {
@@ -46,10 +74,9 @@ struct CacheSpecSemanticSnapshot {
                && k_block_bytes == other.k_block_bytes && v_block_bytes == other.v_block_bytes
                && block_payload_bytes == other.block_payload_bytes
                && k_block_payload_bytes == other.k_block_payload_bytes
-               && v_block_payload_bytes == other.v_block_payload_bytes
-               && scale_block_bytes == other.scale_block_bytes
-               && k_scale_block_bytes == other.k_scale_block_bytes
-               && v_scale_block_bytes == other.v_scale_block_bytes && fingerprint == other.fingerprint;
+               && v_block_payload_bytes == other.v_block_payload_bytes && scale_block_bytes == other.scale_block_bytes
+               && k_scale_block_bytes == other.k_scale_block_bytes && v_scale_block_bytes == other.v_scale_block_bytes
+               && fingerprint == other.fingerprint;
     }
 };
 
@@ -57,8 +84,7 @@ inline void PrintTo(const CacheSpecSemanticSnapshot& snapshot, std::ostream* os)
     *os << "{dtype=" << static_cast<int>(snapshot.dtype) << ", block_elems=" << snapshot.block_elems
         << ", k_block_elems=" << snapshot.k_block_elems << ", v_block_elems=" << snapshot.v_block_elems
         << ", block_bytes=" << snapshot.block_bytes << ", k_block_bytes=" << snapshot.k_block_bytes
-        << ", v_block_bytes=" << snapshot.v_block_bytes
-        << ", block_payload_bytes=" << snapshot.block_payload_bytes
+        << ", v_block_bytes=" << snapshot.v_block_bytes << ", block_payload_bytes=" << snapshot.block_payload_bytes
         << ", k_block_payload_bytes=" << snapshot.k_block_payload_bytes
         << ", v_block_payload_bytes=" << snapshot.v_block_payload_bytes
         << ", scale_block_bytes=" << snapshot.scale_block_bytes
@@ -67,20 +93,20 @@ inline void PrintTo(const CacheSpecSemanticSnapshot& snapshot, std::ostream* os)
 }
 
 inline CacheSpecSemanticSnapshot makeExpectedSpecSemanticSnapshot(KVCacheSpecType type,
-                                                                   DataType        dtype,
-                                                                   size_t          seq_size_per_block,
-                                                                   size_t          block_elems,
-                                                                   size_t          k_block_elems,
-                                                                   size_t          v_block_elems,
-                                                                   size_t          block_bytes,
-                                                                   size_t          k_block_bytes,
-                                                                   size_t          v_block_bytes,
-                                                                   size_t          block_payload_bytes,
-                                                                   size_t          k_block_payload_bytes,
-                                                                   size_t          v_block_payload_bytes,
-                                                                   size_t          scale_block_bytes,
-                                                                   size_t          k_scale_block_bytes,
-                                                                   size_t          v_scale_block_bytes) {
+                                                                  DataType        dtype,
+                                                                  size_t          seq_size_per_block,
+                                                                  size_t          block_elems,
+                                                                  size_t          k_block_elems,
+                                                                  size_t          v_block_elems,
+                                                                  size_t          block_bytes,
+                                                                  size_t          k_block_bytes,
+                                                                  size_t          v_block_bytes,
+                                                                  size_t          block_payload_bytes,
+                                                                  size_t          k_block_payload_bytes,
+                                                                  size_t          v_block_payload_bytes,
+                                                                  size_t          scale_block_bytes,
+                                                                  size_t          k_scale_block_bytes,
+                                                                  size_t          v_scale_block_bytes) {
     std::ostringstream fingerprint;
     fingerprint << "type=" << static_cast<int>(type) << ";dtype=" << static_cast<int>(dtype)
                 << ";seq_size_per_block=" << seq_size_per_block << ";block_elems=" << block_elems
@@ -89,8 +115,7 @@ inline CacheSpecSemanticSnapshot makeExpectedSpecSemanticSnapshot(KVCacheSpecTyp
                 << ";v_block_bytes=" << v_block_bytes << ";block_payload_bytes=" << block_payload_bytes
                 << ";k_block_payload_bytes=" << k_block_payload_bytes
                 << ";v_block_payload_bytes=" << v_block_payload_bytes << ";scale_block_bytes=" << scale_block_bytes
-                << ";k_scale_block_bytes=" << k_scale_block_bytes
-                << ";v_scale_block_bytes=" << v_scale_block_bytes;
+                << ";k_scale_block_bytes=" << k_scale_block_bytes << ";v_scale_block_bytes=" << v_scale_block_bytes;
     return {dtype,
             block_elems,
             k_block_elems,
@@ -108,25 +133,25 @@ inline CacheSpecSemanticSnapshot makeExpectedSpecSemanticSnapshot(KVCacheSpecTyp
 }
 
 struct CacheGroupSemanticSnapshot {
-    std::string        tag;
-    KVCacheSpecType    spec_type;
-    CacheGroupType     group_type;
-    bool               enable_prefix_reuse;
-    CacheEvictPolicy   evict_policy;
-    bool               reservable;
-    uint32_t           explicit_block_num;
-    uint32_t           active_tail_blocks;
-    bool               validate_tail_blocks;
-    CpBlockMappingMode cp_mapping;
-    CpBlockSliceMode   cp_slice;
-    std::vector<int>   layer_ids;
-    uint32_t           block_num;
-    size_t             physical_tokens_per_block;
-    size_t             kernel_tokens_per_block;
-    size_t             block_bytes;
-    size_t             kv_block_stride_bytes;
-    size_t             kv_scale_stride_bytes;
-    uint32_t           local_kv_head_num;
+    std::string               tag;
+    KVCacheSpecType           spec_type;
+    CacheGroupType            group_type;
+    bool                      enable_prefix_reuse;
+    CacheEvictPolicy          evict_policy;
+    bool                      reservable;
+    uint32_t                  explicit_block_num;
+    uint32_t                  active_tail_blocks;
+    bool                      validate_tail_blocks;
+    CpBlockMappingMode        cp_mapping;
+    CpBlockSliceMode          cp_slice;
+    std::vector<int>          layer_ids;
+    uint32_t                  block_num;
+    size_t                    physical_tokens_per_block;
+    size_t                    kernel_tokens_per_block;
+    size_t                    block_bytes;
+    size_t                    kv_block_stride_bytes;
+    size_t                    kv_scale_stride_bytes;
+    uint32_t                  local_kv_head_num;
     CacheSpecSemanticSnapshot spec;
 
     bool operator==(const CacheGroupSemanticSnapshot& other) const {
@@ -138,8 +163,8 @@ struct CacheGroupSemanticSnapshot {
                && block_num == other.block_num && physical_tokens_per_block == other.physical_tokens_per_block
                && kernel_tokens_per_block == other.kernel_tokens_per_block && block_bytes == other.block_bytes
                && kv_block_stride_bytes == other.kv_block_stride_bytes
-               && kv_scale_stride_bytes == other.kv_scale_stride_bytes
-               && local_kv_head_num == other.local_kv_head_num && spec == other.spec;
+               && kv_scale_stride_bytes == other.kv_scale_stride_bytes && local_kv_head_num == other.local_kv_head_num
+               && spec == other.spec;
     }
 };
 
@@ -156,8 +181,7 @@ inline void PrintTo(const CacheGroupSemanticSnapshot& snapshot, std::ostream* os
     for (size_t i = 0; i < snapshot.layer_ids.size(); ++i) {
         *os << (i == 0 ? "" : ",") << snapshot.layer_ids[i];
     }
-    *os << "}, block_num=" << snapshot.block_num
-        << ", physical_tokens_per_block=" << snapshot.physical_tokens_per_block
+    *os << "}, block_num=" << snapshot.block_num << ", physical_tokens_per_block=" << snapshot.physical_tokens_per_block
         << ", kernel_tokens_per_block=" << snapshot.kernel_tokens_per_block << ", block_bytes=" << snapshot.block_bytes
         << ", kv_block_stride_bytes=" << snapshot.kv_block_stride_bytes
         << ", kv_scale_stride_bytes=" << snapshot.kv_scale_stride_bytes
@@ -190,7 +214,7 @@ public:
     }
 
     CacheConfig build() const {
-        CacheConfig config = base_;
+        CacheConfig config   = base_;
         config.layer_num     = static_cast<uint32_t>(layers_.size());
         config.layer_all_num = config.layer_num;
         if (config.block_num == 0 && !groups_.empty()) {
@@ -219,7 +243,7 @@ public:
         return config;
     }
 
-    static void setGroupBlockLayout(CacheConfig&                  config,
+    static void setGroupBlockLayout(CacheConfig&                 config,
                                     const std::vector<uint32_t>& block_nums,
                                     const std::vector<size_t>&   kv_strides,
                                     const std::vector<size_t>&   scale_strides) {
@@ -230,27 +254,25 @@ public:
         config.setGroupPolicies(policies);
     }
 
-    static void fromGroupedSpecs(CacheConfig&                           config,
-                                 const std::vector<KVCacheSpecPtr>&      specs,
-                                 const std::vector<std::vector<int>>&    layers_by_group,
-                                 const std::vector<CacheGroupType>&      types,
-                                 const std::vector<std::string>&         tags     = {},
-                                 const std::vector<CacheGroupPolicy>&    policies = {}) {
+    static void fromGroupedSpecs(CacheConfig&                         config,
+                                 const std::vector<KVCacheSpecPtr>&   specs,
+                                 const std::vector<std::vector<int>>& layers_by_group,
+                                 const std::vector<CacheGroupType>&   types,
+                                 const std::vector<std::string>&      tags     = {},
+                                 const std::vector<CacheGroupPolicy>& policies = {}) {
         config.fromGroupedSpecs(specs, layers_by_group, types, tags, policies);
     }
 
-    static CacheConfig withResolvedData(CacheConfig                        config,
-                                        std::vector<CacheGroup>             groups,
-                                        std::vector<CacheLayerMembership>   layers) {
+    static CacheConfig
+    withResolvedData(CacheConfig config, std::vector<CacheGroup> groups, std::vector<CacheLayerMembership> layers) {
         config.layer_num     = static_cast<uint32_t>(layers.size());
         config.layer_all_num = config.layer_num;
         config.setResolvedData({std::move(groups), std::move(layers)});
         return config;
     }
 
-    static void setResolvedData(CacheConfig&                      config,
-                                std::vector<CacheGroup>           groups,
-                                std::vector<CacheLayerMembership> layers) {
+    static void
+    setResolvedData(CacheConfig& config, std::vector<CacheGroup> groups, std::vector<CacheLayerMembership> layers) {
         config.setResolvedData({std::move(groups), std::move(layers)});
     }
 
@@ -300,8 +322,9 @@ inline CacheSemanticSnapshot snapshotCacheConfig(const CacheConfig& config) {
     const auto&           groups = config.groups();
     snapshot.reserve(groups.size());
     for (const auto& group : groups) {
-        RTP_LLM_CHECK_WITH_INFO(
-            group.layout.spec != nullptr, "cache semantic snapshot requires group %s to have a spec", group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group.layout.spec != nullptr,
+                                "cache semantic snapshot requires group %s to have a spec",
+                                group.tag.c_str());
         const auto& policy = group.policy;
         snapshot.push_back({group.tag,
                             group.layout.spec->type,
@@ -387,8 +410,8 @@ inline std::shared_ptr<MHAKVCacheSpec> makeResolvedMhaSpec(rtp_llm::DataType  dt
 inline CacheConfig makeTestCacheConfigByTag(int                                          group_num,
                                             int                                          layer_num,
                                             const std::vector<std::vector<std::string>>& layer_group_tags,
-                                            size_t kernel_blocks_per_kv_block = 1,
-                                            const std::vector<CacheGroupType>& group_types = {}) {
+                                            size_t                                       kernel_blocks_per_kv_block = 1,
+                                            const std::vector<CacheGroupType>&           group_types = {}) {
     RTP_LLM_CHECK_WITH_INFO(group_num > 0, "test topology requires at least one group");
     RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "test topology requires at least one layer");
     RTP_LLM_CHECK_WITH_INFO(layer_group_tags.size() == static_cast<size_t>(layer_num),
@@ -423,7 +446,7 @@ inline CacheConfig makeTestCacheConfigByTag(int                                 
         layers.push_back(std::move(layer));
     }
 
-    const size_t           blocks_per_kv_block = std::max<size_t>(1, kernel_blocks_per_kv_block);
+    const size_t            blocks_per_kv_block = std::max<size_t>(1, kernel_blocks_per_kv_block);
     std::vector<CacheGroup> groups;
     groups.reserve(tags.size());
     for (size_t i = 0; i < tags.size(); ++i) {
@@ -431,14 +454,13 @@ inline CacheConfig makeTestCacheConfigByTag(int                                 
         auto        spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag);
 
         CacheGroup group;
-        group.tag                                = tag;
-        group.layout.spec                        = std::move(spec);
-        group.policy                             = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL :
-                                                                                                 group_types[i]);
-        group.layer_ids                          = group_layer_ids[tag];
-        group.layout.block_num                   = 16;
-        group.layout.seq_size_per_block          = blocks_per_kv_block;
-        group.layout.kernel_seq_size_per_block   = 1;
+        group.tag              = tag;
+        group.layout.spec      = std::move(spec);
+        group.policy           = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL : group_types[i]);
+        group.layer_ids        = group_layer_ids[tag];
+        group.layout.block_num = 16;
+        group.layout.seq_size_per_block        = blocks_per_kv_block;
+        group.layout.kernel_seq_size_per_block = 1;
         groups.push_back(std::move(group));
     }
     TestCacheConfigBuilder builder;
@@ -556,10 +578,10 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
     desc.entry_elems = entry_elems;
     desc.entry_dtype = dtype;
     if (kind == "compressed_kv") {
-        desc.cache_type        = KVCacheSpecType::OpaqueKV;
-        desc.is_state_cache    = false;
-        desc.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
-        desc.compression_ratio = compression_ratio;
+        desc.cache_type                        = KVCacheSpecType::OpaqueKV;
+        desc.is_state_cache                    = false;
+        desc.entry_count_mode                  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+        desc.compression_ratio                 = compression_ratio;
         desc.kernel_tokens_per_block_alignment = 128;
         if (desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
@@ -772,17 +794,16 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
     return SpecBuilder::build(desc, ctx).spec;
 }
 
-inline CacheConfig buildTestCacheConfigFromGroupedSpecs(
-    CacheConfig                              base,
-    const std::vector<KVCacheSpecPtr>&        specs,
-    const std::vector<std::vector<int>>&      layers_by_group,
-    const std::vector<CacheGroupType>&        types,
-    const std::vector<std::string>&           tags,
-    const std::vector<CacheGroupPolicy>&      policies = {}) {
+inline CacheConfig buildTestCacheConfigFromGroupedSpecs(CacheConfig                          base,
+                                                        const std::vector<KVCacheSpecPtr>&   specs,
+                                                        const std::vector<std::vector<int>>& layers_by_group,
+                                                        const std::vector<CacheGroupType>&   types,
+                                                        const std::vector<std::string>&      tags,
+                                                        const std::vector<CacheGroupPolicy>& policies = {}) {
     RTP_LLM_CHECK_WITH_INFO(specs.size() == layers_by_group.size() && specs.size() == types.size()
                                 && specs.size() == tags.size(),
                             "test grouped cache config inputs must have equal sizes");
-    const size_t layer_num = base.layer_num;
+    const size_t           layer_num = base.layer_num;
     TestCacheConfigBuilder builder;
     builder.configure(std::move(base));
     std::vector<std::vector<std::string>> layer_tags(layer_num);
@@ -819,8 +840,8 @@ inline CacheConfig makeSingleGroupCacheConfig(
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    config = buildTestCacheConfigFromGroupedSpecs(
-        std::move(config), {spec}, {layer_ids}, {group_type}, {std::move(tag)});
+    config =
+        buildTestCacheConfigFromGroupedSpecs(std::move(config), {spec}, {layer_ids}, {group_type}, {std::move(tag)});
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
     config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
@@ -930,4 +951,5 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     return config;
 }
 
-}  // namespace rtp_llm::test
+}  // namespace test
+}  // namespace rtp_llm

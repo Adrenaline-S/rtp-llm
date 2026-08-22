@@ -87,7 +87,7 @@ private:
         BlockIdxType pool_block_id{NULL_BLOCK_IDX};
     };
     using LayerTagBlocks          = std::vector<LayerTagBlock>;
-    using LayerTagPoolBlockTables = std::vector<std::unordered_map<std::string, const BlockIds*>>;
+    using LayerTagPoolBlockTables = std::vector<std::unordered_map<std::string, const GroupBlockToPoolBlockBinding*>>;
     struct CopyInfoPerKey {
         CacheKeyType         cache_key{0};
         CacheBlockKind       kind{CacheBlockKind::COMPLETE};

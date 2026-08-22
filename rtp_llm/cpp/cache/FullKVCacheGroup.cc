@@ -43,16 +43,16 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
-                              int                  seq_len,
-                              bool                 enable_reuse_cache,
-                              int                  reserve_step,
-                              std::vector<size_t>* backfilled_positions) {
+bool FullKVCacheGroup::malloc(GroupBlockToPoolBlockBinding& binding,
+                              int                           seq_len,
+                              bool                          enable_reuse_cache,
+                              int                           reserve_step,
+                              std::vector<size_t>*          backfilled_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
     (void)enable_reuse_cache;
-    int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_ids.blocksNum()), reserve_step);
+    int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(binding.size()), reserve_step);
     if (need_blocks_num == 0) {
         return true;
     }
@@ -69,7 +69,9 @@ bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
     if (result.empty()) {
         return false;
     }
-    block_ids.add(result);
+    for (const auto block_idx : result) {
+        binding.append(PoolBlockId{block_idx});
+    }
     return true;
 }
 
@@ -109,12 +111,16 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
-void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
-    block_ids.add(new_block_indices);
+void FullKVCacheGroup::reference(GroupBlockToPoolBlockBinding& binding, const BlockIndicesType& new_block_indices) {
+    for (const auto block_idx : new_block_indices) {
+        RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(block_idx), "FULL reference cannot append a missing pool block");
+        binding.append(PoolBlockId{block_idx});
+    }
     block_pool_->requestReference(new_block_indices);
 }
 
-void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
-}
+void FullKVCacheGroup::removeSkippedBlocks(GroupBlockToPoolBlockBinding& /*binding*/,
+                                           bool /*enable_reuse_cache*/,
+                                           int /*reserve_step*/) {}
 
 }  // namespace rtp_llm

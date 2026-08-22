@@ -42,7 +42,7 @@ KVCacheSpecPtr makeTestMhaSpec(const std::string& tag, uint32_t seq_size_per_blo
 
 void initializeResourceTopology(KVCacheResource& resource, const CacheConfig& config, BlockIndicesType blocks) {
     resource.initGroups(config);
-    resource.mutableBlockIds("default").assign(std::move(blocks));
+    resource.mutableBlockBinding("default").assign(poolBlockSnapshotForTest(blocks));
 }
 
 }  // namespace
@@ -152,10 +152,10 @@ private:
 TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAndBuildsFullPolicy) {
     CacheConfig hybrid_config                 = cache_config_;
     hybrid_config.use_independent_block_pools = true;
-    const auto hybrid_block_num = hybrid_config.block_num;
-    const auto hybrid_kv_stride = hybrid_config.group("default").layout.spec->block_size_bytes();
-    const auto hybrid_scale_stride = hybrid_config.group("default").layout.spec->scale_block_size_bytes();
-    hybrid_config = TestCacheConfigBuilder::withGroupBlockLayout(
+    const auto hybrid_block_num               = hybrid_config.block_num;
+    const auto hybrid_kv_stride               = hybrid_config.group("default").layout.spec->block_size_bytes();
+    const auto hybrid_scale_stride            = hybrid_config.group("default").layout.spec->scale_block_size_bytes();
+    hybrid_config                             = TestCacheConfigBuilder::withGroupBlockLayout(
         std::move(hybrid_config), {hybrid_block_num}, {hybrid_kv_stride}, {hybrid_scale_stride});
 
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(hybrid_config, AllocationType::DEVICE);

@@ -43,21 +43,25 @@ public:
         }
     };
 
+    struct SharedGroupBinding {
+        PoolBlockId pool_block_id;
+        bool        matchable{true};
+        int64_t     created_time_us{0};
+    };
+
     struct UnifiedCacheItem {
-        CacheKeyType              cache_key;
-        bool                      is_resident = false;
-        std::map<std::string, BlockIdxType> group_block_ids;
-        std::map<std::string, bool>         group_matchable;
-        std::map<std::string, int64_t>      group_block_created_time_us;
-        int64_t                   created_time_us = 0;
-        BlockDependency           dependency;
-        NamespaceId               dependency_namespace = kDefaultNamespace;
-        bool                      has_dependency       = false;
+        CacheKeyType                              cache_key;
+        bool                                      is_resident = false;
+        std::map<std::string, SharedGroupBinding> group_bindings;
+        int64_t                                   created_time_us = 0;
+        BlockDependency                           dependency;
+        NamespaceId                               dependency_namespace = kDefaultNamespace;
+        bool                                      has_dependency       = false;
     };
 
     struct EvictResult {
-        std::vector<CacheKeyType>                                                  evicted_keys;
-        std::unordered_map<CacheKeyType, std::map<std::string, BlockIdxType>>      evicted_groups;
+        std::vector<CacheKeyType>                                             evicted_keys;
+        std::unordered_map<CacheKeyType, std::map<std::string, BlockIdxType>> evicted_groups;
         std::unordered_map<CacheKeyType, BlockDependency>                     evicted_dependencies;
         std::unordered_map<CacheKeyType, NamespaceId>                         evicted_namespaces;
         std::unordered_map<CacheKeyType, int64_t>                             evicted_lifetime_ms;
@@ -65,9 +69,9 @@ public:
     };
 
     struct MatchResult {
-        bool                                    found = false;
-        std::map<std::string, BlockIdxType>     group_block_ids;
-        std::map<std::string, bool>             group_matchable;
+        bool                                found = false;
+        std::map<std::string, BlockIdxType> group_block_ids;
+        std::map<std::string, bool>         group_matchable;
     };
 
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
@@ -78,12 +82,12 @@ public:
     void init(const CacheConfig& config, const std::map<std::string, BlockPoolPtr>& group_pools);
 
     void put(CacheKeyType cache_key, const std::map<std::string, BlockIdxType>& group_block_ids, bool is_resident);
-    void put(CacheKeyType                                  cache_key,
-             const std::map<std::string, BlockIdxType>&     group_block_ids,
-             const std::map<std::string, bool>&             group_matchable,
-             bool                                          is_resident,
-             NamespaceId                                   namespace_id,
-             const BlockDependency&                        dependency);
+    void put(CacheKeyType                               cache_key,
+             const std::map<std::string, BlockIdxType>& group_block_ids,
+             const std::map<std::string, bool>&         group_matchable,
+             bool                                       is_resident,
+             NamespaceId                                namespace_id,
+             const BlockDependency&                     dependency);
 
     MatchResult match(CacheKeyType cache_key);
 
@@ -143,29 +147,31 @@ private:
         }
     };
 
-    void                      upsertTreeNodeLocked(CacheKeyType           cache_key,
-                                                   NamespaceId            namespace_id,
-                                                   const BlockDependency& dependency,
-                                                   bool                   is_resident);
-    void                      detachPendingChildLocked(const NamespacedKey& parent, const NamespacedKey& child);
-    void                      attachPendingChildrenLocked(PrefixTreeNode& node);
-    void                      touchTreeAliasesLocked(CacheKeyType cache_key);
-    void                      touchTreeNodeLocked(PrefixTreeNode& node);
-    void                      eraseLeafLocked(const PrefixTreeNode& node);
-    void                      insertLeafIfEligibleLocked(const PrefixTreeNode& node);
-    void                      refreshLeafLocked(const NamespacedKey& key);
-    void                      removeTreeAliasLocked(const NamespacedKey& key);
-    void                      removeAllTreeAliasesForCacheKeyLocked(CacheKeyType cache_key);
-    void                      markAllTreeAliasesResidentLocked(CacheKeyType cache_key);
-    void                      refreshAllTreeAliasesLocked(CacheKeyType cache_key);
-    bool                      flatItemHasCanonicalDependencyLocked(CacheKeyType cache_key) const;
-    bool                      updateItemDependencyLocked(UnifiedCacheItem&      item,
-                                                         NamespaceId            namespace_id,
-                                                         const BlockDependency& dependency) const;
-    void                      validateTagLocked(std::string_view tag) const;
-    static bool               groupMatchable(const UnifiedCacheItem& item, std::string_view tag);
-    static bool               hasUsableGroup(const UnifiedCacheItem& item, std::string_view tag);
-    std::vector<NamespacedKey>          collectEvictChainLocked(const NamespacedKey& leaf_key) const;
+    void        upsertTreeNodeLocked(CacheKeyType           cache_key,
+                                     NamespaceId            namespace_id,
+                                     const BlockDependency& dependency,
+                                     bool                   is_resident);
+    void        detachPendingChildLocked(const NamespacedKey& parent, const NamespacedKey& child);
+    void        attachPendingChildrenLocked(PrefixTreeNode& node);
+    void        touchTreeAliasesLocked(CacheKeyType cache_key);
+    void        touchTreeNodeLocked(PrefixTreeNode& node);
+    void        eraseLeafLocked(const PrefixTreeNode& node);
+    void        insertLeafIfEligibleLocked(const PrefixTreeNode& node);
+    void        refreshLeafLocked(const NamespacedKey& key);
+    void        removeTreeAliasLocked(const NamespacedKey& key);
+    void        removeAllTreeAliasesForCacheKeyLocked(CacheKeyType cache_key);
+    void        markAllTreeAliasesResidentLocked(CacheKeyType cache_key);
+    void        refreshAllTreeAliasesLocked(CacheKeyType cache_key);
+    bool        flatItemHasCanonicalDependencyLocked(CacheKeyType cache_key) const;
+    bool        updateItemDependencyLocked(UnifiedCacheItem&      item,
+                                           NamespaceId            namespace_id,
+                                           const BlockDependency& dependency) const;
+    void        validateTagLocked(std::string_view tag) const;
+    static bool groupMatchable(const UnifiedCacheItem& item, std::string_view tag);
+    static bool hasUsableGroup(const UnifiedCacheItem& item, std::string_view tag);
+    static std::map<std::string, BlockIdxType> blockIds(const UnifiedCacheItem& item);
+    static std::map<std::string, bool>         matchableGroups(const UnifiedCacheItem& item);
+    std::vector<NamespacedKey>                 collectEvictChainLocked(const NamespacedKey& leaf_key) const;
     bool chainHasUsableGroupLocked(const std::vector<NamespacedKey>& chain, std::string_view tag) const;
     bool chainHasReachableAncestorGroupLocked(const std::vector<NamespacedKey>& chain, std::string_view tag) const;
     bool subtreeEvictableForAncestorGroupLocked(const NamespacedKey& key) const;
@@ -183,12 +189,12 @@ private:
     uint64_t           tree_access_seq_{0};
 
     std::map<std::string, BlockPoolPtr>                                                    group_pools_;
-    std::vector<std::string>                                                              group_tags_in_order_;
+    std::vector<std::string>                                                               group_tags_in_order_;
     std::unordered_map<NamespacedKey, PrefixTreeNode, NamespacedKeyHash>                   tree_nodes_;
     std::unordered_map<CacheKeyType, std::unordered_set<NamespacedKey, NamespacedKeyHash>> aliases_by_cache_key_;
     std::unordered_map<NamespacedKey, std::unordered_set<NamespacedKey, NamespacedKeyHash>, NamespacedKeyHash>
-                            pending_children_by_parent_;
-    std::set<LeafKey>       leaf_lru_;
+                                    pending_children_by_parent_;
+    std::set<LeafKey>               leaf_lru_;
     std::unordered_set<std::string> independent_eviction_group_tags_;
 };
 

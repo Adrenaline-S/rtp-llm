@@ -29,6 +29,15 @@ cc_library(
 )
 
 cc_library(
+    name = "block_expression",
+    srcs = ["BlockExpression.cc"],
+    hdrs = ["BlockExpression.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+)
+
+cc_library(
     name = "block_info",
     hdrs = [
         "BlockInfo.h",
@@ -283,6 +292,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_expression",
         ":cache_config",
         ":cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",

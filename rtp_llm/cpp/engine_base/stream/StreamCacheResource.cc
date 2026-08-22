@@ -27,12 +27,12 @@ const CacheConfig& warmupCacheConfig() {
         auto           spec            = std::make_shared<MHAKVCacheSpec>();
 
         CacheGroup group;
-        group.tag                                = kWarmupCacheTag;
-        group.layout.spec                        = std::move(spec);
-        group.policy                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                          = {0};
-        group.layout.seq_size_per_block          = 1;
-        group.layout.kernel_seq_size_per_block   = 1;
+        group.tag                              = kWarmupCacheTag;
+        group.layout.spec                      = std::move(spec);
+        group.policy                           = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.layer_ids                        = {0};
+        group.layout.seq_size_per_block        = 1;
+        group.layout.kernel_seq_size_per_block = 1;
         return CacheConfigCreator::buildResolvedConfig({{std::move(group)}, {{0, {kWarmupCacheTag}}}});
     }();
     return config;
@@ -410,8 +410,8 @@ void StreamCacheResource::publishCache() {
                 }
                 if (tiered_store_resource_) {
                     if (!context) {
-                        RTP_LLM_LOG_WARNING(
-                            "publishCache tiered memory submission returned null, stream=%ld", stream_->streamId());
+                        RTP_LLM_LOG_WARNING("publishCache tiered memory submission returned null, stream=%ld",
+                                            stream_->streamId());
                         return;
                     }
                     tiered_store_context_ = std::move(context);
@@ -434,8 +434,8 @@ void StreamCacheResource::publishCache() {
                     if (!context) {
                         memory_cache_published_ = true;
                     } else {
-                        RTP_LLM_LOG_WARNING(
-                            "publishCache tiered memory missing evicted resource, stream=%ld", stream_->streamId());
+                        RTP_LLM_LOG_WARNING("publishCache tiered memory missing evicted resource, stream=%ld",
+                                            stream_->streamId());
                     }
                 }
             }
@@ -443,8 +443,8 @@ void StreamCacheResource::publishCache() {
             RTP_LLM_LOG_WARNING(
                 "publishCache tiered memory eviction failed, stream=%ld, error=%s", stream_->streamId(), e.what());
         } catch (...) {
-            RTP_LLM_LOG_WARNING(
-                "publishCache tiered memory eviction failed, stream=%ld, unknown error", stream_->streamId());
+            RTP_LLM_LOG_WARNING("publishCache tiered memory eviction failed, stream=%ld, unknown error",
+                                stream_->streamId());
         }
     }
 }
@@ -484,8 +484,8 @@ void StreamCacheResource::publishConnectorCache() {
             store_context_memory_ = false;
             store_context_remote_ = false;
         } catch (...) {
-            RTP_LLM_LOG_WARNING(
-                "publishCache connector completion failed, stream=%ld, unknown error", stream_->streamId());
+            RTP_LLM_LOG_WARNING("publishCache connector completion failed, stream=%ld, unknown error",
+                                stream_->streamId());
             store_cache_context_.reset();
             store_context_memory_ = false;
             store_context_remote_ = false;
@@ -504,7 +504,7 @@ void StreamCacheResource::publishConnectorCache() {
             RTP_LLM_LOG_WARNING("publishCache connector submission returned null, stream=%ld", stream_->streamId());
             return;
         }
-        store_cache_context_ = std::move(context);
+        store_cache_context_  = std::move(context);
         store_context_memory_ = publish_memory;
         store_context_remote_ = publish_remote;
 
@@ -533,8 +533,7 @@ void StreamCacheResource::publishConnectorCache() {
         store_context_memory_ = false;
         store_context_remote_ = false;
     } catch (...) {
-        RTP_LLM_LOG_WARNING(
-            "publishCache connector submission failed, stream=%ld, unknown error", stream_->streamId());
+        RTP_LLM_LOG_WARNING("publishCache connector submission failed, stream=%ld, unknown error", stream_->streamId());
         store_cache_context_.reset();
         store_context_memory_ = false;
         store_context_remote_ = false;
@@ -789,7 +788,7 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     batch_kv_cache_resource_->initGroups(config);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
-    batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
+    batch_kv_cache_resource_->resizeBlocks(reserved_blocks, PoolBlockId{0});
 }
 
 int StreamCacheResource::mallocFailedTimes() const {
@@ -913,8 +912,8 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     return store_context;
 }
 
-bool StreamCacheResource::evictDeviceCacheToMemory(std::shared_ptr<AsyncContext>&        store_context,
-                                                   BatchKVCacheResourcePtr& evicted_resource) {
+bool StreamCacheResource::evictDeviceCacheToMemory(std::shared_ptr<AsyncContext>& store_context,
+                                                   BatchKVCacheResourcePtr&       evicted_resource) {
     const auto min_free_blocks = resource_context_.device_cache_min_free_blocks;
     if (!reuseCache() || !enableMemoryCache() || min_free_blocks <= 0) {
         return true;
@@ -929,8 +928,8 @@ bool StreamCacheResource::evictDeviceCacheToMemory(std::shared_ptr<AsyncContext>
         return true;
     }
 
-    const auto need_blocks      = static_cast<size_t>(min_free_blocks) - not_in_use_blocks;
-    evicted_resource = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
+    const auto need_blocks = static_cast<size_t>(min_free_blocks) - not_in_use_blocks;
+    evicted_resource       = resource_context_.cache_manager->popBlocksFromCache(need_blocks);
     if (!evicted_resource || !evicted_resource->hasCacheKeys()) {
         RTP_LLM_LOG_INFO(
             "tiered memory cache skip eviction, stream[%s], not_in_use_blocks=%zu, min_free_blocks=%ld, need_blocks=%zu",
@@ -969,13 +968,11 @@ bool StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>
 
     const auto timeout_ms           = resource_context_.cache_manager->memoryCacheSyncTimeoutMs();
     const auto effective_timeout_ms = timeout_ms > 0 ? timeout_ms : 0;
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(effective_timeout_ms);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(effective_timeout_ms);
     while (!store_context->done()) {
         if (std::chrono::steady_clock::now() >= deadline) {
-            RTP_LLM_LOG_WARNING("store cache wait timed out, stream=%ld, timeout_ms=%ld",
-                                stream_->streamId(),
-                                timeout_ms);
+            RTP_LLM_LOG_WARNING(
+                "store cache wait timed out, stream=%ld, timeout_ms=%ld", stream_->streamId(), timeout_ms);
             return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

@@ -107,7 +107,8 @@ createBatchKVCacheResource(int batch_size, const CacheConfig& config, int block_
     for (int i = 0; i < batch_size; ++i) {
         // Every caller builds its config with createSingleTypeTestConfig, whose one
         // cache group is tagged "default". The tag is the group's only identity.
-        resource->setBatchBlocks(i, "default", std::vector<int>(block_num_per_batch));
+        resource->mutableBlockBinding(i, "default")
+            .assign(poolBlockSnapshotForTest(std::vector<int>(block_num_per_batch)));
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
     return resource;
@@ -503,7 +504,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, InsertIntoCacheAsResident) {
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, PrefixReuseDisabledSkipsMatchAndInsert) {
-    auto config   = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
     std::vector<CacheGroupPolicy> policies;
     for (const auto& group : config.groups()) {
         policies.push_back(group.policy);
@@ -622,7 +623,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSlicesDescr
     config.kv_cache_spec_descs[1][0].tag                   = "layer1";
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
-                                                              HybridAttentionType::SLIDING_WINDOW};
+                                                             HybridAttentionType::SLIDING_WINDOW};
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
 
@@ -920,7 +921,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, BlockBatchCopyCopiesCompleteSpa
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
     auto config                = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
-    config = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/4, RuntimeConfig{});
+    config                     = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/4, RuntimeConfig{});
 
     ASSERT_TRUE(config.is_sparse);
     ASSERT_GT(config.kv_scale_stride_bytes, 0u);
@@ -1113,10 +1114,11 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, IncrKVCacheRefReferencesMatched
     };
     resource.setCacheKeysAndBlockDependencies(CacheKeysType{100, 101, 102, 103}, dependencies);
     resource.setCacheKeysAreCpCanonical(true);
-    resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
+    resource.mutableBlockBinding("default").assign(
+        poolBlockSnapshotForTest(BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX, blocks[2]}));
     resource.setDeviceReuseBlockNum(3);
 
-    // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
+    // Reference keys: 101(pos1)->blocks[1], 102(pos2)->missing, 103(pos3)->blocks[2]
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
     ASSERT_NE(ref_resource, nullptr);
     // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
@@ -1153,13 +1155,14 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, IncrKVCacheRefPreservesConnecto
     resource.initGroups(config);
     resource.setCacheKeys(CacheKeysType{101, 103, 999});
     resource.setLastBlockAligned(false);
-    resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1]});
+    resource.mutableBlockBinding("default").assign(poolBlockSnapshotForTest(BlockIndicesType{blocks[0], blocks[1]}));
 
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 103, 999}, /*is_connector=*/true);
     ASSERT_NE(ref_resource, nullptr);
     EXPECT_FALSE(ref_resource->lastBlockAligned());
     EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
-    EXPECT_EQ(ref_resource->blocks("default"), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
+    EXPECT_EQ(encodedPoolBlocksForTest(ref_resource->blockBinding("default")),
+              (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
@@ -1184,7 +1187,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, IncrKVCacheRefEmptyInputNoEffec
     KVCacheResource resource;
     resource.initGroups(config);
     resource.setCacheKeys(CacheKeysType{100, 101});
-    resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1]});
+    resource.mutableBlockBinding("default").assign(poolBlockSnapshotForTest(BlockIndicesType{blocks[0], blocks[1]}));
 
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
     ASSERT_EQ(ref_resource, nullptr);
@@ -1455,8 +1458,8 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, EstimateBatchPeakNeedBlocksAcco
     ASSERT_TRUE(allocator_->init());
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
-    resource->setBatchBlocks(/*batch_id=*/0, "default", {1, 2, 3});
-    resource->setBatchBlocks(/*batch_id=*/1, "default", {1, 2, 4});
+    resource->mutableBlockBinding(/*batch_id=*/0, "default").assign(poolBlockSnapshotForTest({1, 2, 3}));
+    resource->mutableBlockBinding(/*batch_id=*/1, "default").assign(poolBlockSnapshotForTest({1, 2, 4}));
 
     // Two common blocks are shared. Each current batch owns one private tail block.
     EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,

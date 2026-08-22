@@ -23,9 +23,9 @@ protected:
 static const CacheGroup& makeTestFullGroup(KVCacheSpecPtr spec) {
     static std::deque<CacheGroup> groups;
     CacheGroup                    group;
-    group.tag                       = "full";
+    group.tag                              = "full";
     group.layout.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.policy                           = defaultCacheGroupPolicy(CacheGroupType::FULL);
     group.layout.seq_size_per_block        = group.layout.spec->seq_size_per_block;
     group.layout.kernel_seq_size_per_block = group.layout.seq_size_per_block;
     group.layout.kv_block_stride_bytes     = group.layout.spec->block_size_bytes();
@@ -56,7 +56,7 @@ TEST_F(FullKVCacheGroupTest, RetainsCanonicalGroupAndSemanticTag) {
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
-    CacheGroup cache_group    = makeTestFullGroup(spec);
+    CacheGroup cache_group   = makeTestFullGroup(spec);
 
     FullKVCacheGroup group(cache_group, block_pool);
 
@@ -95,11 +95,11 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
 
     FullKVCacheGroup group1(makeTestFullGroup(spec), block_pool);
 
-    BlockIndicesType old_indices = {1, 2, 3, 4};
-    BlockIds         block_ids(/*kernel_blocks_per_kv_block=*/1);
-    block_ids.assign(old_indices);
+    BlockIndicesType             old_indices = {1, 2, 3, 4};
+    GroupBlockToPoolBlockBinding block_ids;
+    block_ids.assign(poolBlockSnapshotForTest(old_indices));
     group1.removeSkippedBlocks(block_ids);
-    ASSERT_EQ(old_indices, block_ids.blocks());
+    ASSERT_EQ(old_indices, encodedPoolBlocksForTest(block_ids));
 }
 
 TEST_F(FullKVCacheGroupTest, MatchTest) {
@@ -109,7 +109,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
-    CacheGroup cache_group    = makeTestFullGroup(spec);
+    CacheGroup cache_group   = makeTestFullGroup(spec);
     cache_group.layer_ids    = {0};
 
     CacheConfig cache_config;
@@ -163,22 +163,22 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 
     FullKVCacheGroup group1(makeTestFullGroup(spec), block_pool);
 
-    CacheKeysType cache_keys = {101, 102, 103};
-    BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
+    CacheKeysType                cache_keys = {101, 102, 103};
+    GroupBlockToPoolBlockBinding block_ids;
 
     ASSERT_TRUE(group1.malloc(block_ids, 7));
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_pool->availableBlocksNum(), 5);
-    ASSERT_EQ(block_ids.blocks().size(), 4);
+    ASSERT_EQ(encodedPoolBlocksForTest(block_ids).size(), 4);
 
     BlockIndicesType expected_result = {1, 2, 3, 4};
-    ASSERT_EQ(block_ids.blocks(), expected_result);
+    ASSERT_EQ(encodedPoolBlocksForTest(block_ids), expected_result);
 
-    group1.free(block_ids.blocks());
+    group1.free(encodedPoolBlocksForTest(block_ids));
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
-    BlockIds block_ids2(/*kernel_blocks_per_kv_block=*/1);
+    GroupBlockToPoolBlockBinding block_ids2;
     ASSERT_FALSE(group1.malloc(block_ids2, 180));
 }
 

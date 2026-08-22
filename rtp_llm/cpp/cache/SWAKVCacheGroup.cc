@@ -37,23 +37,23 @@ int SWAKVCacheGroup::activeTailBlockCount() const {
     return static_cast<int>(std::max(1u, policy().active_tail_blocks));
 }
 
-void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
+void SWAKVCacheGroup::checkSWATailBindings(const GroupBlockToPoolBlockBinding& binding, const char* caller) const {
     if (!shouldCheckSWATailBlockIds()) {
         return;
     }
 
-    const auto& blocks = block_ids.blocks();
+    const auto blocks = binding.snapshot();
     if (blocks.empty()) {
         return;
     }
 
     const size_t block_num = blocks.size();
-    RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(blocks[block_num - 1]),
+    RTP_LLM_CHECK_WITH_INFO(blocks[block_num - 1].has_value(),
                             "%s invalid SWA block ids: tail block is NULL, block_num=%zu",
                             caller,
                             block_num);
     if (activeTailBlockCount() >= 2 && block_num >= 2) {
-        RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(blocks[block_num - 2]),
+        RTP_LLM_CHECK_WITH_INFO(blocks[block_num - 2].has_value(),
                                 "%s invalid SWA block ids: tail-1 block is NULL, block_num=%zu",
                                 caller,
                                 block_num);
@@ -115,8 +115,13 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
     const int total_slots = needBlocksNum(seq_len, 0, reserve_step);
 
     info.common_blocks = 0;
-    for (int i = reuse_blocks_len; i < seq_slots; ++i) {
-        if (shouldAllocateBlock(i, seq_slots, /*reserve_step=*/0, step, effective_reuse_enabled, active_tail_blocks)) {
+    for (int group_block_position = reuse_blocks_len; group_block_position < seq_slots; ++group_block_position) {
+        if (shouldAllocateBlock(group_block_position,
+                                seq_slots,
+                                /*reserve_step=*/0,
+                                step,
+                                effective_reuse_enabled,
+                                active_tail_blocks)) {
             ++info.extra_blocks;
         }
     }
@@ -138,29 +143,31 @@ MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
-bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
-                             int                  seq_len,
-                             bool                 enable_reuse_cache,
-                             int                  reserve_step,
-                             std::vector<size_t>* backfilled_positions) {
+bool SWAKVCacheGroup::malloc(GroupBlockToPoolBlockBinding& binding,
+                             int                           seq_len,
+                             bool                          enable_reuse_cache,
+                             int                           reserve_step,
+                             std::vector<size_t>*          backfilled_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
     const int  active_tail_blocks      = activeTailBlockCount();
-    const int  current_blocks_len      = static_cast<int>(block_ids.blocksNum());
+    const int  current_blocks_len      = static_cast<int>(binding.size());
     const int  seq_slots               = needBlocksNum(seq_len, 0, 0);
     const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (new_blocks_len == 0) {
-        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
+        checkSWATailBindings(binding, "SWAKVCacheGroup::malloc");
         return true;
     }
 
     int need_alloc_blocks = 0;
-    for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        if (shouldAllocateBlock(i, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks)) {
+    for (int group_block_position = current_blocks_len; group_block_position < current_blocks_len + new_blocks_len;
+         group_block_position++) {
+        if (shouldAllocateBlock(
+                group_block_position, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks)) {
             need_alloc_blocks++;
         }
     }
@@ -188,31 +195,34 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
         }
     }
 
-    BlockIndicesType new_ids;
+    GroupBlockToPoolBlockBinding::Snapshot new_ids;
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
-    size_t allocated_idx = 0;
-    for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool should_alloc =
-            shouldAllocateBlock(i, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks);
+    size_t compact_position = 0;
+    for (int group_block_position = current_blocks_len; group_block_position < current_blocks_len + new_blocks_len;
+         group_block_position++) {
+        const bool should_alloc = shouldAllocateBlock(
+            group_block_position, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks);
         if (should_alloc) {
-            new_ids.push_back(allocated_blocks[allocated_idx++]);
+            new_ids.push_back(PoolBlockId{allocated_blocks[compact_position++]});
         } else {
-            new_ids.push_back(NULL_BLOCK_IDX);
+            new_ids.push_back(std::nullopt);
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(allocated_idx == allocated_blocks.size(),
+    RTP_LLM_CHECK_WITH_INFO(compact_position == allocated_blocks.size(),
                             "swa kv allocation accounting mismatch, used=%zu allocated=%zu",
-                            allocated_idx,
+                            compact_position,
                             allocated_blocks.size());
-    block_ids.add(new_ids);
-    checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
+    binding.append(new_ids);
+    checkSWATailBindings(binding, "SWAKVCacheGroup::malloc");
     return true;
 }
 
-void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
-    const auto& block_indices = block_ids.blocks();
+void SWAKVCacheGroup::removeSkippedBlocks(GroupBlockToPoolBlockBinding& binding,
+                                          bool                          enable_reuse_cache,
+                                          int                           reserve_step) {
+    const auto block_indices = binding.snapshot();
     if (block_indices.empty()) {
-        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
+        checkSWATailBindings(binding, "SWAKVCacheGroup::removeSkippedBlocks");
         return;
     }
     const int  step                    = std::max(1, linear_step_);
@@ -220,23 +230,24 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
     const int  active_tail_blocks      = activeTailBlockCount();
     const int  block_size              = static_cast<int>(block_indices.size());
 
-    BlockIndicesType    blocks_to_free;
-    std::vector<size_t> pos_to_remove;
-    for (int i = block_size - active_tail_blocks - 1 - reserve_step; i >= 0; i--) {
-        if (isNullBlockIdx(block_indices[i])) {
+    BlockIndicesType                blocks_to_free;
+    std::vector<GroupBlockPosition> positions_to_unbind;
+    for (int group_block_position = block_size - active_tail_blocks - 1 - reserve_step; group_block_position >= 0;
+         group_block_position--) {
+        if (!block_indices[group_block_position].has_value()) {
             continue;
         }
-        if (effective_reuse_enabled && ((i + 1) % step) == 0) {
+        if (effective_reuse_enabled && ((group_block_position + 1) % step) == 0) {
             continue;
         }
-        blocks_to_free.push_back(block_indices[i]);
-        pos_to_remove.push_back(static_cast<size_t>(i));
+        blocks_to_free.push_back(block_indices[group_block_position]->value);
+        positions_to_unbind.push_back(GroupBlockPosition{static_cast<size_t>(group_block_position)});
     }
     if (!blocks_to_free.empty()) {
         block_pool_->requestFree(blocks_to_free);
-        block_ids.remove(pos_to_remove);
+        binding.remove(positions_to_unbind);
     }
-    checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
+    checkSWATailBindings(binding, "SWAKVCacheGroup::removeSkippedBlocks");
 }
 
 void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
@@ -250,8 +261,14 @@ void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
     }
 }
 
-void SWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
-    block_ids.add(new_block_indices);
+void SWAKVCacheGroup::reference(GroupBlockToPoolBlockBinding& binding, const BlockIndicesType& new_block_indices) {
+    GroupBlockToPoolBlockBinding::Snapshot appended;
+    appended.reserve(new_block_indices.size());
+    for (const auto block_idx : new_block_indices) {
+        appended.push_back(isNullBlockIdx(block_idx) ? std::nullopt :
+                                                       std::optional<PoolBlockId>{PoolBlockId{block_idx}});
+    }
+    binding.append(appended);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {

@@ -9,10 +9,10 @@
 namespace rtp_llm {
 namespace {
 
-bool isCompactFullBlockList(const KVCacheResource&  source,
-                            const BlockIndicesType& src_blocks,
-                            const CacheKeysType&    selected_keys) {
-    return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
+bool isCompactFullBlockList(const KVCacheResource& source,
+                            size_t                 source_block_count,
+                            const CacheKeysType&   selected_keys) {
+    return source_block_count <= selected_keys.size() || source_block_count < source.cacheKeys().size();
 }
 
 bool selectedLastRankKeysAreAligned(const KVCacheResource& source, int cp_size) {
@@ -234,35 +234,35 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
     }
     selected.setCacheKeysAndBlockDependencies(std::move(projected_keys), std::move(projected_dependencies));
 
-    for (const auto& [tag, block_ids] : source.blocksByTag()) {
-        const auto&      src_blocks = block_ids.blocks();
-        BlockIndicesType dst_blocks;
+    for (const auto& [tag, binding] : source.blocksByTag()) {
+        const auto                             src_blocks = binding.snapshot();
+        GroupBlockToPoolBlockBinding::Snapshot dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 
         const auto layout = layoutForGroup(config, tag);
         if (layout.slice != CpBlockSliceMode::NONE) {
             for (size_t i = 0; i < selected_keys.size(); ++i) {
-                dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
+                dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : std::nullopt);
             }
         } else if (layout.mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
-            if (isCompactFullBlockList(source, src_blocks, selected_keys)) {
+            if (isCompactFullBlockList(source, src_blocks.size(), selected_keys)) {
                 for (size_t i = 0; i < selected_keys.size(); ++i) {
-                    dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
+                    dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : std::nullopt);
                 }
             } else {
                 for (size_t logical_pos = static_cast<size_t>(cp_size_ - 1); dst_blocks.size() < selected_keys.size();
                      logical_pos += static_cast<size_t>(cp_size_)) {
-                    dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
+                    dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : std::nullopt);
                 }
             }
         } else {
             for (size_t logical_pos = static_cast<size_t>(cp_size_ - 1); dst_blocks.size() < selected_keys.size();
                  logical_pos += static_cast<size_t>(cp_size_)) {
-                dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
+                dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : std::nullopt);
             }
         }
 
-        selected.mutableBlockIds(tag).assign(std::move(dst_blocks));
+        selected.mutableBlockBinding(tag).assign(dst_blocks);
     }
 
     return selected;

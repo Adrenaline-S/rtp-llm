@@ -22,6 +22,21 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
     processKVTensor(kv_cache_tensor);
     processScaleTensor(kv_scale_tensor);
 
+    for (const auto& layer_tensor : layer_kv_tensors_) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(layer_tensor.stride(0) * layer_tensor.element_size())
+                                    == config_.kv_block_stride_bytes,
+                                "physical KV block stride mismatch: tensor=%zu spec=%zu",
+                                static_cast<size_t>(layer_tensor.stride(0) * layer_tensor.element_size()),
+                                config_.kv_block_stride_bytes);
+    }
+    for (const auto& layer_scale_tensor : layer_kv_scale_tensors_) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(layer_scale_tensor.stride(0) * layer_scale_tensor.element_size())
+                                    == config_.kv_scale_stride_bytes,
+                                "physical KV scale block stride mismatch: tensor=%zu spec=%zu",
+                                static_cast<size_t>(layer_scale_tensor.stride(0) * layer_scale_tensor.element_size()),
+                                config_.kv_scale_stride_bytes);
+    }
+
     RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
     return true;
 }
@@ -299,6 +314,26 @@ std::vector<torch::Tensor> MemoryLayoutStrategy::getLayerCacheTensors() const {
 
 std::vector<torch::Tensor> MemoryLayoutStrategy::getLayerScaleCacheTensors() const {
     return layer_kv_scale_tensors_;
+}
+
+PoolBlockMemorySegments MemoryLayoutStrategy::segments(PoolBlockId block_id, int layer_id) const {
+    checkLayerIdValidity(layer_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        block_id.value >= 0, "PoolBlockId must be nonnegative for memory layout, got %d", block_id.value);
+    const auto  pool_block_index = static_cast<int64_t>(block_id.value);
+    const auto& layer_tensor     = layer_kv_tensors_[static_cast<size_t>(layer_id)];
+    RTP_LLM_CHECK_WITH_INFO(pool_block_index < layer_tensor.size(0),
+                            "PoolBlockId %d out of range (max: %ld)",
+                            block_id.value,
+                            layer_tensor.size(0));
+
+    PoolBlockMemorySegments result;
+    result.kv = layer_tensor.select(0, pool_block_index);
+    if (config_.hasScale()) {
+        const auto& scale_tensor = layer_kv_scale_tensors_[static_cast<size_t>(layer_id)];
+        result.scale             = scale_tensor.select(0, pool_block_index);
+    }
+    return result;
 }
 
 // Utility functions

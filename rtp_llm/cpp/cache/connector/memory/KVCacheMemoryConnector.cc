@@ -18,7 +18,11 @@
 
 namespace rtp_llm {
 static bool isUsableBlockIdx(BlockIdxType block_idx) {
-    return block_idx > 0 && !isNullBlockIdx(block_idx);
+    return block_idx >= 0;
+}
+
+static BlockIdxType encodePoolBlockIdForMemoryTransfer(const std::optional<PoolBlockId>& pool_block_id) {
+    return pool_block_id.has_value() ? pool_block_id->value : NULL_BLOCK_IDX;
 }
 
 static void
@@ -514,8 +518,10 @@ KVCacheMemoryConnector::buildPoolBlockMemoryLayout(const CacheConfig& cache_conf
             if (!group.policy.enable_prefix_reuse) {
                 continue;
             }
-            RTP_LLM_CHECK_WITH_INFO(
-                group.layout.spec != nullptr, "memory connector group spec is null at layer=%zu tag=%s", layer, tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(group.layout.spec != nullptr,
+                                    "memory connector group spec is null at layer=%zu tag=%s",
+                                    layer,
+                                    tag.c_str());
             const size_t stride = group.layout.kv_block_stride_bytes + group.layout.kv_scale_stride_bytes;
             RTP_LLM_CHECK_WITH_INFO(
                 stride > 0, "memory connector group physical stride is zero at layer=%zu tag=%s", layer, tag.c_str());
@@ -770,8 +776,7 @@ bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerTagPoolBlockTables&   
         if (it == layer_tag_block_ids[layer].end() || it->second == nullptr) {
             return false;
         }
-        const auto& blocks = it->second->blocks();
-        if (key_index >= blocks.size() || isNullBlockIdx(blocks[key_index])) {
+        if (key_index >= it->second->size() || !it->second->lookup(GroupBlockPosition{key_index}).has_value()) {
             return false;
         }
     }
@@ -808,8 +813,7 @@ std::vector<uint8_t> KVCacheMemoryConnector::prefixSlotValidMask(const LayerTagP
         if (it == layer_tag_block_ids[layer].end() || it->second == nullptr) {
             return {};
         }
-        const auto& blocks = it->second->blocks();
-        if (key_index < blocks.size() && isUsableBlockIdx(blocks[key_index])) {
+        if (key_index < it->second->size() && it->second->lookup(GroupBlockPosition{key_index}).has_value()) {
             mask[slot_idx] = 1;
         }
     }
@@ -1000,8 +1004,10 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&             ca
         copy_info.tagged_gpu_blocks.reserve(slots.size());
         for (const auto& slot : slots) {
             const auto layer = static_cast<size_t>(slot.layer_id);
+            const auto pool_block_id =
+                layer_tag_block_ids.at(layer).at(slot.tag)->lookup(GroupBlockPosition{static_cast<size_t>(i)});
             copy_info.tagged_gpu_blocks.push_back(
-                LayerTagBlock{slot.layer_id, slot.tag, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
+                LayerTagBlock{slot.layer_id, slot.tag, encodePoolBlockIdForMemoryTransfer(pool_block_id)});
         }
         copy_info.is_complete = match_result.is_complete;
         copy_infos.emplace_back(std::move(copy_info));
@@ -1085,8 +1091,10 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
             copy_info.tagged_gpu_blocks.reserve(slots.size());
             for (const auto& slot : slots) {
                 const auto layer = static_cast<size_t>(slot.layer_id);
+                const auto pool_block_id =
+                    layer_tag_block_ids.at(layer).at(slot.tag)->lookup(GroupBlockPosition{static_cast<size_t>(i)});
                 copy_info.tagged_gpu_blocks.push_back(
-                    LayerTagBlock{slot.layer_id, slot.tag, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
+                    LayerTagBlock{slot.layer_id, slot.tag, encodePoolBlockIdForMemoryTransfer(pool_block_id)});
             }
             copy_infos.emplace_back(std::move(copy_info));
         }
@@ -1272,8 +1280,10 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&             c
         tagged_gpu_blocks.reserve(slots.size());
         size_t null_block_num = 0;
         for (const auto& slot : slots) {
-            const auto layer         = static_cast<size_t>(slot.layer_id);
-            const int  gpu_block_idx = layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i);
+            const auto layer = static_cast<size_t>(slot.layer_id);
+            const auto pool_block_id =
+                layer_tag_block_ids.at(layer).at(slot.tag)->lookup(GroupBlockPosition{static_cast<size_t>(i)});
+            const int gpu_block_idx = encodePoolBlockIdForMemoryTransfer(pool_block_id);
             // Do NOT skip NULL_BLOCK_IDX here. We must keep per-layer+attn stride slots in the merged big block.
             if (isNullBlockIdx(gpu_block_idx)) {
                 ++null_block_num;
@@ -1363,8 +1373,10 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
             copy_info.tagged_gpu_blocks.reserve(slots.size());
             for (const auto& slot : slots) {
                 const auto layer = static_cast<size_t>(slot.layer_id);
+                const auto pool_block_id =
+                    layer_tag_block_ids.at(layer).at(slot.tag)->lookup(GroupBlockPosition{static_cast<size_t>(i)});
                 copy_info.tagged_gpu_blocks.push_back(
-                    LayerTagBlock{slot.layer_id, slot.tag, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
+                    LayerTagBlock{slot.layer_id, slot.tag, encodePoolBlockIdForMemoryTransfer(pool_block_id)});
             }
             copy_infos.emplace_back(std::move(copy_info));
         }
@@ -2456,12 +2468,12 @@ bool KVCacheMemoryConnector::checkLayerTagPoolBlockTables(const LayerTagPoolBloc
                 "check layer-tag blocks failed, missing slot layer=%d tag=%s", slot.layer_id, slot.tag.c_str());
             return false;
         }
-        if (it->second->blocksNum() < required_len) {
+        if (it->second->size() < required_len) {
             RTP_LLM_LOG_WARNING(
                 "check layer-tag blocks failed, blocksNum is less than required_len, layer=%d tag=%s blocksNum=%zu required_len=%zu",
                 slot.layer_id,
                 slot.tag.c_str(),
-                it->second->blocksNum(),
+                it->second->size(),
                 required_len);
             return false;
         }

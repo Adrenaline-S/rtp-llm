@@ -67,6 +67,23 @@ torch::Tensor pinGrpcTensor(torch::Tensor tensor) {
     }
 }
 
+BlockIdxType encodePoolBlockIdForRpc(const std::optional<PoolBlockId>& pool_block_id) {
+    return pool_block_id.has_value() ? pool_block_id->value : NULL_BLOCK_IDX;
+}
+
+GroupBlockToPoolBlockBinding::Snapshot decodePoolBlockIdsFromRpc(const google::protobuf::RepeatedField<int>& ids) {
+    GroupBlockToPoolBlockBinding::Snapshot snapshot;
+    snapshot.reserve(static_cast<size_t>(ids.size()));
+    for (const auto block_idx : ids) {
+        RTP_LLM_CHECK_WITH_INFO(block_idx >= 0 || isNullBlockIdx(block_idx),
+                                "RPC pool block id must be nonnegative or missing, got %d",
+                                block_idx);
+        snapshot.push_back(isNullBlockIdx(block_idx) ? std::nullopt :
+                                                       std::optional<PoolBlockId>{PoolBlockId{block_idx}});
+    }
+    return snapshot;
+}
+
 }  // namespace
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
@@ -411,12 +428,12 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
         request.add_cache_keys(cache_key);
     }
     if (!load_context.group_blocks.empty()) {
-        for (const auto& [tag, block_ids] : load_context.group_blocks) {
+        for (const auto& [tag, binding] : load_context.group_blocks) {
             RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cache group record requires a non-empty tag");
             auto* tagged_row = request.add_tagged_group_block_ids();
             tagged_row->set_tag(tag);
-            for (const auto& block_id : block_ids.blocks()) {
-                tagged_row->add_block_ids(block_id);
+            for (const auto& pool_block_id : binding.snapshot()) {
+                tagged_row->add_block_ids(encodePoolBlockIdForRpc(pool_block_id));
             }
         }
     }
@@ -472,12 +489,12 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     }
     // Every cache group record carries its own semantic tag on the wire.
     if (!load_context.group_blocks.empty()) {
-        for (const auto& [tag, block_ids] : load_context.group_blocks) {
+        for (const auto& [tag, binding] : load_context.group_blocks) {
             RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cache group record requires a non-empty tag");
             auto* tagged_row = request.add_tagged_group_block_ids();
             tagged_row->set_tag(tag);
-            for (const auto& block_id : block_ids.blocks()) {
-                tagged_row->add_block_ids(block_id);
+            for (const auto& pool_block_id : binding.snapshot()) {
+                tagged_row->add_block_ids(encodePoolBlockIdForRpc(pool_block_id));
             }
         }
     }
@@ -800,7 +817,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const bool is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
     const auto& blocks_by_tag = load_context.group_blocks;
-    auto blocksForTag = [&blocks_by_tag](const std::string& tag) -> const BlockIds& {
+    auto        bindingForTag = [&blocks_by_tag](const std::string& tag) -> const GroupBlockToPoolBlockBinding& {
         const auto it = blocks_by_tag.find(tag);
         RTP_LLM_CHECK_WITH_INFO(it != blocks_by_tag.end(), "load cache has no blocks for cache tag=%s", tag.c_str());
         return it->second;
@@ -945,13 +962,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             const std::vector<std::string> layer_tags = layerGroupTags(cache_config, use_hybrid, layer_id);
 
             for (const auto& tag : layer_tags) {
-                auto request_key      = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
+                auto request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
                 auto load_layer_cache =
                     std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
 
-                const auto& block_ids = blocksForTag(tag).blocks();
-                auto        block_num = block_ids.size();
-                size_t      model_id  = maga_init_params_.model_id;
+                const auto block_ids = bindingForTag(tag).snapshot();
+                auto       block_num = block_ids.size();
+                size_t     model_id  = maga_init_params_.model_id;
 
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, tag);
                 auto block_positions      = blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, tag);
@@ -963,11 +980,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
                         continue;
                     }
-                    auto block_id = block_ids[block_pos];
-                    if (isNullBlockIdx(block_id)) {
+                    const auto pool_block_id = block_ids[block_pos];
+                    if (!pool_block_id.has_value()) {
                         continue;
                     }
-                    size_t cache_key_index = 0;
+                    const auto block_id        = pool_block_id->value;
+                    size_t     cache_key_index = 0;
                     if (!cacheKeyIndexForBlock(
                             cache_config, tag, block_pos, load_context.cache_keys.size(), cache_key_index)) {
                         continue;
@@ -1076,9 +1094,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto load_layer_cache = std::make_shared<RequestBlockBuffer>(
                                 std::to_string(load_context.request_id), request_key);
 
-                            const auto& block_ids = blocksForTag(tag).blocks();
-                            auto        block_num = block_ids.size();
-                            size_t      model_id  = module_plan.cache_model_id;
+                            const auto block_ids = bindingForTag(tag).snapshot();
+                            auto       block_num = block_ids.size();
+                            size_t     model_id  = module_plan.cache_model_id;
 
                             CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, tag);
                             auto           block_positions =
@@ -1091,11 +1109,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
                                     continue;
                                 }
-                                auto block_id = block_ids[block_pos];
-                                if (isNullBlockIdx(block_id)) {
+                                const auto pool_block_id = block_ids[block_pos];
+                                if (!pool_block_id.has_value()) {
                                     continue;
                                 }
-                                size_t cache_key_index = 0;
+                                const auto block_id        = pool_block_id->value;
+                                size_t     cache_key_index = 0;
                                 if (!cacheKeyIndexForBlock(mtp_cache_cfg,
                                                            tag,
                                                            block_pos,
@@ -1117,7 +1136,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                         block_id, global_layer_id, tag, peer_cnt, i);
                                 }
 
-                                parts = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, tag, i);
+                                parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, tag, i);
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());
@@ -1262,19 +1281,19 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     return grpc::Status::OK;
 }
 
-std::map<std::string, BlockIds> DecodeRpcServer::decodeGroupBlockRecords(const BroadcastLoadRequestPB& request,
-                                                                         const CacheConfig&            cache_config) {
-    std::map<std::string, BlockIds> records;
-    std::unordered_set<std::string> seen_tags;
+std::map<std::string, GroupBlockToPoolBlockBinding>
+DecodeRpcServer::decodeGroupBlockRecords(const BroadcastLoadRequestPB& request, const CacheConfig& cache_config) {
+    std::map<std::string, GroupBlockToPoolBlockBinding> records;
+    std::unordered_set<std::string>                     seen_tags;
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
         const auto& tag = tagged_row.tag();
         RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "RPC cache group record requires a non-empty tag");
         // Rejects any tag the local cache plan does not own.
         cache_config.group(tag);
         RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(tag).second, "duplicate RPC cache tag=%s", tag.c_str());
-        BlockIds block_ids;
-        block_ids.assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
-        records.emplace(tag, std::move(block_ids));
+        GroupBlockToPoolBlockBinding binding;
+        binding.assign(decodePoolBlockIdsFromRpc(tagged_row.block_ids()));
+        records.emplace(tag, std::move(binding));
     }
     RTP_LLM_CHECK_WITH_INFO(records.size() == cache_config.groups().size(),
                             "RPC cache tag set does not match local config, rows=%zu groups=%zu",
@@ -1341,7 +1360,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                  ErrorCode::MALLOC_FAILED);
+                                                                                   ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

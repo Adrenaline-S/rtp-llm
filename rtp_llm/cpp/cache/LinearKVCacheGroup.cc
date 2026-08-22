@@ -66,8 +66,11 @@ int LinearKVCacheGroup::retainedTailBlockCount() const {
     return std::max(2, materializedTailBlockCount());
 }
 
-bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
-    if (pos < 0) {
+bool LinearKVCacheGroup::shouldMaterializeBlock(int  group_block_position,
+                                                int  seq_len,
+                                                int  reserve_step,
+                                                bool enable_reuse_cache) const {
+    if (group_block_position < 0) {
         return false;
     }
 
@@ -75,10 +78,12 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
     const int  materialized_tail_blocks = materializedTailBlockCount();
     const int  seq_slots                = needBlocksNum(seq_len, 0, 0);
     const int  total_slots              = needBlocksNum(seq_len, 0, reserve_step);
-    const bool is_seq_tail =
-        (seq_slots > 0) && (pos >= std::max(0, seq_slots - materialized_tail_blocks)) && (pos < seq_slots);
-    const bool is_reserve = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
-    const bool step_hit   = (((pos + 1) % step) == 0);
+    const bool is_seq_tail              = (seq_slots > 0)
+                             && (group_block_position >= std::max(0, seq_slots - materialized_tail_blocks))
+                             && (group_block_position < seq_slots);
+    const bool is_reserve =
+        (reserve_step > 0) && (group_block_position >= seq_slots) && (group_block_position < total_slots);
+    const bool step_hit = (((group_block_position + 1) % step) == 0);
     return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
 }
 
@@ -105,8 +110,9 @@ int LinearKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
         }
     } else {
         const int initial_slots = current_seq_slots + extra_blocks;
-        for (int i = 0; i < initial_slots; ++i) {
-            block_costs.push_back(shouldMaterializeBlock(i, seq_len, reserve_step, enable_reuse_cache) ? 1 : 0);
+        for (int group_block_position = 0; group_block_position < initial_slots; ++group_block_position) {
+            block_costs.push_back(
+                shouldMaterializeBlock(group_block_position, seq_len, reserve_step, enable_reuse_cache) ? 1 : 0);
         }
     }
 
@@ -158,16 +164,21 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     const int common_slots = needBlocksNum(common_seq_len, 0);
     const int total_slots  = needBlocksNum(seq_len, 0, reserve_step);
 
-    auto common_required = [&](int pos) { return shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled); };
-    auto final_required  = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled); };
+    auto common_required = [&](int group_block_position) {
+        return shouldMaterializeBlock(group_block_position, common_seq_len, 0, reuse_enabled);
+    };
+    auto final_required = [&](int group_block_position) {
+        return shouldMaterializeBlock(group_block_position, seq_len, reserve_step, reuse_enabled);
+    };
 
-    for (int pos = 0; pos < common_slots; ++pos) {
-        if (common_required(pos)) {
+    for (int group_block_position = 0; group_block_position < common_slots; ++group_block_position) {
+        if (common_required(group_block_position)) {
             info.common_blocks++;
         }
     }
-    for (int pos = 0; pos < total_slots; ++pos) {
-        if (final_required(pos) && !(pos < common_slots && common_required(pos))) {
+    for (int group_block_position = 0; group_block_position < total_slots; ++group_block_position) {
+        if (final_required(group_block_position)
+            && !(group_block_position < common_slots && common_required(group_block_position))) {
             info.extra_blocks++;
         }
     }
@@ -198,35 +209,36 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
-bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
-                                int                  seq_len,
-                                bool                 enable_reuse_cache,
-                                int                  reserve_step,
-                                std::vector<size_t>* backfilled_positions) {
+bool LinearKVCacheGroup::malloc(GroupBlockToPoolBlockBinding& binding,
+                                int                           seq_len,
+                                bool                          enable_reuse_cache,
+                                int                           reserve_step,
+                                std::vector<size_t>*          backfilled_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
-    const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
+    const int current_blocks_len = static_cast<int>(binding.size());
     const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
-    auto should_materialize = [&](int pos) {
-        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache);
+    auto should_materialize = [&](int group_block_position) {
+        return shouldMaterializeBlock(group_block_position, seq_len, reserve_step, enable_reuse_cache);
     };
 
     std::vector<size_t> positions_to_backfill;
-    const auto&         existing_blocks = block_ids.blocks();
+    const auto          existing_blocks = binding.snapshot();
     const int           existing_scan   = std::min(current_blocks_len, total_slots);
-    for (int i = 0; i < existing_scan; ++i) {
-        if (should_materialize(i) && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
-            positions_to_backfill.push_back(static_cast<size_t>(i));
+    for (int group_block_position = 0; group_block_position < existing_scan; ++group_block_position) {
+        if (should_materialize(group_block_position)
+            && !existing_blocks[static_cast<size_t>(group_block_position)].has_value()) {
+            positions_to_backfill.push_back(static_cast<size_t>(group_block_position));
         }
     }
 
     int need_alloc_blocks = 0;
     need_alloc_blocks += static_cast<int>(positions_to_backfill.size());
-    for (int i = current_blocks_len; i < total_slots; i++) {
-        if (should_materialize(i)) {
+    for (int group_block_position = current_blocks_len; group_block_position < total_slots; group_block_position++) {
+        if (should_materialize(group_block_position)) {
             need_alloc_blocks++;
         }
     }
@@ -254,35 +266,37 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
         }
     }
 
-    size_t allocated_idx = 0;
-    for (size_t pos : positions_to_backfill) {
-        block_ids.setAt(pos, allocated_blocks[allocated_idx++]);
+    size_t compact_position = 0;
+    for (size_t group_block_position : positions_to_backfill) {
+        binding.bind(GroupBlockPosition{group_block_position}, PoolBlockId{allocated_blocks[compact_position++]});
     }
     if (backfilled_positions != nullptr) {
         *backfilled_positions = positions_to_backfill;
     }
 
-    BlockIndicesType new_ids;
+    GroupBlockToPoolBlockBinding::Snapshot new_ids;
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
-    for (int i = current_blocks_len; i < total_slots; i++) {
-        if (should_materialize(i)) {
-            new_ids.push_back(allocated_blocks[allocated_idx++]);
+    for (int group_block_position = current_blocks_len; group_block_position < total_slots; group_block_position++) {
+        if (should_materialize(group_block_position)) {
+            new_ids.push_back(PoolBlockId{allocated_blocks[compact_position++]});
         } else {
-            new_ids.push_back(NULL_BLOCK_IDX);
+            new_ids.push_back(std::nullopt);
         }
     }
     if (!new_ids.empty()) {
-        block_ids.add(new_ids);
+        binding.append(new_ids);
     }
-    RTP_LLM_CHECK_WITH_INFO(allocated_idx == allocated_blocks.size(),
+    RTP_LLM_CHECK_WITH_INFO(compact_position == allocated_blocks.size(),
                             "linear kv allocation accounting mismatch, used=%zu allocated=%zu",
-                            allocated_idx,
+                            compact_position,
                             allocated_blocks.size());
     return true;
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
-    const auto& block_indices = block_ids.blocks();
+void LinearKVCacheGroup::removeSkippedBlocks(GroupBlockToPoolBlockBinding& binding,
+                                             bool                          enable_reuse_cache,
+                                             int                           reserve_step) {
+    const auto block_indices = binding.snapshot();
     if (block_indices.empty()) {
         return;
     }
@@ -290,21 +304,22 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     const int retained_tail_blocks = retainedTailBlockCount();
     const int block_size           = static_cast<int>(block_indices.size());
 
-    BlockIndicesType    blocks_to_free;
-    std::vector<size_t> pos_to_remove;
-    for (int i = block_size - retained_tail_blocks - 1 - reserve_step; i >= 0; i--) {
-        if (isNullBlockIdx(block_indices[i])) {
+    BlockIndicesType                blocks_to_free;
+    std::vector<GroupBlockPosition> positions_to_unbind;
+    for (int group_block_position = block_size - retained_tail_blocks - 1 - reserve_step; group_block_position >= 0;
+         group_block_position--) {
+        if (!block_indices[group_block_position].has_value()) {
             continue;
         }
-        if (enable_reuse_cache && ((i + 1) % step) == 0) {
+        if (enable_reuse_cache && ((group_block_position + 1) % step) == 0) {
             continue;
         }
-        blocks_to_free.push_back(block_indices[i]);
-        pos_to_remove.push_back(static_cast<size_t>(i));
+        blocks_to_free.push_back(block_indices[group_block_position]->value);
+        positions_to_unbind.push_back(GroupBlockPosition{static_cast<size_t>(group_block_position)});
     }
     if (!blocks_to_free.empty()) {
         block_pool_->requestFree(blocks_to_free);
-        block_ids.remove(pos_to_remove);
+        binding.remove(positions_to_unbind);
     }
 }
 
@@ -320,8 +335,14 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     block_pool_->requestFree(valid);
 }
 
-void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
-    block_ids.add(new_block_indices);
+void LinearKVCacheGroup::reference(GroupBlockToPoolBlockBinding& binding, const BlockIndicesType& new_block_indices) {
+    GroupBlockToPoolBlockBinding::Snapshot appended;
+    appended.reserve(new_block_indices.size());
+    for (const auto block_idx : new_block_indices) {
+        appended.push_back(isNullBlockIdx(block_idx) ? std::nullopt :
+                                                       std::optional<PoolBlockId>{PoolBlockId{block_idx}});
+    }
+    binding.append(appended);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {

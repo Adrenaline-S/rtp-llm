@@ -228,17 +228,18 @@ protected:
         const auto& cache_tag = cache_config.soleGroupForLayer(0).tag;
 
         for (size_t i = 0; i < batch_size; i++) {
-            const auto& indices = batch_kv_cache->blocks(static_cast<int>(i), cache_tag);
-            auto        row_ptr = kv_cache_block_id.data_ptr<int32_t>() + i * batch_layer_kv_block_num;
+            const auto indices =
+                rtp_llm::test::encodedPoolBlocksForTest(batch_kv_cache->blockBinding(static_cast<int>(i), cache_tag));
+            auto row_ptr = kv_cache_block_id.data_ptr<int32_t>() + i * batch_layer_kv_block_num;
             std::memcpy(row_ptr, indices.data(), indices.size() * sizeof(int));
             if (kvCache.dim() == 5) {
                 // [layernum, batch, 2, max_pad_seq, dim]
-                auto       max_pad_seq    = kvCache.sizes()[3];
-                auto       k_indexs       = indices;
-                const auto max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
-                const auto blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
-                const auto& sole_group    = cache_config.groups().front();
-                const auto  spec          = sole_group.layout.spec;
+                auto        max_pad_seq    = kvCache.sizes()[3];
+                auto        k_indexs       = indices;
+                const auto  max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
+                const auto  blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
+                const auto& sole_group     = cache_config.groups().front();
+                const auto  spec           = sole_group.layout.spec;
                 const auto  local_kv_heads = cache_config.localKvHeadNum(sole_group.tag);
                 RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "local_head_num_kv must be positive");
                 const auto elems_per_kv_block   = spec->k_block_size();

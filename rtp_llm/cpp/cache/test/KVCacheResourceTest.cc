@@ -19,10 +19,10 @@ CacheGroup makeResourceGroup(std::string tag, CacheGroupType type) {
     spec->seq_size_per_block = 8;
 
     CacheGroup group;
-    group.tag                       = std::move(tag);
+    group.tag                              = std::move(tag);
     group.layout.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = {0};
+    group.policy                           = defaultCacheGroupPolicy(type);
+    group.layer_ids                        = {0};
     group.layout.block_num                 = 16;
     group.layout.seq_size_per_block        = 8;
     group.layout.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
@@ -35,55 +35,6 @@ CacheConfig makeResourceConfig(std::vector<CacheGroup> groups, std::vector<Cache
 
 }  // namespace
 
-TEST(BlockIdsTest, NonFull_MirrorsKernelBlocks) {
-    BlockIds ids(/*kernel_blocks_per_kv_block=*/1);
-
-    ids.add(BlockIndicesType{1, 2, 3});
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{1, 2, 3}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{1, 2, 3}));
-
-    ids.remove(std::vector<size_t>{1});
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{1, NULL_BLOCK_IDX, 3}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{1, NULL_BLOCK_IDX, 3}));
-
-    ids.swap(0, 2);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{3, NULL_BLOCK_IDX, 1}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{3, NULL_BLOCK_IDX, 1}));
-
-    ids.setAt(1, 9);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{3, 9, 1}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{3, 9, 1}));
-}
-
-TEST(BlockIdsTest, Full_ExpandsKernelBlocks) {
-    BlockIds ids(/*kernel_blocks_per_kv_block=*/2);
-
-    ids.add(BlockIndicesType{5, 7});
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{5, 7}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{10, 11, 14, 15}));
-
-    ids.remove(std::vector<size_t>{0});
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 7}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 14, 15}));
-
-    ids.setAt(1, 3);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 3}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 6, 7}));
-
-    ids.resize(3, 2);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 3, 2}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 6, 7, 4, 5}));
-
-    ids.swap(1, 2);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 2, 3}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 4, 5, 6, 7}));
-
-    const auto popped = ids.popBack();
-    ASSERT_EQ(popped, 3);
-    ASSERT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 2}));
-    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 4, 5}));
-}
-
 TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     KVCacheResource resource;
     resource.initGroups(makeTestCacheConfigByTag(
@@ -95,24 +46,18 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
 
     ASSERT_EQ(resource.groupNums(), 2);
     ASSERT_EQ(resource.blocksByTag().size(), 2u);
-    EXPECT_EQ(&resource.blockIdsForLayer(0, "group0"), &resource.blockIds("group0"));
-    EXPECT_EQ(&resource.blockIdsForLayer(1, "group1"), &resource.blockIds("group1"));
-    EXPECT_EQ(&resource.blockIdsForLayer(2, "group0"), &resource.blockIds("group0"));
+    EXPECT_EQ(&resource.blockBindingForLayer(0, "group0"), &resource.blockBinding("group0"));
+    EXPECT_EQ(&resource.blockBindingForLayer(1, "group1"), &resource.blockBinding("group1"));
+    EXPECT_EQ(&resource.blockBindingForLayer(2, "group0"), &resource.blockBinding("group0"));
 
-    auto& g0 = resource.mutableBlockIds("group0");
-    auto& g1 = resource.mutableBlockIds("group1");
+    auto& g0 = resource.mutableBlockBinding("group0");
+    auto& g1 = resource.mutableBlockBinding("group1");
 
-    ASSERT_EQ(g0.kernelBlocksPerKvBlock(), 4u);
-    ASSERT_EQ(g1.kernelBlocksPerKvBlock(), 1u);
+    g0.append(poolBlockSnapshotForTest(BlockIndicesType{1}));
+    g1.append(poolBlockSnapshotForTest(BlockIndicesType{1}));
 
-    g0.add(BlockIndicesType{1});
-    g1.add(BlockIndicesType{1});
-
-    ASSERT_EQ(resource.blocks("group0"), (BlockIndicesType{1}));
-    ASSERT_EQ(resource.kernelBlocks("group0"), (BlockIndicesType{4, 5, 6, 7}));
-
-    ASSERT_EQ(resource.blocks("group1"), (BlockIndicesType{1}));
-    ASSERT_EQ(resource.kernelBlocks("group1"), (BlockIndicesType{1}));
+    ASSERT_EQ(encodedPoolBlocksForTest(resource.blockBinding("group0")), (BlockIndicesType{1}));
+    ASSERT_EQ(encodedPoolBlocksForTest(resource.blockBinding("group1")), (BlockIndicesType{1}));
 }
 
 TEST(KVCacheResourceTest, LayerBlocksRejectsMultipleGroupsForOneLayer) {
@@ -124,24 +69,22 @@ TEST(KVCacheResourceTest, LayerBlocksRejectsMultipleGroupsForOneLayer) {
         /*kernel_blocks_per_kv_block=*/1,
         /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR}));
 
-    EXPECT_THROW(resource.blockIdsForLayer(0, "unknown"), std::exception);
+    EXPECT_THROW(resource.blockBindingForLayer(0, "unknown"), std::exception);
 }
 
 TEST(KVCacheResourceTest, TagAccessKeepsSameLayerGroupsIndependent) {
     KVCacheResource resource;
-    auto config = makeResourceConfig(
+    auto            config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
         {{0, {"full", "linear"}}});
     resource.initGroups(config);
 
-    resource.mutableBlockIdsForLayer(0, "full").add(BlockIndicesType{1, 2});
-    resource.mutableBlockIdsForLayer(0, "linear").add(BlockIndicesType{7});
+    resource.mutableBlockBindingForLayer(0, "full").append(poolBlockSnapshotForTest(BlockIndicesType{1, 2}));
+    resource.mutableBlockBindingForLayer(0, "linear").append(poolBlockSnapshotForTest(BlockIndicesType{7}));
 
-    EXPECT_EQ(resource.blocksForLayer(0, "full"), (BlockIndicesType{1, 2}));
-    EXPECT_EQ(resource.kernelBlocksForLayer(0, "full"), (BlockIndicesType{4, 5, 6, 7, 8, 9, 10, 11}));
-    EXPECT_EQ(resource.blocksForLayer(0, "linear"), (BlockIndicesType{7}));
-    EXPECT_EQ(resource.kernelBlocksForLayer(0, "linear"), (BlockIndicesType{7}));
-    EXPECT_NE(&resource.blockIds("full"), &resource.blockIds("linear"));
+    EXPECT_EQ(encodedPoolBlocksForTest(resource.blockBindingForLayer(0, "full")), (BlockIndicesType{1, 2}));
+    EXPECT_EQ(encodedPoolBlocksForTest(resource.blockBindingForLayer(0, "linear")), (BlockIndicesType{7}));
+    EXPECT_NE(&resource.blockBinding("full"), &resource.blockBinding("linear"));
 }
 
 TEST(KVCacheResourceTest, BlocksByTagOwnsOneBlockTablePerTag) {
@@ -151,19 +94,19 @@ TEST(KVCacheResourceTest, BlocksByTagOwnsOneBlockTablePerTag) {
 
     KVCacheResource resource;
     resource.initGroups(config);
-    resource.mutableBlockIds("full").add({11});
-    resource.mutableBlockIds("linear").add({22});
+    resource.mutableBlockBinding("full").append(poolBlockSnapshotForTest({11}));
+    resource.mutableBlockBinding("linear").append(poolBlockSnapshotForTest({22}));
 
     const auto& blocks_by_tag = resource.blocksByTag();
     ASSERT_EQ(blocks_by_tag.size(), 2u);
     EXPECT_EQ(blocks_by_tag.begin()->first, "full");
-    EXPECT_EQ(blocks_by_tag.at("full").blocks(), (BlockIndicesType{11}));
-    EXPECT_EQ(blocks_by_tag.at("linear").blocks(), (BlockIndicesType{22}));
+    EXPECT_EQ(encodedPoolBlocksForTest(blocks_by_tag.at("full")), (BlockIndicesType{11}));
+    EXPECT_EQ(encodedPoolBlocksForTest(blocks_by_tag.at("linear")), (BlockIndicesType{22}));
 
-    EXPECT_EQ(resource.blockIds("full").blocks(), (BlockIndicesType{11}));
-    EXPECT_EQ(resource.blockIds("linear").blocks(), (BlockIndicesType{22}));
-    EXPECT_EQ(resource.blockIdsForLayer(0, "full").blocks(), (BlockIndicesType{11}));
-    EXPECT_EQ(resource.blockIdsForLayer(0, "linear").blocks(), (BlockIndicesType{22}));
+    EXPECT_EQ(encodedPoolBlocksForTest(resource.blockBinding("full")), (BlockIndicesType{11}));
+    EXPECT_EQ(encodedPoolBlocksForTest(resource.blockBinding("linear")), (BlockIndicesType{22}));
+    EXPECT_EQ(encodedPoolBlocksForTest(resource.blockBindingForLayer(0, "full")), (BlockIndicesType{11}));
+    EXPECT_EQ(encodedPoolBlocksForTest(resource.blockBindingForLayer(0, "linear")), (BlockIndicesType{22}));
 }
 
 TEST(BatchKVCacheResourceTest, CheckValidatesEveryTagAcrossBatches) {
@@ -174,10 +117,10 @@ TEST(BatchKVCacheResourceTest, CheckValidatesEveryTagAcrossBatches) {
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
     batch.initGroups(config);
-    batch.setBatchBlocks(0, "full", {1, 2});
-    batch.setBatchBlocks(1, "full", {3, 4});
-    batch.setBatchBlocks(0, "linear", {5});
-    batch.setBatchBlocks(1, "linear", {6, 7});
+    batch.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({1, 2}));
+    batch.mutableBlockBinding(1, "full").assign(poolBlockSnapshotForTest({3, 4}));
+    batch.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({5}));
+    batch.mutableBlockBinding(1, "linear").assign(poolBlockSnapshotForTest({6, 7}));
 
     EXPECT_THROW(batch.check(), std::exception);
 }
@@ -190,10 +133,10 @@ TEST(BatchKVCacheResourceTest, CheckAllowsDifferentBlockCountsBetweenTags) {
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
     batch.initGroups(config);
-    batch.setBatchBlocks(0, "full", {1, 2});
-    batch.setBatchBlocks(1, "full", {3, 4});
-    batch.setBatchBlocks(0, "linear", {5});
-    batch.setBatchBlocks(1, "linear", {6});
+    batch.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({1, 2}));
+    batch.mutableBlockBinding(1, "full").assign(poolBlockSnapshotForTest({3, 4}));
+    batch.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({5}));
+    batch.mutableBlockBinding(1, "linear").assign(poolBlockSnapshotForTest({6}));
 
     EXPECT_NO_THROW(batch.check());
 }
@@ -209,13 +152,13 @@ TEST(BatchKVCacheResourceTest, CheckRejectsDifferentTagSetsWithTheSameSize) {
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
     batch.initGroups(expected_config);
-    batch.setBatchBlocks(0, "full", {1});
-    batch.setBatchBlocks(0, "linear", {2});
+    batch.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({1}));
+    batch.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({2}));
 
     KVCacheResource different_resource;
     different_resource.initGroups(different_config);
-    different_resource.mutableBlockIds("full").assign({3});
-    different_resource.mutableBlockIds("state").assign({4});
+    different_resource.mutableBlockBinding("full").assign(poolBlockSnapshotForTest({3}));
+    different_resource.mutableBlockBinding("state").assign(poolBlockSnapshotForTest({4}));
     batch.moveBatchResource(1, std::move(different_resource));
 
     EXPECT_THROW(batch.check(), std::exception);
@@ -228,10 +171,25 @@ TEST(KVCacheResourceTest, UnknownTagIsRejectedWithoutMutatingStorage) {
 
     KVCacheResource missing;
     missing.initGroups(config);
-    EXPECT_THROW(missing.blockIds("other"), std::exception);
+    EXPECT_THROW(missing.blockBinding("other"), std::exception);
     EXPECT_EQ(missing.blocksByTag().size(), 2u);
     EXPECT_EQ(missing.blocksByTag().count("full"), 1u);
     EXPECT_EQ(missing.blocksByTag().count("linear"), 1u);
+}
+
+TEST(KVCacheResourceTest, OwnsOnlyPerTagGroupPositionToPoolBlockBindings) {
+    auto config = makeResourceConfig(
+        {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
+        {{0, {"full", "linear"}}});
+
+    KVCacheResource resource;
+    resource.initGroups(config);
+    auto& full_binding = resource.mutableBlockBinding("full");
+    full_binding.resize(2);
+    full_binding.bind(GroupBlockPosition{1}, PoolBlockId{0});
+
+    EXPECT_FALSE(resource.blockBinding("full").lookup(GroupBlockPosition{0}).has_value());
+    EXPECT_EQ(resource.blockBindingForLayer(0, "full").lookup(GroupBlockPosition{1}), PoolBlockId{0});
 }
 
 TEST(KVCacheResourceTest, TaggedStorageHasOneRecordPerConfigGroupNotPerLayer) {
@@ -244,9 +202,9 @@ TEST(KVCacheResourceTest, TaggedStorageHasOneRecordPerConfigGroupNotPerLayer) {
 
     ASSERT_EQ(resource.blocksByTag().size(), 1u);
     EXPECT_EQ(resource.blocksByTag().count("full"), 1u);
-    EXPECT_EQ(&resource.blockIdsForLayer(0, "full"), &resource.blockIds("full"));
-    EXPECT_EQ(&resource.blockIdsForLayer(1, "full"), &resource.blockIds("full"));
-    EXPECT_EQ(&resource.blockIdsForLayer(2, "full"), &resource.blockIds("full"));
+    EXPECT_EQ(&resource.blockBindingForLayer(0, "full"), &resource.blockBinding("full"));
+    EXPECT_EQ(&resource.blockBindingForLayer(1, "full"), &resource.blockBinding("full"));
+    EXPECT_EQ(&resource.blockBindingForLayer(2, "full"), &resource.blockBinding("full"));
 }
 
 TEST(KVCacheResourceTest, InitializationOwnsRoutingAfterConfigLifetime) {
@@ -257,8 +215,8 @@ TEST(KVCacheResourceTest, InitializationOwnsRoutingAfterConfigLifetime) {
     }
 
     EXPECT_EQ(resource.soleGroupTagForLayer(0), "group0");
-    resource.mutableBlockIdsForLayer(0, "group0").add(BlockIndicesType{3});
-    EXPECT_EQ(resource.blocksForLayer(0, "group0"), (BlockIndicesType{3}));
+    resource.mutableBlockBindingForLayer(0, "group0").append(poolBlockSnapshotForTest(BlockIndicesType{3}));
+    EXPECT_EQ(encodedPoolBlocksForTest(resource.blockBindingForLayer(0, "group0")), (BlockIndicesType{3}));
 }
 
 TEST(PrefillCPConfigTest, ToStringIncludesShardingFields) {
@@ -353,15 +311,16 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     ASSERT_EQ(batch.batchSize(), 2);
     ASSERT_EQ(batch.groupNums(), 2);
 
-    batch.setBatchBlocks(/*batch_id=*/0, "group0", BlockIndicesType{1, 2});
-    ASSERT_EQ(batch.blocks(0, "group0"), (BlockIndicesType{1, 2}));
-    ASSERT_EQ(batch.kernelBlocks(0, "group0"), (BlockIndicesType{4, 5, 6, 7, 8, 9, 10, 11}));
+    batch.mutableBlockBinding(/*batch_id=*/0, "group0").assign(poolBlockSnapshotForTest(BlockIndicesType{1, 2}));
+    ASSERT_EQ(encodedPoolBlocksForTest(batch.blockBinding(0, "group0")), (BlockIndicesType{1, 2}));
 
-    batch.setBatchBlocks(/*batch_id=*/0, "group1", BlockIndicesType{9, 10});
-    ASSERT_EQ(batch.blocks(0, "group1"), (BlockIndicesType{9, 10}));
-    ASSERT_EQ(batch.kernelBlocks(0, "group1"), (BlockIndicesType{9, 10}));
+    batch.mutableBlockBinding(/*batch_id=*/0, "group1").assign(poolBlockSnapshotForTest(BlockIndicesType{9, 10}));
+    ASSERT_EQ(encodedPoolBlocksForTest(batch.blockBinding(0, "group1")), (BlockIndicesType{9, 10}));
 
-    auto all_g0 = batch.getAllBatchBlocks("group0");
+    std::vector<BlockIndicesType> all_g0;
+    for (size_t batch_id = 0; batch_id < batch.batchSize(); ++batch_id) {
+        all_g0.push_back(encodedPoolBlocksForTest(batch.blockBinding(batch_id, "group0")));
+    }
     ASSERT_EQ(all_g0.size(), 2u);
     ASSERT_EQ(all_g0[0], (BlockIndicesType{1, 2}));
 
@@ -390,10 +349,10 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
                                               /*layer_group_tags=*/{{"group0"}},
                                               /*kernel_blocks_per_kv_block=*/2,
                                               /*group_types=*/{CacheGroupType::FULL}));
-    moved.mutableBlockIds("group0").add(BlockIndicesType{3});
+    moved.mutableBlockBinding("group0").append(poolBlockSnapshotForTest(BlockIndicesType{3}));
     batch.moveBatchResource(0, std::move(moved));
     ASSERT_EQ(batch.cacheResource(0).groupNums(), 1);
-    ASSERT_EQ(batch.cacheResource(0).kernelBlocks("group0"), (BlockIndicesType{6, 7}));
+    ASSERT_EQ(encodedPoolBlocksForTest(batch.cacheResource(0).blockBinding("group0")), (BlockIndicesType{3}));
 }
 
 TEST(BatchKVCacheResourceTest, CopyOwnsTagMappedBlocksWhileMoveAndTimelineStateStayIntact) {
@@ -402,16 +361,16 @@ TEST(BatchKVCacheResourceTest, CopyOwnsTagMappedBlocksWhileMoveAndTimelineStateS
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
     batch.initGroups(config);
-    batch.setBatchBlocks(0, "full", {3, 4});
+    batch.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({3, 4}));
     batch.swapBlocks(0, "full", 0, 1);
-    EXPECT_EQ(batch.blocks(0, "full"), (BlockIndicesType{4, 3}));
+    EXPECT_EQ(encodedPoolBlocksForTest(batch.blockBinding(0, "full")), (BlockIndicesType{4, 3}));
     batch.swapBlocks(0, "full", 0, 1);
     batch.cacheResource(0).setCacheKeysAndBlockDependencies({101, 202}, {{true, 7, 9}, {true, 101, 12}});
     batch.cacheResource(0).setCacheKeysAreCpCanonical(true);
 
     BatchKVCacheResource copied = batch;
-    copied.mutableBlockIds(0, "full").setAt(1, 8);
-    EXPECT_EQ(batch.blocks(0, "full"), (BlockIndicesType{3, 4}));
+    copied.mutableBlockBinding(0, "full").bind(GroupBlockPosition{1}, PoolBlockId{8});
+    EXPECT_EQ(encodedPoolBlocksForTest(batch.blockBinding(0, "full")), (BlockIndicesType{3, 4}));
     EXPECT_EQ(copied.cacheKeys(0), (CacheKeysType{101, 202}));
     ASSERT_EQ(copied.cacheResource(0).blockDependencies().size(), 2u);
     EXPECT_EQ(copied.cacheResource(0).blockDependencies()[0].parent_key, 7);
@@ -426,7 +385,7 @@ TEST(BatchKVCacheResourceTest, CopyOwnsTagMappedBlocksWhileMoveAndTimelineStateS
     copied.moveBatchResource(2, std::move(old_resources[0]));
 
     EXPECT_EQ(copied.batchSize(), 3);
-    EXPECT_EQ(copied.blocks(2, "full"), (BlockIndicesType{3, 8}));
+    EXPECT_EQ(encodedPoolBlocksForTest(copied.blockBinding(2, "full")), (BlockIndicesType{3, 8}));
     EXPECT_EQ(copied.cacheKeys(2), (CacheKeysType{101, 202}));
     ASSERT_EQ(copied.cacheResource(2).blockDependencies().size(), 2u);
     EXPECT_EQ(copied.cacheResource(2).blockDependencies()[0].ordinal, 9u);

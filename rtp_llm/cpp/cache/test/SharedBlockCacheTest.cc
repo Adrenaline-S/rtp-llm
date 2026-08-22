@@ -37,9 +37,10 @@ CacheConfig makeTaggedCacheConfig() {
 
     auto linear = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "linear");
     auto full   = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config,
-        {linear, full}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"linear", "full"});
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, {16, 16}, {linear->block_size_bytes(), full->block_size_bytes()}, {0, 0});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+        config, {linear, full}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"linear", "full"});
+    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
+        config, {16, 16}, {linear->block_size_bytes(), full->block_size_bytes()}, {0, 0});
     return config;
 }
 
@@ -156,6 +157,13 @@ BlockIdxType blockByTag(const std::map<std::string, BlockIdxType>& groups, std::
     return it->second;
 }
 
+PoolBlockId sharedPoolBlockByTag(const SharedBlockCache::UnifiedCacheItem& item, std::string_view tag) {
+    const auto it = item.group_bindings.find(std::string(tag));
+    RTP_LLM_CHECK_WITH_INFO(
+        it != item.group_bindings.end(), "missing tagged SharedBlockCache binding=%s", std::string(tag).c_str());
+    return it->second.pool_block_id;
+}
+
 class RecordingSharedBlockCache: public SharedBlockCache {
 public:
     std::vector<std::string> operations;
@@ -197,8 +205,12 @@ TEST(SharedBlockCacheTest, TaggedBoundaryDistinguishesSameBlockIdAcrossShuffledT
 
     const auto removed = tagged_cache.remove(42);
     ASSERT_TRUE(removed.has_value());
-    EXPECT_EQ(blockByTag(removed->group_block_ids, "linear"), linear_block);
-    EXPECT_EQ(blockByTag(removed->group_block_ids, "full"), full_block);
+    EXPECT_EQ(sharedPoolBlockByTag(*removed, "linear"), PoolBlockId{linear_block});
+    EXPECT_EQ(sharedPoolBlockByTag(*removed, "full"), PoolBlockId{full_block});
+    EXPECT_TRUE(removed->group_bindings.at("linear").matchable);
+    EXPECT_TRUE(removed->group_bindings.at("full").matchable);
+    EXPECT_GT(removed->group_bindings.at("linear").created_time_us, 0);
+    EXPECT_GT(removed->group_bindings.at("full").created_time_us, 0);
 }
 
 TEST(SharedBlockCacheTest, TaggedEvictionReportsShuffledTagIdentity) {
@@ -715,8 +727,8 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupPrunesBranchUntilTargetAncestor
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2, 1, 3}));
     ASSERT_EQ(blockByTag(evicted.evicted_groups.at(1), "group0"), 101);
     ASSERT_EQ(blockByTag(evicted.evicted_groups.at(1), "group1"), 201);
-    EXPECT_TRUE(isNullBlockIdx(blockByTag(evicted.evicted_groups.at(2), "group1")));
-    EXPECT_TRUE(isNullBlockIdx(blockByTag(evicted.evicted_groups.at(3), "group1")));
+    EXPECT_EQ(evicted.evicted_groups.at(2).find("group1"), evicted.evicted_groups.at(2).end());
+    EXPECT_EQ(evicted.evicted_groups.at(3).find("group1"), evicted.evicted_groups.at(3).end());
     EXPECT_TRUE(cache.empty());
 }
 
@@ -873,7 +885,7 @@ TEST(SharedBlockCacheTest, PutWithNoGroupEntriesRecordsKeyWithoutGroupBlocks) {
 
     const auto removed = cache.remove(9);
     ASSERT_TRUE(removed.has_value());
-    EXPECT_TRUE(removed->group_block_ids.empty());
+    EXPECT_TRUE(removed->group_bindings.empty());
     EXPECT_TRUE(cache.empty());
 }
 

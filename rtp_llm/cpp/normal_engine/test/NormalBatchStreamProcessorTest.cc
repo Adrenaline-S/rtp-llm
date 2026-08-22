@@ -38,7 +38,8 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
     cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
+        cache_config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 }
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {
@@ -113,8 +114,8 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);
     resource.initGroups(cache_config);
-    resource.setBatchBlocks(0, "default", {1, 2});
-    resource.setBatchBlocks(1, "default", {3, 4});
+    resource.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({1, 2}));
+    resource.mutableBlockBinding(1, "default").assign(poolBlockSnapshotForTest({3, 4}));
     resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
     resource.setBatchCacheKeys(1, CacheKeysType{201, 202, 203, 204, 205});
     stream->setKVCache(resource);
@@ -144,15 +145,17 @@ static void initTwoGroupCacheConfig(CacheConfig& cache_config, bool declare_in_s
     cache_config.layer_num     = 1;
     cache_config.layer_all_num = 1;
     if (declare_in_sorted_order) {
-        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {full_spec, linear_spec},
-                                      {layer_ids, layer_ids},
-                                      {CacheGroupType::FULL, CacheGroupType::LINEAR},
-                                      {"full", "linear"});
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config,
+                                                                {full_spec, linear_spec},
+                                                                {layer_ids, layer_ids},
+                                                                {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                                                                {"full", "linear"});
     } else {
-        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {linear_spec, full_spec},
-                                      {layer_ids, layer_ids},
-                                      {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                      {"linear", "full"});
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config,
+                                                                {linear_spec, full_spec},
+                                                                {layer_ids, layer_ids},
+                                                                {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                                                {"linear", "full"});
     }
 }
 
@@ -181,8 +184,8 @@ TEST_F(NormalBatchStreamProcessorTest, testGroupDimensionUsesSortedTagOrder) {
         BatchKVCacheResource resource;
         resource.resetBatchSize(1);
         resource.initGroups(cache_config);
-        resource.setBatchBlocks(0, "full", {11, 12});
-        resource.setBatchBlocks(0, "linear", {21, 22});
+        resource.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({11, 12}));
+        resource.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({21, 22}));
         stream->setKVCache(resource);
         stream->generate_status_->status = StreamState::RUNNING;
 
@@ -224,8 +227,8 @@ TEST_F(NormalBatchStreamProcessorTest, testGathererUsesLargestPerGroupKernelSubd
     ModelConfig model_config;
     model_config.num_layers = 1;
 
-    auto full_spec                = std::make_shared<MHAKVCacheSpec>();
-    full_spec->seq_size_per_block = 8;
+    auto full_spec                  = std::make_shared<MHAKVCacheSpec>();
+    full_spec->seq_size_per_block   = 8;
     auto linear_spec                = std::make_shared<MHAKVCacheSpec>();
     linear_spec->seq_size_per_block = 2;
 
@@ -234,14 +237,15 @@ TEST_F(NormalBatchStreamProcessorTest, testGathererUsesLargestPerGroupKernelSubd
     cache_config.layer_all_num             = 1;
     cache_config.seq_size_per_block        = 2;
     cache_config.kernel_seq_size_per_block = 2;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {linear_spec, full_spec},
-                                  {{0}, {0}},
-                                  {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                  {"linear", "full"});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config,
+                                                            {linear_spec, full_spec},
+                                                            {{0}, {0}},
+                                                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                                            {"linear", "full"});
 
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    NormalBatchStreamProcessor processor(
+    NormalBatchStreamProcessor  processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     EXPECT_EQ(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block, 4);
@@ -254,8 +258,8 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     model_config.vocab_size  = 32;
     model_config.num_layers  = 1;
 
-    auto full_spec                = std::make_shared<MHAKVCacheSpec>();
-    full_spec->seq_size_per_block = 8;
+    auto full_spec                  = std::make_shared<MHAKVCacheSpec>();
+    full_spec->seq_size_per_block   = 8;
     auto linear_spec                = std::make_shared<MHAKVCacheSpec>();
     linear_spec->seq_size_per_block = 2;
     CacheConfig cache_config;
@@ -263,10 +267,11 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     cache_config.layer_all_num             = 1;
     cache_config.seq_size_per_block        = 2;
     cache_config.kernel_seq_size_per_block = 2;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {linear_spec, full_spec},
-                                  {{0}, {0}},
-                                  {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                  {"linear", "full"});
+    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config,
+                                                            {linear_spec, full_spec},
+                                                            {{0}, {0}},
+                                                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                                            {"linear", "full"});
 
     auto query             = make_shared<GenerateInput>();
     query->input_ids       = hostIntBuffer({1});
@@ -276,25 +281,26 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     BatchKVCacheResource resource;
     resource.resetBatchSize(1);
     resource.initGroups(cache_config);
-    resource.setBatchBlocks(0, "full", {3});
-    resource.setBatchBlocks(0, "linear", {7});
+    resource.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({3}));
+    resource.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({7}));
     stream->setKVCache(resource);
     stream->generate_status_->status = StreamState::RUNNING;
 
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig logging_config;
-    NormalBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, false);
-    StreamGroups               stream_groups({stream});
-    TensorHolder               holder;
-    auto result = processor.gatherKvCacheKernelBlockId(stream_groups, holder);
+    NormalBatchStreamProcessor  processor(model_config, pd_sep_config, logging_config, cache_config, false);
+    StreamGroups                stream_groups({stream});
+    TensorHolder                holder;
+    auto                        result = processor.gatherKvCacheKernelBlockId(stream_groups, holder);
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(toVec<int32_t>(*result), (std::vector<int32_t>{12, 13, 14, 15, 7, 0, 0, 0}));
+    EXPECT_EQ(toVec<int32_t>(*result),
+              (std::vector<int32_t>{12, 13, 14, 15, 7, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMutateHostOrPublish) {
     const auto make_config = [](const std::string& second_tag, size_t second_b) {
-        auto first_spec                = std::make_shared<MHAKVCacheSpec>();
-        first_spec->seq_size_per_block = 2;
+        auto first_spec                 = std::make_shared<MHAKVCacheSpec>();
+        first_spec->seq_size_per_block  = 2;
         auto second_spec                = std::make_shared<MHAKVCacheSpec>();
         second_spec->seq_size_per_block = second_b;
         CacheConfig config;
@@ -302,10 +308,11 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMuta
         config.layer_all_num             = 1;
         config.seq_size_per_block        = 2;
         config.kernel_seq_size_per_block = 2;
-        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, {first_spec, second_spec},
-                                {{0}, {0}},
-                                {CacheGroupType::FULL, CacheGroupType::LINEAR},
-                                {"full", second_tag});
+        rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config,
+                                                                {first_spec, second_spec},
+                                                                {{0}, {0}},
+                                                                {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                                                                {"full", second_tag});
         return config;
     };
     const auto run_invalid = [&](const CacheConfig& expected_config,
@@ -317,28 +324,28 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMuta
         model_config.vocab_size  = 32;
         model_config.num_layers  = 1;
         RuntimeConfig runtime_config;
-        auto query             = make_shared<GenerateInput>();
+        auto          query    = make_shared<GenerateInput>();
         query->input_ids       = hostIntBuffer({1});
         query->generate_config = make_shared<GenerateConfig>();
         auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         BatchKVCacheResource resource;
         resource.resetBatchSize(1);
         resource.initGroups(resource_config);
-        resource.setBatchBlocks(0, "full", {3});
-        resource.setBatchBlocks(0, resource_config.groups()[1].tag, {7});
+        resource.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({3}));
+        resource.mutableBlockBinding(0, resource_config.groups()[1].tag).assign(poolBlockSnapshotForTest({7}));
         if (make_late_row_oversized) {
-            resource.mutableBlockIds(0, "linear").kernel_block_indices_ = {7, 8};
+            resource.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({7, 8}));
         }
         stream->setKVCache(resource);
         stream->generate_status_->status = StreamState::RUNNING;
 
         PDSepConfig                 pd_sep_config;
         ProfilingDebugLoggingConfig logging_config;
-        NormalBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, expected_config, false);
-        StreamGroups               stream_groups({stream});
-        auto host = torch::full({2, 1, 1}, 91, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        NormalBatchStreamProcessor  processor(model_config, pd_sep_config, logging_config, expected_config, false);
+        StreamGroups                stream_groups({stream});
+        auto         host = torch::full({2, 1, 1}, 91, torch::TensorOptions(torch::kInt32).pinned_memory(true));
         TensorHolder holder;
-        auto sentinel = torch::tensor({5}, torch::kInt32);
+        auto         sentinel = torch::tensor({5}, torch::kInt32);
         holder.hold(sentinel);
         EXPECT_ANY_THROW(processor.model_input_gatherer_->gatherKvCacheKernelBlockIdToHost(stream_groups, host));
         EXPECT_EQ(toVec<int32_t>(host), (std::vector<int32_t>{91, 91}));
@@ -415,7 +422,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config);
-    addr1.setBatchBlocks(0, "default", {1, 2, 3, 4});
+    addr1.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({1, 2, 3, 4}));
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
 
@@ -428,7 +435,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr2;
     addr2.resetBatchSize(1);
     addr2.initGroups(cache_config);
-    addr2.setBatchBlocks(0, "default", {5, 6, 7, 8});
+    addr2.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({5, 6, 7, 8}));
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
 
@@ -440,7 +447,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
     addr3.initGroups(cache_config);
-    addr3.setBatchBlocks(0, "default", {9, 10});
+    addr3.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({9, 10}));
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
@@ -451,7 +458,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
     addr4.initGroups(cache_config);
-    addr4.setBatchBlocks(0, "default", {11, 12, 13, 14});
+    addr4.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({11, 12, 13, 14}));
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
 
@@ -477,7 +484,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         vector<int> input_lengths     = {1, 2, 3, 3};
         vector<int> sequence_lengths  = {1, 2};
         vector<int> prefix_lengths    = {0, 1};
-        vector<int> kv_cache_block_id = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 11, 12, 13, 14};
+        vector<int> kv_cache_block_id = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 11, 12, 13, 14};
         EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
@@ -603,7 +610,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config);
-    addr1.setBatchBlocks(0, "default", {1});
+    addr1.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({1}));
     stream1->setKVCache(addr1);
 
     std::list<GenerateStreamPtr> streams;
@@ -1118,7 +1125,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config);
-    addr1.setBatchBlocks(0, "default", {1});
+    addr1.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({1}));
     stream1->setKVCache(addr1);
 
     std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
@@ -1130,7 +1137,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
     addr3.initGroups(cache_config);
-    addr3.setBatchBlocks(0, "default", {9});
+    addr3.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({9}));
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4   = make_shared<GenerateInput>();
@@ -1142,7 +1149,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
     addr4.initGroups(cache_config);
-    addr4.setBatchBlocks(0, "default", {11, 12});
+    addr4.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({11, 12}));
     stream4->setKVCache(addr4);
 
     std::list<GenerateStreamPtr> streams;

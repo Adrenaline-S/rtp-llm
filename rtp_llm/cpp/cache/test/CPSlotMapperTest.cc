@@ -155,23 +155,24 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     config.layer_num          = 1;
     config.layer_all_num      = 1;
 
-    auto      full_spec = std::make_shared<MHAKVCacheSpec>();
+    auto       full_spec = std::make_shared<MHAKVCacheSpec>();
     CacheGroup full_group;
     full_group.tag               = "full";
-    full_group.layout.spec              = full_spec;
+    full_group.layout.spec       = full_spec;
     full_group.layer_ids         = {0};
     full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     full_group.policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
 
-    auto      swa_spec = std::make_shared<MHAKVCacheSpec>();
+    auto       swa_spec = std::make_shared<MHAKVCacheSpec>();
     CacheGroup swa_group;
     swa_group.tag             = "swa";
-    swa_group.layout.spec            = swa_spec;
+    swa_group.layout.spec     = swa_spec;
     swa_group.layer_ids       = {0};
     swa_group.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, {std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
+    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
+        config, {std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
 
     CPSlotMapper mapper(0, 2, 8);
 
@@ -187,21 +188,22 @@ TEST_F(CPSlotMapperTest, TaggedGroupsKeepGlobalKeySpanAndGroupPhysicalSpanDistin
     config.layer_all_num      = 1;
 
     CacheGroup full_group;
-    full_group.tag                = "full";
+    full_group.tag                       = "full";
     full_group.layout.spec               = std::make_shared<MHAKVCacheSpec>();
-    full_group.layer_ids          = {0};
+    full_group.layer_ids                 = {0};
     full_group.layout.seq_size_per_block = 24;
-    full_group.policy             = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    full_group.policy.cp_mapping  = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    full_group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_group.policy.cp_mapping         = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 
     CacheGroup swa_group;
-    swa_group.tag                = "swa";
+    swa_group.tag                       = "swa";
     swa_group.layout.spec               = std::make_shared<MHAKVCacheSpec>();
-    swa_group.layer_ids          = {0};
+    swa_group.layer_ids                 = {0};
     swa_group.layout.seq_size_per_block = 32;
-    swa_group.policy             = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_group.policy.cp_mapping  = CpBlockMappingMode::COMPACT_LAST_RANK;
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, {std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
+    swa_group.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_group.policy.cp_mapping         = CpBlockMappingMode::COMPACT_LAST_RANK;
+    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
+        config, {std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
 
     CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*global key B=*/8);
 
@@ -222,10 +224,10 @@ TEST_F(CPSlotMapperTest, TaggedGroupMethodsRejectMissingIdentity) {
     config.layer_all_num      = 1;
 
     CacheGroup group;
-    group.tag       = "full";
-    group.layout.spec      = std::make_shared<MHAKVCacheSpec>();
-    group.layer_ids = {0};
-    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.tag         = "full";
+    group.layout.spec = std::make_shared<MHAKVCacheSpec>();
+    group.layer_ids   = {0};
+    group.policy      = defaultCacheGroupPolicy(CacheGroupType::FULL);
     rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, {std::move(group)}, {{0, {"full"}}});
 
     CPSlotMapper mapper(0, 2, 8);
@@ -251,10 +253,10 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDu
     config.layer_num          = 1;
     config.layer_all_num      = 1;
 
-    auto      full_spec = std::make_shared<MHAKVCacheSpec>();
+    auto       full_spec = std::make_shared<MHAKVCacheSpec>();
     CacheGroup full_group;
     full_group.tag               = "full";
-    full_group.layout.spec              = full_spec;
+    full_group.layout.spec       = full_spec;
     full_group.layer_ids         = {0};
     full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
@@ -272,7 +274,7 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDu
     source.initGroups(config);
     source.setCacheKeysAndBlockDependencies(full_keys, full_dependencies);
     source.setLastBlockAligned(false);
-    source.mutableBlockIds("full").assign(BlockIndicesType{100, 101, 102, 103, 104});
+    source.mutableBlockBinding("full").assign(poolBlockSnapshotForTest(BlockIndicesType{100, 101, 102, 103, 104}));
 
     CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*block_size=*/8);
     auto         projected = mapper.projectConnectorResource(source, config, mapper.canonicalCacheKeys(full_keys));
@@ -296,30 +298,31 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagMappedBlocks) {
 
     CacheGroup full;
     full.tag               = "full";
-    full.layout.spec              = std::make_shared<MHAKVCacheSpec>();
+    full.layout.spec       = std::make_shared<MHAKVCacheSpec>();
     full.layer_ids         = {0};
     full.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 
     CacheGroup swa;
     swa.tag               = "swa";
-    swa.layout.spec              = std::make_shared<MHAKVCacheSpec>();
+    swa.layout.spec       = std::make_shared<MHAKVCacheSpec>();
     swa.layer_ids         = {0};
     swa.policy            = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa.policy.cp_mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, {std::move(full), std::move(swa)}, {{0, {"full", "swa"}}});
+    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
+        config, {std::move(full), std::move(swa)}, {{0, {"full", "swa"}}});
 
     KVCacheResource source;
     source.initGroups(config);
     source.setCacheKeys({10, 11, 12, 13});
     source.setLastBlockAligned(true);
-    source.mutableBlockIds("full").assign({100, 101, 102, 103});
-    source.mutableBlockIds("swa").assign({200, 201, 202, 203});
+    source.mutableBlockBinding("full").assign(poolBlockSnapshotForTest({100, 101, 102, 103}));
+    source.mutableBlockBinding("swa").assign(poolBlockSnapshotForTest({200, 201, 202, 203}));
     CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*global key B=*/8);
     auto projected = mapper.projectConnectorResource(source, config, mapper.canonicalCacheKeys(source.cacheKeys()));
 
-    EXPECT_EQ(projected.blocks("full"), (BlockIndicesType{101, 103}));
-    EXPECT_EQ(projected.blocks("swa"), (BlockIndicesType{201, 203}));
+    EXPECT_EQ(encodedPoolBlocksForTest(projected.blockBinding("full")), (BlockIndicesType{101, 103}));
+    EXPECT_EQ(encodedPoolBlocksForTest(projected.blockBinding("swa")), (BlockIndicesType{201, 203}));
 }
 
 }  // namespace test

@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 using namespace kv_cache_manager;
 using namespace ::testing;
@@ -203,9 +204,9 @@ protected:
         return locations;
     }
 
-    std::shared_ptr<BlockIds> makeGroupBlockIds(const BlockIndicesType& block_indices) {
-        auto result           = std::make_shared<BlockIds>();
-        result->block_indices = block_indices;
+    std::shared_ptr<GroupBlockToPoolBlockBinding> makeGroupBlockIds(const BlockIndicesType& block_indices) {
+        auto result = std::make_shared<GroupBlockToPoolBlockBinding>();
+        result->assign(poolBlockSnapshotForTest(block_indices));
         return result;
     }
 
@@ -223,8 +224,8 @@ protected:
     inline static kv_cache_manager::MockTransferClient* transfer_client_ = nullptr;
     // Cache groups are named by tag; fixtures override these with the tags their
     // own cache config declares.
-    std::vector<std::string>                            full_group_tags_  = {"default"};
-    std::vector<std::string>                            other_group_tags_ = {};
+    std::vector<std::string> full_group_tags_  = {"default"};
+    std::vector<std::string> other_group_tags_ = {};
 
     constexpr static const char* fake_address_ = "fake_address";
     using MatchLocationReturnType              = std::pair<ClientErrorCode, Locations>;

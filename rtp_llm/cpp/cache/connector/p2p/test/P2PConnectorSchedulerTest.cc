@@ -40,7 +40,7 @@ protected:
         scheduler_config.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
 
         cache_config_ = test::makeTestCacheConfigByTag(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}});
-        scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(scheduler_config), cache_config_, nullptr);
+        scheduler_    = std::make_unique<P2PConnectorScheduler>(std::move(scheduler_config), cache_config_, nullptr);
         ASSERT_TRUE(scheduler_->init());
     }
 
@@ -52,7 +52,7 @@ protected:
 
     // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
-        auto                          resource = std::make_shared<KVCacheResource>();
+        auto                                  resource = std::make_shared<KVCacheResource>();
         std::vector<std::vector<std::string>> layer_to_group_tags(num_layers);
         for (int i = 0; i < num_layers; ++i) {
             layer_to_group_tags[i] = {"group" + std::to_string(i)};
@@ -64,7 +64,7 @@ protected:
             // Each layer owns exactly one group; layer_to_group_tags records its tag.
             const auto& tag = layer_to_group_tags[layer_id].front();
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(tag).add({i});
+                resource->mutableBlockBinding(tag).append(poolBlockSnapshotForTest({i}));
             }
         }
 

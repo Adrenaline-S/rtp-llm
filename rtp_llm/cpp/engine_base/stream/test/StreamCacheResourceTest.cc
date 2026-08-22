@@ -36,8 +36,8 @@ namespace rtp_llm {
 class ControllableStoreContext: public AsyncContext {
 public:
     explicit ControllableStoreContext(std::shared_ptr<KVCacheConnectorReadWriteContext> connector_context,
-                                      bool                                               done    = false,
-                                      bool                                               success = false):
+                                      bool                                              done    = false,
+                                      bool                                              success = false):
         connector_context_(std::move(connector_context)), done_(done), success_(success) {}
 
     void waitDone() override {
@@ -152,7 +152,7 @@ protected:
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i, "default").size(), inner_size);
+            ASSERT_EQ(encodedPoolBlocksForTest(batch_resource.blockBinding(i, "default")).size(), inner_size);
         }
     };
 
@@ -186,7 +186,7 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     EXPECT_EQ(resource.curBlocksNum(), 0);
 
     stream_->fakeInitKVBlock(2);
-    EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
+    EXPECT_EQ(encodedPoolBlocksForTest(resource.kvCache().blockBinding(0, "__warmup__")).size(), 2);
 }
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
@@ -406,7 +406,7 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
     prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
     cache_manager_->config_.disable_decode_first_malloc_device_reuse = true;
-    auto& resource = stream_->streamCacheResource();
+    auto& resource                                                   = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);
 
     // Enable query-level reuse/device cache, but decode initKVBlock should still force device cache off.
@@ -447,8 +447,8 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             // prepareHybridResource() uses makeSimpleHybridMhaCacheConfig, whose linear group
             // is tagged "linear"; that is the group this mock used to fill.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
-                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, "linear");
-                block_ids.assign(BlockIndicesType{/*block=*/1});
+                auto& binding = info.batch_kv_cache_resource->mutableBlockBinding(b, "linear");
+                binding.assign(poolBlockSnapshotForTest(BlockIndicesType{/*block=*/1}));
             }
             return {true, 0};
         }))
@@ -609,12 +609,11 @@ TEST_F(StreamCacheResourceTest, testTieredEvictionTimeoutRetainsResourceUntilLat
     std::weak_ptr<ControllableStoreContext> pending_weak;
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_))
         .Times(1)
-        .WillOnce(testing::Invoke(
-            [&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-                auto pending = std::make_shared<ControllableStoreContext>(connector_context);
-                pending_weak = pending;
-                return pending;
-            }));
+        .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+            auto pending = std::make_shared<ControllableStoreContext>(connector_context);
+            pending_weak = pending;
+            return pending;
+        }));
 
     ASSERT_TRUE(resource.incrKVBlock().ok());
     stream_->generate_status_->status = StreamState::FINISHED;
@@ -667,21 +666,19 @@ TEST_F(StreamCacheResourceTest, testTieredEvictionLateFailureRetriesSameResource
     cache_manager_->coordinator_ = mock_coord;
 
     std::weak_ptr<ControllableStoreContext> failed_weak;
-    CacheKeysType                            first_keys;
+    CacheKeysType                           first_keys;
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_))
         .Times(2)
-        .WillOnce(testing::Invoke(
-            [&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-                first_keys  = connector_context->kvCacheResource().cacheKeys();
-                auto failed = std::make_shared<ControllableStoreContext>(connector_context);
-                failed_weak = failed;
-                return failed;
-            }))
-        .WillOnce(testing::Invoke(
-            [&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-                EXPECT_EQ(connector_context->kvCacheResource().cacheKeys(), first_keys);
-                return std::make_shared<ControllableStoreContext>(connector_context, /*done=*/true, /*success=*/true);
-            }));
+        .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+            first_keys  = connector_context->kvCacheResource().cacheKeys();
+            auto failed = std::make_shared<ControllableStoreContext>(connector_context);
+            failed_weak = failed;
+            return failed;
+        }))
+        .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+            EXPECT_EQ(connector_context->kvCacheResource().cacheKeys(), first_keys);
+            return std::make_shared<ControllableStoreContext>(connector_context, /*done=*/true, /*success=*/true);
+        }));
 
     ASSERT_TRUE(resource.incrKVBlock().ok());
     stream_->generate_status_->status = StreamState::FINISHED;
@@ -902,15 +899,15 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
 TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpState) {
     prepareResourceWithInputTokens({1, 2, 3}, /*reuse_cache=*/true);
     stream_->vocab_size_ = 16;
-    auto& resource = stream_->streamCacheResource();
+    auto& resource       = stream_->streamCacheResource();
 
     auto kv_resource = std::make_shared<KVCacheResource>();
     // Reuse accounting in this case comes from the P2P side-channel payload.
     // Keep connector-local counters at zero so they do not preempt that payload.
 
-    auto server_call_result                             = std::make_shared<PrefillLoadCaller::Result>();
-    server_call_result->side_channel_payload.has_data   = true;
-    server_call_result->side_channel_payload.first_token_id = 0;
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.first_token_id  = 0;
     server_call_result->side_channel_payload.total_reuse_len = 2;
     server_call_result->side_channel_payload.local_reuse_len = 2;
     server_call_result->side_channel_payload.propose_tokens  = {0, 7};
@@ -919,17 +916,15 @@ TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpSt
     TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_hidden,
                                torch::tensor({{0.3f, 0.4f}}, torch::kFloat32));
 
-    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(
-        kv_resource,
-        std::shared_ptr<P2PBroadcastClient::Result>(),
-        server_call_result,
-        std::shared_ptr<DecodeSchedulerMetricsCollector>(),
-        /*transfer_not_done_hold_ms=*/0);
+    auto p2p_ctx      = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource,
+                                                                  std::shared_ptr<P2PBroadcastClient::Result>(),
+                                                                  server_call_result,
+                                                                  std::shared_ptr<DecodeSchedulerMetricsCollector>(),
+                                                                  /*transfer_not_done_hold_ms=*/0);
     auto read_context = std::make_shared<FusedAsyncReadContext>(
         std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{}), kv_resource, nullptr);
-    read_context->setFusedReadContext(
-        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{
-            std::static_pointer_cast<AsyncContext>(p2p_ctx)}));
+    read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(
+        std::vector<std::shared_ptr<AsyncContext>>{std::static_pointer_cast<AsyncContext>(p2p_ctx)}));
 
     resource.updateReuseLengthsFromContext(read_context);
 
