@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 
 #include <algorithm>
-#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -181,14 +180,10 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(con
                                                                              int cp_rank,
                                                                              int cp_size,
                                                                              ConversionObserver* observer) {
-    std::unordered_set<std::string> seen_tags;
-    for (const auto tag : resource.groupTagsInConfigOrder()) {
+    for (const auto& [tag, block_ids] : resource.blocksByTag()) {
+        (void)block_ids;
         RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "P2P transfer requires a non-empty cache group tag");
         config.group(tag);
-        RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(tag).second,
-                                "P2P transfer resource contains duplicate tag=%.*s",
-                                static_cast<int>(tag.size()),
-                                tag.data());
     }
     std::vector<std::vector<std::string>> sorted_tags_by_layer;
     sorted_tags_by_layer.reserve(static_cast<size_t>(resource.layerNum()));

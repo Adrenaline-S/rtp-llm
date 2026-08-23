@@ -165,7 +165,6 @@ TEST(KVCacheResourceTest, BlocksByTagOwnsOneBlockTablePerTag) {
     const auto& blocks_by_tag = resource.blocksByTag();
     ASSERT_EQ(blocks_by_tag.size(), 2u);
     EXPECT_EQ(blocks_by_tag.begin()->first, "full");
-    EXPECT_EQ(resource.groupTagsInConfigOrder(), (std::vector<std::string_view>{"linear", "full"}));
     EXPECT_EQ(blocks_by_tag.at("full").blocks(), (BlockIndicesType{11}));
     EXPECT_EQ(blocks_by_tag.at("linear").blocks(), (BlockIndicesType{22}));
 
@@ -173,6 +172,61 @@ TEST(KVCacheResourceTest, BlocksByTagOwnsOneBlockTablePerTag) {
     EXPECT_EQ(resource.blockIds("linear").blocks(), (BlockIndicesType{22}));
     EXPECT_EQ(resource.blockIdsForLayer(0, "full").blocks(), (BlockIndicesType{11}));
     EXPECT_EQ(resource.blockIdsForLayer(0, "linear").blocks(), (BlockIndicesType{22}));
+}
+
+TEST(BatchKVCacheResourceTest, CheckValidatesEveryTagAcrossBatches) {
+    auto config = makeResourceConfig(
+        {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
+        {{0, {"full", "linear"}}});
+
+    BatchKVCacheResource batch;
+    batch.resetBatchSize(2);
+    batch.initGroups(config);
+    batch.setBatchBlocks(0, "full", {1, 2});
+    batch.setBatchBlocks(1, "full", {3, 4});
+    batch.setBatchBlocks(0, "linear", {5});
+    batch.setBatchBlocks(1, "linear", {6, 7});
+
+    EXPECT_THROW(batch.check(), std::exception);
+}
+
+TEST(BatchKVCacheResourceTest, CheckAllowsDifferentBlockCountsBetweenTags) {
+    auto config = makeResourceConfig(
+        {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
+        {{0, {"full", "linear"}}});
+
+    BatchKVCacheResource batch;
+    batch.resetBatchSize(2);
+    batch.initGroups(config);
+    batch.setBatchBlocks(0, "full", {1, 2});
+    batch.setBatchBlocks(1, "full", {3, 4});
+    batch.setBatchBlocks(0, "linear", {5});
+    batch.setBatchBlocks(1, "linear", {6});
+
+    EXPECT_NO_THROW(batch.check());
+}
+
+TEST(BatchKVCacheResourceTest, CheckRejectsDifferentTagSetsWithTheSameSize) {
+    auto expected_config = makeResourceConfig(
+        {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
+        {{0, {"full", "linear"}}});
+    auto different_config = makeResourceConfig(
+        {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("state", CacheGroupType::LINEAR)},
+        {{0, {"full", "state"}}});
+
+    BatchKVCacheResource batch;
+    batch.resetBatchSize(2);
+    batch.initGroups(expected_config);
+    batch.setBatchBlocks(0, "full", {1});
+    batch.setBatchBlocks(0, "linear", {2});
+
+    KVCacheResource different_resource;
+    different_resource.initGroups(different_config);
+    different_resource.mutableBlockIds("full").assign({3});
+    different_resource.mutableBlockIds("state").assign({4});
+    batch.moveBatchResource(1, std::move(different_resource));
+
+    EXPECT_THROW(batch.check(), std::exception);
 }
 
 TEST(KVCacheResourceTest, UnknownTagIsRejectedWithoutMutatingStorage) {

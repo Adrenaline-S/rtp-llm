@@ -148,23 +148,16 @@ public:
 
     void check() const {
         RTP_LLM_CHECK(!batch_resource.empty());
-        // Faithful translation of the pre-tag check, which compared the block count
-        // of a single group across every batch. The group it compared was the one
-        // stored first, i.e. the first group in topology order, so that is the group
-        // named by tag here.
-        //
-        // FOLLOW-UP(cache-batch-resource-check-all-groups): widening this to every
-        // group is a deliberate later change, not an oversight -- it would reject
-        // batches that the pre-tag engine accepted, so it must not ride along with a
-        // behavior-preserving refactor.
-        const auto tags = batch_resource[0].groupTagsInConfigOrder();
-        // The pre-tag form resolved positional group 0 through a lookup that failed
-        // when the resource carried no groups, so an empty group list stays a failure.
-        RTP_LLM_CHECK(!tags.empty());
-        const std::string_view first_tag  = tags.front();
-        const size_t       blocks_num = batch_resource[0].blocksNum(first_tag);
+        const auto& expected_blocks_by_tag = batch_resource[0].blocksByTag();
+        RTP_LLM_CHECK(!expected_blocks_by_tag.empty());
         for (const auto& resource : batch_resource) {
-            RTP_LLM_CHECK(resource.blocksNum(first_tag) == blocks_num);
+            const auto& blocks_by_tag = resource.blocksByTag();
+            RTP_LLM_CHECK(blocks_by_tag.size() == expected_blocks_by_tag.size());
+            for (const auto& [tag, expected_blocks] : expected_blocks_by_tag) {
+                const auto it = blocks_by_tag.find(tag);
+                RTP_LLM_CHECK(it != blocks_by_tag.end());
+                RTP_LLM_CHECK(it->second.blocksNum() == expected_blocks.blocksNum());
+            }
         }
     }
 

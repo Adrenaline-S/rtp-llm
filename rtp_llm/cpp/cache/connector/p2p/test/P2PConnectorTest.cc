@@ -233,16 +233,26 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
     EXPECT_EQ(ctx.matchedBlockCount(), 3u);
 }
 
-TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesFirstNonEmptyConfigGroup) {
+TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesCacheKeyTimelineInsteadOfAnyGroupBlockCount) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
     resource->mutableBlockIds("group0").assign({10, 11});
     resource->mutableBlockIds("group1").assign({20, 21, 22, 23});
+    resource->setCacheKeys({100, 101, 102});
 
     P2PConnectorAsyncMatchContext ctx(resource);
-    EXPECT_EQ(ctx.matchedBlockCount(), 2u);
+    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+}
 
-    EXPECT_EQ(ctx.matchedBlockCount(), 2u);
+TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountIsZeroForNullOrEmptyTimeline) {
+    P2PConnectorAsyncMatchContext null_ctx(nullptr);
+    EXPECT_EQ(null_ctx.matchedBlockCount(), 0u);
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/1, /*layer_num=*/1, {{"group0"}}));
+    resource->mutableBlockIds("group0").assign({10, 11});
+    P2PConnectorAsyncMatchContext empty_ctx(resource);
+    EXPECT_EQ(empty_ctx.matchedBlockCount(), 0u);
 }
 
 // 测试: scheduler_->sendKVCache 失败，返回 INTERNAL 错误

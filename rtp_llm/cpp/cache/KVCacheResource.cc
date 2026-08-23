@@ -9,12 +9,10 @@ namespace rtp_llm {
 void KVCacheResource::initGroups(const CacheConfig& config) {
 
     layer_group_tags_.clear();
-    group_tags_in_config_order_.clear();
     blocks_by_tag_.clear();
 
     const auto& groups = config.topology().groups();
 
-    group_tags_in_config_order_.reserve(groups.size());
     for (const auto& group : groups) {
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "KVCacheResource requires a non-empty cache group tag");
 
@@ -25,7 +23,6 @@ void KVCacheResource::initGroups(const CacheConfig& config) {
             blocks_by_tag_.emplace(group.tag, BlockIds(stored_blocks_per_kv_block)).second,
             "KVCacheResource has duplicate tag=%s",
             group.tag.c_str());
-        group_tags_in_config_order_.push_back(group.tag);
     }
 
     const auto& layers = config.topology().layers();
@@ -236,15 +233,6 @@ int KVCacheResource::groupNums() const {
 
 const std::map<std::string, BlockIds>& KVCacheResource::blocksByTag() const {
     return blocks_by_tag_;
-}
-
-std::vector<std::string_view> KVCacheResource::groupTagsInConfigOrder() const {
-    std::vector<std::string_view> tags;
-    tags.reserve(group_tags_in_config_order_.size());
-    for (const auto& tag : group_tags_in_config_order_) {
-        tags.push_back(tag);
-    }
-    return tags;
 }
 
 bool KVCacheResource::layerOwnsTag(int layer_id, std::string_view tag) const {

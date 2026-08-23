@@ -105,11 +105,6 @@ public:
 
     const std::map<std::string, BlockIds>& blocksByTag() const;
 
-    // Group tags in the order the CacheConfig declared them, fixed at initGroups() time.
-    // Use it where a consumer must reproduce "the first group the parent config declared".
-    // The views alias tags owned by this resource and stay valid until the next initGroups().
-    std::vector<std::string_view> groupTagsInConfigOrder() const;
-
     bool layerOwnsTag(int layer_id, std::string_view tag) const;
 
     const CacheKeysType& cacheKeys() const;
@@ -163,7 +158,6 @@ private:
     bool               layerContainsTag(int layer_id, std::string_view tag) const;
 
     std::vector<std::vector<std::string>> layer_group_tags_;
-    std::vector<std::string>              group_tags_in_config_order_;
     mutable std::map<std::string, BlockIds> blocks_by_tag_;
     CacheKeysType                         cache_keys;
     BlockDependenciesType                 block_dependencies;
