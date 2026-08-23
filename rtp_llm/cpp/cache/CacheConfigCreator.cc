@@ -403,12 +403,11 @@ void finalizeGroupStorage(CacheConfig& config, bool is_mtp) {
                                 group.tag.c_str(),
                                 group.seq_size_per_block,
                                 group.kernel_seq_size_per_block);
-        const size_t blocks_per_kernel = group.seq_size_per_block / group.kernel_seq_size_per_block;
-        group.kv_block_stride_bytes    = group.spec->block_size_bytes() * blocks_per_kernel;
-        group.kv_scale_stride_bytes    = group.spec->scale_block_size_bytes() * blocks_per_kernel;
-        group.block_num                = 0;
-        group_kv_strides[idx]          = group.kv_block_stride_bytes;
-        group_scale_strides[idx]       = group.kv_scale_stride_bytes;
+        group.kv_block_stride_bytes = group.spec->block_size_bytes();
+        group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
+        group.block_num             = 0;
+        group_kv_strides[idx]       = group.kv_block_stride_bytes;
+        group_scale_strides[idx]    = group.kv_scale_stride_bytes;
 
         const auto layer_count = static_cast<uint32_t>(group.layer_ids.size());
         const bool contributes_to_paged_budget =

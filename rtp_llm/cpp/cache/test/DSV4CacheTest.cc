@@ -49,7 +49,7 @@ const std::set<std::string> kDsv4ProTags = {
 
 std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& tag,
                                                            uint32_t           entry_elems,
-                                                           uint32_t           entries_per_block,
+                                                           uint32_t           kernel_entries_per_block,
                                                            DataType           dtype,
                                                            uint32_t           compression_ratio          = 1,
                                                            size_t             block_size_bytes_alignment = 0) {
@@ -66,7 +66,7 @@ std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& ta
     SpecBuildContext ctx;
     ctx.dtype                   = dtype;
     ctx.seq_size_per_block      = kDsv4TokensPerBlock;
-    ctx.kernel_tokens_per_block = entries_per_block * compression_ratio;
+    ctx.kernel_tokens_per_block = kernel_entries_per_block * compression_ratio;
     return std::dynamic_pointer_cast<CompressedKVCacheSpec>(SpecBuilder::build(desc, ctx).spec);
 }
 
@@ -718,9 +718,9 @@ TEST(CacheConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBlockSi
 
 // Ported from DEV CacheConfigCreatorTest.DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk.
 // The test above pins the coupled default (physical == kernel == 128, bpk 1); this one pins the
-// decoupled case, where compressed pools stride by bpk kernel blocks while STATE_RING pools keep
-// bpk 1 because their kernel block equals their physical block.
-TEST(CacheConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk) {
+// decoupled case, where compressed specs own a physical block while their layer views expose bpk
+// kernel blocks. STATE_RING pools keep bpk 1 because their kernel block equals their physical block.
+TEST(CacheConfigCreatorTest, DecoupledPhysicalSpecStrideAndKernelViewUsePerGroupBpk) {
     ParallelismConfig pc;
     auto              mc = makeProModelConfig();
     KVCacheConfig     kv_cache_config;
@@ -749,18 +749,17 @@ TEST(CacheConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk)
     ASSERT_NE(hca_kv, nullptr);
     ASSERT_NE(idx_kv, nullptr);
     ASSERT_NE(swa_kv, nullptr);
-    // Entries per kernel block: kernel_tokens / compression_ratio for compressed pools, and the
-    // state-ring window for swa_kv.
-    EXPECT_EQ(opaqueEntriesPerBlock(*csa_kv, kDsv4KvEntryBytes), 32u);
-    EXPECT_EQ(opaqueEntriesPerBlock(*hca_kv, kDsv4KvEntryBytes), 1u);
-    EXPECT_EQ(opaqueEntriesPerBlock(*idx_kv, kDsv4IndexerEntryBytes), 32u);
+    // Compressed specs own all entries in one physical block; swa_kv owns its state-ring window.
+    EXPECT_EQ(opaqueEntriesPerBlock(*csa_kv, kDsv4KvEntryBytes), 4096u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*hca_kv, kDsv4KvEntryBytes), 128u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*idx_kv, kDsv4IndexerEntryBytes), 4096u);
     EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 128u);
 
     EXPECT_EQ(config.kernelBlocksPerKvBlock(csa_kv_tag), 128u);
     EXPECT_EQ(config.kernelBlocksPerKvBlock(swa_kv_tag), 1u);
-    EXPECT_EQ(config.group(csa_kv_tag).kv_block_stride_bytes, csa_kv->block_size_bytes() * 128u);
-    EXPECT_EQ(config.group(hca_kv_tag).kv_block_stride_bytes, hca_kv->block_size_bytes() * 128u);
-    EXPECT_EQ(config.group(idx_kv_tag).kv_block_stride_bytes, idx_kv->block_size_bytes() * 128u);
+    EXPECT_EQ(config.group(csa_kv_tag).kv_block_stride_bytes, csa_kv->block_size_bytes());
+    EXPECT_EQ(config.group(hca_kv_tag).kv_block_stride_bytes, hca_kv->block_size_bytes());
+    EXPECT_EQ(config.group(idx_kv_tag).kv_block_stride_bytes, idx_kv->block_size_bytes());
     EXPECT_EQ(config.group(swa_kv_tag).kv_block_stride_bytes, swa_kv->block_size_bytes());
 
     auto full_pool_bpk = BlockPoolConfigHelper::createConfigForGroup(config, "csa_kv");
@@ -1017,36 +1016,35 @@ TEST(GenericOpaqueCacheSpecTest, KVSpecFromPoolSpec) {
         "csa_kv", kDsv4Fp8KvEntryBytes, 64, DataType::TYPE_UINT8, 1, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES);
     ASSERT_NE(spec, nullptr);
 
-    EXPECT_EQ(spec->block_size(), 64u * kDsv4Fp8KvEntryBytes);
-    EXPECT_EQ(spec->block_size_bytes(), 37440u);
-    EXPECT_EQ(spec->block_size_bytes(), 37440u);
-    EXPECT_EQ(spec->block_size() / kDsv4Fp8KvEntryBytes, 64u);
+    EXPECT_EQ(spec->block_size(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
+    EXPECT_EQ(spec->block_size_bytes(), 74880u);
+    EXPECT_EQ(spec->block_size() / kDsv4Fp8KvEntryBytes, kDsv4TokensPerBlock);
 
     auto hca_spec = buildCompressedSpec(
         "hca_kv", kDsv4Fp8KvEntryBytes, 2, DataType::TYPE_UINT8, 1, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES);
     ASSERT_NE(hca_spec, nullptr);
-    EXPECT_EQ(hca_spec->block_size(), 2u * kDsv4Fp8KvEntryBytes);
-    EXPECT_EQ(hca_spec->block_size_bytes(), 1728u);
+    EXPECT_EQ(hca_spec->block_size(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
+    EXPECT_EQ(hca_spec->block_size_bytes(), 64u * 1728u);
 }
 
 TEST(GenericOpaqueCacheSpecTest, CompressedKVSpecReportsGenericKindsAndLayout) {
     auto spec = buildCompressedSpec(
-        "compressed", kDsv4Fp8KvEntryBytes, 64, DataType::TYPE_UINT8, 4, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES);
+        "compressed", kDsv4Fp8KvEntryBytes, 32, DataType::TYPE_UINT8, 4, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES);
     ASSERT_NE(spec, nullptr);
 
     EXPECT_EQ(spec->type, KVCacheSpecType::OpaqueKV);
-    EXPECT_EQ(spec->block_size(), 64u * kDsv4Fp8KvEntryBytes);
-    EXPECT_EQ(spec->block_size_bytes(), 37440u);
-    EXPECT_EQ(spec->block_size() / kDsv4Fp8KvEntryBytes, 64u);
-    EXPECT_EQ(spec->k_block_payload_bytes() / 64u, static_cast<size_t>(kDsv4Fp8KvEntryBytes));
+    EXPECT_EQ(spec->block_size(), 32u * kDsv4Fp8KvEntryBytes);
+    EXPECT_EQ(spec->block_size_bytes(), 19008u);
+    EXPECT_EQ(spec->block_size() / kDsv4Fp8KvEntryBytes, 32u);
+    EXPECT_EQ(spec->k_block_payload_bytes() / 32u, static_cast<size_t>(kDsv4Fp8KvEntryBytes));
 }
 
 TEST(GenericOpaqueCacheSpecTest, OpaqueKVSpecUsesSingleRegionWithoutKVSplit) {
     auto spec = buildCompressedSpec("odd_kv", 3, 1, DataType::TYPE_UINT8);
     ASSERT_NE(spec, nullptr);
-    EXPECT_EQ(spec->k_block_size(), 3u);
+    EXPECT_EQ(spec->k_block_size(), kDsv4TokensPerBlock * 3u);
     EXPECT_EQ(spec->v_block_size(), 0u);
-    EXPECT_EQ(spec->k_block_size_bytes(), 3u);
+    EXPECT_EQ(spec->k_block_size_bytes(), kDsv4TokensPerBlock * 3u);
     EXPECT_EQ(spec->v_block_size_bytes(), 0u);
 }
 
@@ -1164,8 +1162,8 @@ TEST(GenericOpaqueCacheSpecTest, IndexerKVSpec) {
     auto spec = buildCompressedSpec("indexer_kv", 132, 64, DataType::TYPE_UINT8);
     ASSERT_NE(spec, nullptr);
 
-    EXPECT_EQ(spec->block_size(), 64u * 132u);
-    EXPECT_EQ(spec->block_size_bytes(), 64u * 132u);
+    EXPECT_EQ(spec->block_size(), kDsv4TokensPerBlock * 132u);
+    EXPECT_EQ(spec->block_size_bytes(), kDsv4TokensPerBlock * 132u);
 }
 
 TEST(GenericOpaqueCacheSpecTest, HCAStateSpec) {
@@ -1571,7 +1569,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
 
     auto compressed = std::dynamic_pointer_cast<CompressedKVCacheSpec>(SpecBuilder::build(compressed_desc, ctx).spec);
     ASSERT_NE(compressed, nullptr);
-    EXPECT_EQ(compressed->block_size() / compressed_desc.entry_elems, 32u);
+    EXPECT_EQ(compressed->block_size() / compressed_desc.entry_elems, 64u);
     EXPECT_EQ(compressed->seq_size_per_block, 256u);
     EXPECT_EQ(compressed->memoryLayoutDType(), DataType::TYPE_UINT8);
 
