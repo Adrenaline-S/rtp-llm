@@ -8,6 +8,8 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -26,6 +28,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -358,8 +361,10 @@ protected:
     void prepareStreamWithConfig(const std::vector<int>& input_tokens,
                                  const CacheConfig&      cache_config,
                                  int                     tokens_per_block,
-                                 RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr);
+                                 RoleType                role_type,
+                                 const KVCacheConfig&    kv_cache_config = KVCacheConfig{}) {
+        cache_manager_ =
+            std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager_->init());
         initial_free_blocks_ = cache_manager_->freeBlocksNum();
 
@@ -381,6 +386,7 @@ protected:
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = tokens_per_block;
         model_config.max_seq_len                  = std::max<int64_t>(2048, input_tokens.size() + tokens_per_block);
+        model_config.vocab_size                   = 1024;
         RuntimeConfig runtime_config;
 
         stream_ = std::make_shared<NormalGenerateStream>(
@@ -563,6 +569,481 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
                             << "reuse_len=" << reuse_len;
 
     stream2->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testTerminalOutputPublishesDeviceCacheBeforeSchedulerRelease) {
+    const std::vector<int> input_tokens = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    prepareStream(input_tokens);
+    stream_->generateConfig()->max_new_tokens = 1;
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+
+    const int32_t terminal_token = 15;
+    stream_->update({.new_tokens = torch::tensor({terminal_token}, torch::kInt32).reshape({1, 1}),
+                     .num_new_tokens = 1});
+
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+    EXPECT_TRUE(output.value().generate_outputs.front().finished);
+    EXPECT_FALSE(resource.resource_released_);
+    EXPECT_TRUE(resource.device_cache_published_);
+
+    auto next_input_tokens = input_tokens;
+    next_input_tokens.push_back(terminal_token);
+
+    ResourceContext next_context;
+    next_context.cache_manager       = cache_manager_;
+    next_context.reuse_cache         = true;
+    next_context.enable_device_cache = true;
+    next_context.role_type           = RoleType::PREFILL;
+
+    auto next_input                   = std::make_shared<GenerateInput>();
+    auto next_config                  = std::make_shared<GenerateConfig>();
+    next_config->num_return_sequences = 1;
+    next_config->reuse_cache          = true;
+    next_config->enable_device_cache  = true;
+    next_input->input_ids =
+        torch::tensor(std::vector<int32_t>(next_input_tokens.begin(), next_input_tokens.end()), torch::kInt32);
+    next_input->generate_config = next_config;
+
+    ModelConfig next_model_config;
+    next_model_config.attn_config.tokens_per_block = 8;
+    next_model_config.max_seq_len                  = 2048;
+    next_model_config.vocab_size                   = 1024;
+    auto next_stream = std::make_shared<NormalGenerateStream>(
+        next_input, next_model_config, RuntimeConfig{}, next_context, nullptr);
+    next_stream->generate_status_->status = StreamState::RUNNING;
+
+    ASSERT_TRUE(next_stream->streamCacheResource().initKVBlock().ok());
+    EXPECT_GE(next_stream->reuseLength(), 8)
+        << "terminal request must publish its full device-cache prefix before scheduler-owned release";
+
+    next_stream->releaseResource();
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testTerminalOutputWaitsForSynchronousMemoryCachePublication) {
+    const std::vector<int> input_tokens = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    prepareStream(input_tokens);
+    stream_->generateConfig()->max_new_tokens       = 1;
+    stream_->generateConfig()->enable_device_cache  = false;
+    stream_->generateConfig()->enable_memory_cache  = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+
+    std::atomic<bool> store_submitted{false};
+    std::atomic<bool> store_done{false};
+    auto              store_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*store_context, done()).WillByDefault(testing::Invoke([&] { return store_done.load(); }));
+    ON_CALL(*store_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(1)
+        .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>&) {
+            store_submitted.store(true);
+            return store_context;
+        }));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+
+    const int32_t terminal_token = 15;
+    stream_->update({.new_tokens = torch::tensor({terminal_token}, torch::kInt32).reshape({1, 1}),
+                     .num_new_tokens = 1});
+    auto output = std::async(std::launch::async, [&] { return stream_->nextOutput(); });
+
+    const auto submit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!store_submitted.load() && std::chrono::steady_clock::now() < submit_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!store_submitted.load()) {
+        store_done.store(true);
+        output.wait();
+        FAIL() << "terminal update did not submit synchronous memory publication";
+        return;
+    }
+
+    EXPECT_EQ(output.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout)
+        << "terminal output must stay consumer-invisible while synchronous memory publication is pending";
+
+    store_done.store(true);
+    ASSERT_EQ(output.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    auto output_result = output.get();
+    ASSERT_TRUE(output_result.ok());
+    const auto& generate_outputs = output_result.value().generate_outputs;
+    ASSERT_EQ(generate_outputs.size(), 1u);
+    EXPECT_TRUE(generate_outputs.front().finished);
+    EXPECT_FALSE(resource.resource_released_);
+    EXPECT_TRUE(resource.memory_cache_published_);
+
+    // Simulate the scheduler committing the pending GenerateDone event before
+    // release. The release path must not submit the already-published cache again.
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPermanentlyPendingSynchronousPublicationHasBoundedConsumerAndReleaseWaits) {
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.memory_cache_sync_timeout_ms = 20;
+    prepareStreamWithConfig({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
+                            makeConfig(),
+                            /*tokens_per_block=*/8,
+                            RoleType::PREFILL,
+                            kv_cache_config);
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    std::atomic<bool> done{false};
+    auto              pending_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*pending_context, done()).WillByDefault(testing::Invoke([&] { return done.load(); }));
+    ON_CALL(*pending_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(1).WillOnce(testing::Return(pending_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output_future = std::async(std::launch::async, [&] { return stream_->nextOutput(); });
+    const auto output_wait = output_future.wait_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(output_wait, std::future_status::ready)
+        << "write_cache_sync must not block terminal output past its configured deadline";
+    if (output_wait != std::future_status::ready) {
+        done.store(true);
+    }
+    auto output = output_future.get();
+    ASSERT_TRUE(output.ok());
+
+    if (output_wait == std::future_status::ready) {
+        EXPECT_EQ(resource.store_cache_context_, pending_context);
+        EXPECT_FALSE(resource.memory_cache_published_);
+        stream_->generate_status_->status = StreamState::FINISHED;
+        auto release = std::async(std::launch::async, [&] { stream_->releaseResource(); });
+        EXPECT_EQ(release.wait_for(std::chrono::milliseconds(150)), std::future_status::ready)
+            << "scheduler release must also bound synchronous cache publication waits";
+        release.wait();
+        EXPECT_EQ(resource.store_cache_context_, pending_context);
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testTimedOutSynchronousPublicationLateSuccessConvergesWithoutDuplicate) {
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.memory_cache_sync_timeout_ms = 20;
+    prepareStreamWithConfig({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
+                            makeConfig(),
+                            /*tokens_per_block=*/8,
+                            RoleType::PREFILL,
+                            kv_cache_config);
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    std::atomic<bool> done{false};
+    auto              context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*context, done()).WillByDefault(testing::Invoke([&] { return done.load(); }));
+    ON_CALL(*context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(1).WillOnce(testing::Return(context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output_future = std::async(std::launch::async, [&] { return stream_->nextOutput(); });
+    const auto output_wait = output_future.wait_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(output_wait, std::future_status::ready);
+    if (output_wait != std::future_status::ready) {
+        done.store(true);
+    }
+    ASSERT_TRUE(output_future.get().ok());
+
+    if (output_wait == std::future_status::ready) {
+        EXPECT_FALSE(resource.memory_cache_published_);
+        done.store(true);
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->releaseResource();
+        EXPECT_TRUE(resource.memory_cache_published_);
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testTimedOutSynchronousPublicationLateFailureRetriesAtRelease) {
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.memory_cache_sync_timeout_ms = 20;
+    prepareStreamWithConfig({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
+                            makeConfig(),
+                            /*tokens_per_block=*/8,
+                            RoleType::PREFILL,
+                            kv_cache_config);
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    std::atomic<bool> failed_done{false};
+    auto              failed_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*failed_context, done()).WillByDefault(testing::Invoke([&] { return failed_done.load(); }));
+    ON_CALL(*failed_context, success()).WillByDefault(testing::Return(false));
+    auto success_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*success_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(2)
+        .WillOnce(testing::Return(failed_context))
+        .WillOnce(testing::Return(success_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output_future = std::async(std::launch::async, [&] { return stream_->nextOutput(); });
+    const auto output_wait = output_future.wait_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(output_wait, std::future_status::ready);
+    if (output_wait != std::future_status::ready) {
+        failed_done.store(true);
+    }
+    ASSERT_TRUE(output_future.get().ok());
+
+    if (output_wait == std::future_status::ready) {
+        EXPECT_FALSE(resource.memory_cache_published_);
+        failed_done.store(true);
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->releaseResource();
+        EXPECT_TRUE(resource.memory_cache_published_);
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testCancelBeforeTerminalConsumeDoesNotPublishCache) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(0);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    stream_->reportEvent(StreamEvents::Error, ErrorCode::CANCELLED, "cancelled before terminal consume");
+
+    auto output = stream_->nextOutput();
+    ASSERT_FALSE(output.ok());
+    EXPECT_EQ(output.status().code(), ErrorCode::CANCELLED);
+    EXPECT_FALSE(resource.memory_cache_published_);
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPdRemoteHandoffOutputDoesNotPublishCache) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens       = 8;
+    stream_->generateConfig()->pd_separation        = true;
+    stream_->generateConfig()->enable_device_cache  = false;
+    stream_->generateConfig()->enable_memory_cache  = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(0);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens             = torch::tensor({15}, torch::kInt32).reshape({1, 1}),
+                     .num_new_tokens         = 1,
+                     .update_remote_generate = true});
+    ASSERT_TRUE(stream_->hasEvent(StreamEvents::NeedRemoteGenerate));
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    resource.releaseKVCacheForPDSep();
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testNullSynchronousPublicationRetriesAtRelease) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    auto success_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*success_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(2)
+        .WillOnce(testing::Return(nullptr))
+        .WillOnce(testing::Return(success_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPendingAsynchronousPublicationIsNotSubmittedAgainAtRelease) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = false;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    auto pending_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*pending_context, done()).WillByDefault(testing::Return(false));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(1).WillOnce(testing::Return(pending_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_EQ(resource.store_cache_context_, pending_context);
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testFailedSynchronousPublicationRetriesAtRelease) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    auto failed_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*failed_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*failed_context, success()).WillByDefault(testing::Return(false));
+    auto success_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*success_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(2)
+        .WillOnce(testing::Return(failed_context))
+        .WillOnce(testing::Return(success_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPublicationExceptionDoesNotFailInferenceAndRetriesAtRelease) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    auto success_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*success_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(2)
+        .WillOnce(testing::Invoke([](const std::shared_ptr<KVCacheConnectorReadWriteContext>&)
+                                      -> std::shared_ptr<AsyncContext> {
+            throw std::runtime_error("publication failed");
+        }))
+        .WillOnce(testing::Return(success_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
 }
 
 // =============================================================================

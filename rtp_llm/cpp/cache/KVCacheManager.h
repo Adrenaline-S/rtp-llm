@@ -45,6 +45,9 @@ public:
 
     const CacheConfig& cacheConfig() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
+    int64_t            memoryCacheSyncTimeoutMs() const {
+        return kv_cache_config_.memory_cache_sync_timeout_ms;
+    }
 
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);

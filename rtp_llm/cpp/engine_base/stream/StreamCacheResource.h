@@ -33,6 +33,10 @@ public:
     // seq_len_override (-1 = unset) is forwarded to MallocInfo::incr_seq_len_override.
     absl::Status         incrKVBlock(int seq_len_override = -1);
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
+    // Best-effort publication of reusable cache tiers without releasing block
+    // ownership. Successful tiers and in-flight async connector writes are
+    // idempotent across the consumer and scheduler release paths.
+    void                 publishCache();
     int                  tryReleaseKVBlock(size_t nums);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
@@ -124,14 +128,17 @@ public:
     }
 
 private:
+    void publishConnectorCache();
     void loadCacheSync();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
     std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
                                                   bool                                         enable_memory_cache,
                                                   bool                                         enable_remote_cache);
-    void                          evictDeviceCacheToMemory();
-    void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
+    bool                          evictDeviceCacheToMemory(std::shared_ptr<AsyncContext>&        store_context,
+                                                          BatchKVCacheResourcePtr& evicted_resource);
+    void                          releaseTieredStoreResource();
+    bool                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:
     GenerateStream*                stream_;
@@ -144,6 +151,14 @@ private:
     int                           malloc_failed_times_   = 0;
     bool                          fake_inited_           = false;
     bool                          resource_released_     = false;
+    bool                          device_cache_published_ = false;
+    bool                          memory_cache_published_ = false;
+    bool                          remote_cache_published_ = false;
+    std::shared_ptr<AsyncContext> store_cache_context_;
+    bool                          store_context_memory_ = false;
+    bool                          store_context_remote_ = false;
+    std::shared_ptr<AsyncContext> tiered_store_context_;
+    BatchKVCacheResourcePtr       tiered_store_resource_;
     std::shared_ptr<AsyncContext> load_cache_context_;
     int                           load_cache_retry_count_ = 0;
 

@@ -49,12 +49,26 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeo
 
     // Normal completion is reported only after the final output is drained.
     if (!generate_outputs_.empty()) {
+        const auto& next_output = generate_outputs_.front();
+        const bool  terminal_output =
+            !next_output.generate_outputs.empty()
+            && std::all_of(next_output.generate_outputs.begin(),
+                           next_output.generate_outputs.end(),
+                           [](const GenerateOutput& output) { return output.finished; });
+        if (terminal_output && hasEventWithoutLock(StreamEvents::GenerateDone)
+            && !hasEventWithoutLock(StreamEvents::NeedRemoteGenerate) && !queryPdSep()) {
+            stream_cache_resource_->publishCache();
+        }
         auto output = std::move(generate_outputs_.front());
         generate_outputs_.pop_front();
         return output;
     }
 
     if (consumerFinishedWithoutLock()) {
+        if (hasEventWithoutLock(StreamEvents::GenerateDone)
+            && !hasEventWithoutLock(StreamEvents::NeedRemoteGenerate) && !queryPdSep()) {
+            stream_cache_resource_->publishCache();
+        }
         return ErrorInfo(ErrorCode::FINISHED, "finished");
     }
 
