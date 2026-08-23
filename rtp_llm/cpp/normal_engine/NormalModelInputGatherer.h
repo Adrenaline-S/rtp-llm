@@ -16,28 +16,34 @@ namespace rtp_llm {
 
 struct TensorHolder;
 
+// One cache group as the gatherer sees it. The record owns its semantic tag, so
+// the vector's local order carries no meaning; every positional payload the
+// gatherer packs is ordered by sortedCacheGroupTags() instead.
+struct GathererCacheGroup {
+    std::string    tag;
+    CacheGroupType type = CacheGroupType::FULL;
+};
+
 struct NormalModelInputGathererConfig {
-    size_t                      num_layers{};
-    size_t                      vocab_size{};
-    size_t                      input_vocab_size{};
-    bool                        has_positional_encoding{};
-    bool                        is_multimodal{};
-    PositionIdsStyle            mm_position_ids_style{};
-    size_t                      position_id_len_factor{};
-    RoleType                    role_type{};
-    bool                        decode_entrance{};
-    size_t                      block_stride_bytes{};
-    size_t                      scale_stride_bytes{};
-    size_t                      seq_size_per_block{};
-    size_t                      kernel_seq_size_per_block{};
-    size_t                      kernel_blocks_per_kv_block = 1;
-    size_t                      kv_cache_group_nums        = 1;
-    bool                        use_opaque_kv_cache_store  = false;
-    std::vector<CacheGroupType> kv_cache_group_types;
-    std::vector<std::string>    kv_cache_group_tags;
-    bool                        warm_up{};
-    bool                        enable_detail_log{};
-    bool                        enable_model_inputs_log{};
+    size_t                          num_layers{};
+    size_t                          vocab_size{};
+    size_t                          input_vocab_size{};
+    bool                            has_positional_encoding{};
+    bool                            is_multimodal{};
+    PositionIdsStyle                mm_position_ids_style{};
+    size_t                          position_id_len_factor{};
+    RoleType                        role_type{};
+    bool                            decode_entrance{};
+    size_t                          block_stride_bytes{};
+    size_t                          scale_stride_bytes{};
+    size_t                          seq_size_per_block{};
+    size_t                          kernel_seq_size_per_block{};
+    size_t                          kernel_blocks_per_kv_block = 1;
+    bool                            use_opaque_kv_cache_store  = false;
+    std::vector<GathererCacheGroup> kv_cache_groups;
+    bool                            warm_up{};
+    bool                            enable_detail_log{};
+    bool                            enable_model_inputs_log{};
 };
 
 class NormalModelInputGatherer {
@@ -61,6 +67,10 @@ private:
                                          TensorHolder&       host_holder) const;
 
     NormalModelInputGathererConfig config_;
+    // Canonical sorted cache tags. Entry i of every group-dimension model-input
+    // payload belongs to boundary_group_tags_[i]; the consuming model derives the
+    // same order from its own CacheConfig.
+    std::vector<std::string>       boundary_group_tags_;
 };
 
 }  // namespace rtp_llm

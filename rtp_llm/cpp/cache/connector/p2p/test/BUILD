@@ -101,6 +101,7 @@ cc_test(
         "main.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
@@ -109,4 +110,15 @@ cc_test(
     ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
+)
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test, the terminal
+# source gate that rejects positional cache group routing in this package.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
 )

@@ -127,4 +127,24 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
 }
 
+TEST_F(ModelDataTest, testCacheGroupTagsNameTheGroupDimensionAndStayRankLocal) {
+    GptModelInputs inputs;
+    inputs.kv_cache_group_tags     = {"full", "linear"};
+    inputs.kv_cache_kernel_block_id = torch::zeros({2, 1, 4}, torch::kInt32);
+    inputs.kv_cache_block_id        = torch::zeros({2, 1, 4}, torch::kInt32);
+    inputs.input_lengths            = torch::ones({1}, torch::kInt32);
+
+    // The group dimension is described on the wire by its count only: the tag
+    // list is derived independently on every rank, so no shape hint carries it.
+    const auto shape_hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(shape_hints[GptModelInputIndex::kvCacheGroupNum], 2);
+    EXPECT_EQ(static_cast<size_t>(shape_hints[GptModelInputIndex::kvCacheGroupNum]),
+              inputs.kv_cache_group_tags.size());
+
+    const auto debug_string = inputs.debugString(/*force=*/true);
+    EXPECT_NE(debug_string.find("kv_cache_group_tags"), std::string::npos);
+    EXPECT_NE(debug_string.find("full"), std::string::npos);
+    EXPECT_NE(debug_string.find("linear"), std::string::npos);
+}
+
 }  // namespace rtp_llm

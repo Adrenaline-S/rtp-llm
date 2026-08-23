@@ -387,21 +387,33 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     const size_t group_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
     RTP_LLM_CHECK_WITH_INFO(kv_cache_layer_layout_.has_value(),
                             "tagged attention inputs require the current model cache layout");
-    const auto& group_tags = kv_cache_layer_layout_->topology().groupTagsSnapshot();
+    // Boundary adapter (C++ -> Python): dim 0 of the block tables is an
+    // adapter-local group_ordinal in canonical sorted-tag order. The producing
+    // gatherer derives the same order from its own CacheConfig, so no ordering
+    // travels with the tensors and reordering the topology records cannot move a
+    // group. The ordinal never leaves this function.
+    const auto& group_tags = kv_cache_boundary_group_tags_;
     RTP_LLM_CHECK_WITH_INFO(group_tags.size() == group_count,
-                            "KV block table group count=%zu does not match topology tag count=%zu",
+                            "KV block table group count=%zu does not match cache tag count=%zu",
                             group_count,
                             group_tags.size());
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 3,
                             "physical kv_cache_block_id must be 3-D for tagged inputs");
+    RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined()
+                                || static_cast<size_t>(inputs.kv_cache_block_id.size(0)) == group_count,
+                            "physical kv_cache_block_id group count=%ld does not match kernel block table count=%zu",
+                            inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(0) : -1,
+                            group_count);
+    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_group_tags.empty() || inputs.kv_cache_group_tags == group_tags,
+                            "model input cache tags do not match this model's cache layout tags");
 
     torch_ext::AttentionInputsByTag by_tag;
-    for (size_t group_id = 0; group_id < group_count; ++group_id) {
-        auto group_inputs                            = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[group_id];
+    for (size_t group_ordinal = 0; group_ordinal < group_count; ++group_ordinal) {
+        auto group_inputs                     = py_attn_inputs;
+        group_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id[group_ordinal];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
+            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_ordinal];
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
             if (group_inputs.cache_store_inputs.has_value()) {
                 group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
@@ -409,13 +421,14 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                                                             group_inputs.kv_cache_block_id;
             }
         }
-        const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));
+        const auto [it, inserted] = by_tag.emplace(group_tags[group_ordinal], std::move(group_inputs));
         (void)it;
-        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group_tags[group_id].c_str());
+        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group_tags[group_ordinal].c_str());
     }
 
     // A single global group keeps the direct fast path. Multiple groups are
-    // exposed only through the outer tag mapping.
+    // exposed only through the outer tag mapping, with the lowest tag mirrored
+    // into the direct field so the mirror does not depend on record order.
     py_attn_inputs = by_tag.at(group_tags.front());
     if (group_count == 1) {
         return {};

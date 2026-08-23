@@ -316,6 +316,41 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 ["full", "full"],
             )
 
+    def test_empty_capture_tag_is_rejected(self) -> None:
+        runner = CudaGraphRunner()
+        with self.assertRaisesRegex(RuntimeError, "must not be empty"):
+            runner.init_decode(
+                TaggedBlockTableModel(),
+                HIDDEN_SIZE,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                [1],
+                ["full", ""],
+            )
+
+    def test_capture_tag_declaration_order_does_not_change_replay(self) -> None:
+        # Capture buffers are addressed by an adapter-local group_ordinal taken
+        # from the sorted tag order, so declaring the same tags in the reverse
+        # order must replay to exactly the same per-tag values.
+        for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
+            with self.subTest(tags=tags):
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    TaggedBlockTableModel(),
+                    HIDDEN_SIZE,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    [2],
+                    tags,
+                )
+                self._assert_replay_signature(
+                    runner,
+                    _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+                    53,
+                )
+
     def test_target_verify_validates_exact_tag_set(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(

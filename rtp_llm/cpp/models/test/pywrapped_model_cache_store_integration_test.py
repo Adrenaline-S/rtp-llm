@@ -86,7 +86,36 @@ def _record_for_request(result: dict, request_id: int) -> dict:
     return matches[0]
 
 
+def _offsets_by_tag(result: dict) -> dict:
+    blocks = _blocks_by_key(result)
+    offsets = {}
+    for tag in ("full", "linear"):
+        offsets[tag] = sorted(
+            block["address"] - result["base_addresses"][tag]
+            for key, block in blocks.items()
+            if ("_tag_" + tag) in key
+        )
+    return offsets
+
+
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_multi_tag_binding_ignores_cache_group_declaration_order(self) -> None:
+        # The block-table group dimension is ordered by sorted tags, so
+        # declaring the same two groups in the other order must publish exactly
+        # the same per-tag addresses.
+        unsorted_result = run_scenario(CacheStoreForwardModel(), "multi_tag")
+        sorted_result = run_scenario(
+            CacheStoreForwardModel(), "multi_tag_sorted_declaration"
+        )
+
+        self.assertEqual(
+            _offsets_by_tag(unsorted_result), _offsets_by_tag(sorted_result)
+        )
+        self.assertEqual(
+            _offsets_by_tag(sorted_result),
+            {"full": [16, 32], "linear": [72, 96, 120, 144]},
+        )
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")

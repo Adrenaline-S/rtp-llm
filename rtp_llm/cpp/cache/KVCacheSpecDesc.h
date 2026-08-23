@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
@@ -88,11 +89,22 @@ struct SpecBuildContext {
     uint32_t                     gen_num_per_cycle       = 0;
 };
 
+struct BuiltLayerSpec {
+    std::string      tag;
+    KVCacheSpecPtr   spec;
+    CacheGroupPolicy policy;
+};
+
+using LayerBuiltSpecs = std::vector<std::vector<BuiltLayerSpec>>;
+
 class SpecBuilder {
 public:
-    static KVCacheSpecPtr   build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
+    static BuiltLayerSpec   build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
     static CacheGroupType   groupType(const KVCacheSpecDesc& desc);
     static CacheGroupPolicy groupPolicy(const KVCacheSpecDesc& desc);
+
+private:
+    static KVCacheSpecPtr buildSpec(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
 };
 
 }  // namespace rtp_llm

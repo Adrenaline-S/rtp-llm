@@ -1,3 +1,4 @@
+#include <set>
 #include <gtest/gtest.h>
 
 #include <functional>
@@ -164,25 +165,49 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersOrdinaryMlaToFixedFinalRecord) {
     EXPECT_EQ(snapshotCacheConfig(config), expected);
 }
 
+TEST(CacheConfigCreatorTest, DescLoweringKeepsTagSeparateFromLayoutFingerprint) {
+    auto              model_config = makeMhaModel(/*layer_num=*/1);
+    ParallelismConfig parallelism_config;
+    SpecBuildContext  ctx;
+    ctx.dtype                   = DataType::TYPE_FP16;
+    ctx.seq_size_per_block      = 4;
+    ctx.attn_config             = &model_config.attn_config;
+    ctx.linear_attention_config = &model_config.linear_attention_config;
+    ctx.parallelism_config      = &parallelism_config;
+
+    KVCacheSpecDesc first_desc  = model_config.kv_cache_spec_descs[0][0];
+    KVCacheSpecDesc second_desc = first_desc;
+    first_desc.tag              = "first";
+    second_desc.tag             = "second";
+
+    const auto first  = SpecBuilder::build(first_desc, ctx);
+    const auto second = SpecBuilder::build(second_desc, ctx);
+
+    EXPECT_EQ(first.tag, "first");
+    EXPECT_EQ(second.tag, "second");
+    EXPECT_EQ(first.spec->fingerprint(), second.spec->fingerprint());
+    EXPECT_EQ(first.spec->debugString().find("tag="), std::string::npos);
+}
+
 TEST(CacheConfigCreatorTest, CreateConfigIsolatesSparseMlaIndexerPoolAndStride) {
     const auto config = createFinalConfig(makeSparseMlaModel());
 
     ASSERT_TRUE(config.use_independent_block_pools);
-    ASSERT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"default", "indexer_kv"}));
-    const auto default_gid = static_cast<size_t>(config.groupIdForTag("default"));
-    const auto indexer_gid = static_cast<size_t>(config.groupIdForTag("indexer_kv"));
-    EXPECT_EQ(config.typeForGroup(default_gid), CacheGroupType::FULL);
-    EXPECT_EQ(config.typeForGroup(indexer_gid), CacheGroupType::FULL);
-    EXPECT_EQ(config.specForGroup(default_gid)->type, KVCacheSpecType::MultiHeadLatentAttention);
-    EXPECT_EQ(config.specForGroup(indexer_gid)->type, KVCacheSpecType::OpaqueKV);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(default_gid), 96u);
-    EXPECT_EQ(config.kvScaleStrideBytesForGroup(default_gid), 0u);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(indexer_gid), 528u);
-    EXPECT_EQ(config.kvScaleStrideBytesForGroup(indexer_gid), 0u);
-    EXPECT_EQ(config.blockNumForGroup(default_gid), kTestBlockNum);
-    EXPECT_EQ(config.blockNumForGroup(indexer_gid), kTestBlockNum);
-    EXPECT_EQ(config.layerIdsForGroup(default_gid), std::vector<int>({0, 1}));
-    EXPECT_EQ(config.layerIdsForGroup(indexer_gid), std::vector<int>({0, 1}));
+    ASSERT_EQ(groupTagSet(config), (std::set<std::string>{"default", "indexer_kv"}));
+    const std::string default_tag = "default";
+    const std::string indexer_tag = "indexer_kv";
+    EXPECT_EQ(config.group(default_tag).policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(config.group(indexer_tag).policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(config.group(default_tag).spec->type, KVCacheSpecType::MultiHeadLatentAttention);
+    EXPECT_EQ(config.group(indexer_tag).spec->type, KVCacheSpecType::OpaqueKV);
+    EXPECT_EQ(config.group(default_tag).kv_block_stride_bytes, 96u);
+    EXPECT_EQ(config.group(default_tag).kv_scale_stride_bytes, 0u);
+    EXPECT_EQ(config.group(indexer_tag).kv_block_stride_bytes, 528u);
+    EXPECT_EQ(config.group(indexer_tag).kv_scale_stride_bytes, 0u);
+    EXPECT_EQ(config.group(default_tag).block_num, kTestBlockNum);
+    EXPECT_EQ(config.group(indexer_tag).block_num, kTestBlockNum);
+    EXPECT_EQ(config.group(default_tag).layer_ids, std::vector<int>({0, 1}));
+    EXPECT_EQ(config.group(indexer_tag).layer_ids, std::vector<int>({0, 1}));
 }
 
 TEST(CacheConfigCreatorTest, SparseFlagWithoutIndexerDescriptorDoesNotProjectIndexerIntoDefaultScale) {
@@ -190,11 +215,11 @@ TEST(CacheConfigCreatorTest, SparseFlagWithoutIndexerDescriptorDoesNotProjectInd
     model_config.attn_config.is_sparse        = true;
     model_config.attn_config.indexer_head_dim = 128;
     const auto config                         = createFinalConfig(model_config);
-    const auto default_gid                    = static_cast<size_t>(config.groupIdForTag("mla"));
+    const std::string default_tag                    = "mla";
 
     EXPECT_FALSE(config.use_independent_block_pools);
-    EXPECT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"mla"}));
-    EXPECT_EQ(config.kvScaleStrideBytesForGroup(default_gid), 0u);
+    EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"mla"}));
+    EXPECT_EQ(config.group(default_tag).kv_scale_stride_bytes, 0u);
     EXPECT_EQ(config.kv_scale_stride_bytes, 0u);
 }
 
@@ -215,22 +240,22 @@ TEST(CacheConfigCreatorTest, CreateSpConfigAlignsSparseMlaIndexerAcrossTargetAnd
                                                            /*is_mtp=*/true,
                                                            /*is_eagle=*/false);
 
-    ASSERT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"default", "indexer_kv"}));
+    ASSERT_EQ(groupTagSet(config), (std::set<std::string>{"default", "indexer_kv"}));
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
-    const auto target_indexer_gid = static_cast<size_t>(config.groupIdForTag("indexer_kv"));
-    EXPECT_EQ(config.layerIdsForGroup(target_indexer_gid), std::vector<int>({0, 1, 2, 3}));
+    const std::string target_indexer_tag = "indexer_kv";
+    EXPECT_EQ(config.group(target_indexer_tag).layer_ids, std::vector<int>({0, 1, 2, 3}));
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
-        ASSERT_EQ(sub_config->groupTagsSnapshot(), config.groupTagsSnapshot());
-        const auto sub_default_gid = static_cast<size_t>(sub_config->groupIdForTag("default"));
-        const auto sub_indexer_gid = static_cast<size_t>(sub_config->groupIdForTag("indexer_kv"));
-        EXPECT_EQ(sub_config->layerIdsForGroup(sub_default_gid), std::vector<int>({0}));
-        EXPECT_EQ(sub_config->layerIdsForGroup(sub_indexer_gid), std::vector<int>({0}));
-        EXPECT_EQ(sub_config->kvBlockStrideBytesForGroup(sub_default_gid),
-                  config.kvBlockStrideBytesForGroup(static_cast<size_t>(config.groupIdForTag("default"))));
-        EXPECT_EQ(sub_config->kvBlockStrideBytesForGroup(sub_indexer_gid),
-                  config.kvBlockStrideBytesForGroup(target_indexer_gid));
-        EXPECT_EQ(sub_config->blockNumForGroup(sub_indexer_gid), kTestBlockNum);
+        ASSERT_EQ(groupTagSet(*sub_config), groupTagSet(config));
+        const std::string sub_default_tag = "default";
+        const std::string sub_indexer_tag = "indexer_kv";
+        EXPECT_EQ(sub_config->group(sub_default_tag).layer_ids, std::vector<int>({0}));
+        EXPECT_EQ(sub_config->group(sub_indexer_tag).layer_ids, std::vector<int>({0}));
+        EXPECT_EQ(sub_config->group(sub_default_tag).kv_block_stride_bytes,
+                  config.group("default").kv_block_stride_bytes);
+        EXPECT_EQ(sub_config->group(sub_indexer_tag).kv_block_stride_bytes,
+                  config.group(target_indexer_tag).kv_block_stride_bytes);
+        EXPECT_EQ(sub_config->group(sub_indexer_tag).block_num, kTestBlockNum);
     }
 }
 
@@ -318,9 +343,9 @@ TEST(CacheConfigCreatorTest, CreateConfigPreservesLegacyHybridDefaultCpPolicy) {
     }
 
     const auto final_config = createFinalConfig(config);
-    const auto full_gid     = static_cast<size_t>(final_config.groupIdForTag("full"));
-    EXPECT_EQ(final_config.policyForGroup(full_gid).cp_mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-    EXPECT_EQ(final_config.policyForGroup(full_gid).cp_slice, CpBlockSliceMode::NONE);
+    const std::string full_tag     = "full";
+    EXPECT_EQ(final_config.group(full_tag).policy.cp_mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+    EXPECT_EQ(final_config.group(full_tag).policy.cp_slice, CpBlockSliceMode::NONE);
 }
 
 TEST(CacheConfigCreatorTest, CreateConfigPreservesAllLinearExplicitTags) {
@@ -333,9 +358,9 @@ TEST(CacheConfigCreatorTest, CreateConfigPreservesAllLinearExplicitTags) {
     config.kv_cache_spec_descs[1] = {KVCacheSpecDesc{"convolution_state", KVCacheSpecType::LinearAttention}};
 
     const auto final_config = createFinalConfig(config);
-    EXPECT_EQ(final_config.groupTagsSnapshot(), std::vector<std::string>({"recurrent_state", "convolution_state"}));
-    EXPECT_EQ(final_config.typeForGroup(0), CacheGroupType::LINEAR);
-    EXPECT_EQ(final_config.typeForGroup(1), CacheGroupType::LINEAR);
+    EXPECT_EQ(groupTagSet(final_config), (std::set<std::string>{"recurrent_state", "convolution_state"}));
+    EXPECT_EQ(final_config.group("recurrent_state").policy.group_type, CacheGroupType::LINEAR);
+    EXPECT_EQ(final_config.group("convolution_state").policy.group_type, CacheGroupType::LINEAR);
     EXPECT_TRUE(final_config.use_independent_block_pools);
 }
 
@@ -358,19 +383,19 @@ TEST(CacheConfigCreatorTest, CreateSpConfigPreservesExactAndDefaultMtpMappingsWi
                                                            /*is_mtp=*/true,
                                                            /*is_eagle=*/false);
 
-    EXPECT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"full", "linear"}));
+    EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"full", "linear"}));
     EXPECT_EQ(config.group_layer_num, 2);
-    EXPECT_EQ(config.layerIdsForGroup(static_cast<size_t>(config.groupIdForTag("full"))),
+    EXPECT_EQ(config.group("full").layer_ids,
               std::vector<int>({1, 3, 4, 5}));
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
-        const auto full_gid   = static_cast<size_t>(sub_config->groupIdForTag("full"));
-        const auto linear_gid = static_cast<size_t>(sub_config->groupIdForTag("linear"));
-        EXPECT_EQ(sub_config->specForGroup(full_gid)->tag, "full");
-        EXPECT_EQ(sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
-        EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
-        EXPECT_EQ(sub_config->blockNumForGroup(full_gid), kTestBlockNum);
+        const std::string full_tag   = "full";
+        const std::string linear_tag = "linear";
+        EXPECT_EQ(sub_config->group(full_tag).tag, "full");
+        EXPECT_EQ(sub_config->group(full_tag).layer_ids, std::vector<int>({0}));
+        EXPECT_TRUE(sub_config->group(linear_tag).layer_ids.empty());
+        EXPECT_EQ(sub_config->group(full_tag).block_num, kTestBlockNum);
     }
 }
 
@@ -381,16 +406,30 @@ TEST(CacheConfigCreatorTest, InvalidInputsKeepDescriptorAndCategoryBoundaries) {
     const auto empty_tag_error = runtimeErrorMessage([&]() { (void)createFinalConfig(empty_tag_config); });
     EXPECT_NE(empty_tag_error.find("tag must not be empty"), std::string::npos);
 
-    auto duplicate_config                                                      = makeMhaModel(/*layer_num=*/1);
-    duplicate_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    duplicate_config.kv_cache_spec_descs[0].push_back(duplicate_config.kv_cache_spec_descs[0][0]);
-    const auto duplicate_error = runtimeErrorMessage([&]() { (void)createFinalConfig(duplicate_config); });
-    EXPECT_NE(duplicate_error.find("duplicate tag"), std::string::npos);
-
     auto category_config                                 = makeKimiModel();
     category_config.kv_cache_spec_descs[0][0].cache_type = KVCacheSpecType::MultiHeadAttention;
     const auto category_error = runtimeErrorMessage([&]() { (void)createFinalConfig(category_config); });
     EXPECT_NE(category_error.find("does not match attention type"), std::string::npos);
+}
+
+TEST(CacheConfigCreatorTest, DuplicateDescTagsFailDuringIndependentGrouping) {
+    auto config                                                      = makeMhaModel(/*layer_num=*/1);
+    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    config.kv_cache_spec_descs[0].push_back(config.kv_cache_spec_descs[0][0]);
+
+    const auto error = runtimeErrorMessage([&]() { (void)createFinalConfig(config); });
+
+    EXPECT_NE(error.find("hybrid-pool layer 0 has duplicate tag=default"), std::string::npos);
+}
+
+TEST(CacheConfigCreatorTest, SameTagDifferentLayoutsFailDuringIndependentGrouping) {
+    auto config                                                      = makeSparseMlaModel();
+    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    config.kv_cache_spec_descs[1][1].entry_elems += 1;
+
+    const auto error = runtimeErrorMessage([&]() { (void)createFinalConfig(config); });
+
+    EXPECT_NE(error.find("hybrid-pool tag=indexer_kv has multiple physical prototypes"), std::string::npos);
 }
 
 }  // namespace

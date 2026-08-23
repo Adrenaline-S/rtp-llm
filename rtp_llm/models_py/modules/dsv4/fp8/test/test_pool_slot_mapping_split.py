@@ -54,10 +54,18 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             kernel_seq_size_per_block={CSA_KV: 128, SWA_KV: 16384},
         )
 
-        self.assertEqual(require_pool_tokens_per_block(cache, group=0), 128)
-        self.assertEqual(require_pool_tokens_per_block(cache, group=1), 16384)
         self.assertEqual(require_pool_tokens_per_block(cache, tag=CSA_KV), 128)
         self.assertEqual(require_pool_tokens_per_block(cache, tag=SWA_KV), 16384)
+
+        # group_tags is a canonically ordered set of identities: declaring the
+        # same groups in another order must not move any answer.
+        reordered = _FakeTagKVCache(
+            group_tags=[SWA_KV, CSA_KV],
+            seq_size_per_block={CSA_KV: 256, SWA_KV: 16384},
+            kernel_seq_size_per_block={CSA_KV: 128, SWA_KV: 16384},
+        )
+        self.assertEqual(require_pool_tokens_per_block(reordered, tag=CSA_KV), 128)
+        self.assertEqual(require_pool_tokens_per_block(reordered, tag=SWA_KV), 16384)
 
     def test_require_pool_tokens_per_block_is_per_group(self) -> None:
         cache = _FakeTagKVCache(
@@ -66,8 +74,7 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             kernel_seq_size_per_block={HCA_KV: 256, SWA_KV: 1024},
         )
 
-        self.assertEqual(require_pool_tokens_per_block(cache, group=0), 256)
-        self.assertEqual(require_pool_tokens_per_block(cache, group=1), 1024)
+        self.assertEqual(require_pool_tokens_per_block(cache, tag=HCA_KV), 256)
         self.assertEqual(require_pool_tokens_per_block(cache, tag=SWA_KV), 1024)
         self.assertEqual(pool_physical_tokens_per_block(cache, HCA_KV), 256)
 

@@ -18,10 +18,14 @@ cc_library(
 cc_library(
     name = "cache_group_type",
     hdrs = [
+        "CacheGroupTagOrder.h",
         "CacheGroupType.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
 )
 
 cc_library(
@@ -163,13 +167,11 @@ cc_library(
 cc_library(
     name = "block_pool",
     srcs = [
-        "BlockCache.cc",
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
         "SharedBlockCache.cc",
     ],
     hdrs = [
-        "BlockCache.h",
         "BlockPool.h",
         "BlockPoolConfig.h",
         "BlockPoolConfigHelper.h",
@@ -209,6 +211,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_group_type",
+        ":cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 
@@ -364,4 +368,15 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
+)
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test, the terminal
+# source gate that rejects positional cache group routing in this package.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
 )

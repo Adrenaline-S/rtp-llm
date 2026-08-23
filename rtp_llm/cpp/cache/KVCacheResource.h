@@ -12,7 +12,7 @@
 
 namespace rtp_llm {
 
-class CacheTopology;
+struct CacheConfig;
 
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
@@ -81,29 +81,27 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
+struct CacheGroupBlocks {
+    std::string tag;
+    BlockIds    blocks;
+};
+
+using CacheGroupBlockRecords = std::vector<std::shared_ptr<CacheGroupBlocks>>;
 // Legacy per-layer view. Valid only when each layer maps to exactly one group.
 using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
 using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
-    void initGroups(std::shared_ptr<const CacheTopology> topology);
+    void initGroups(const CacheConfig& config);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
-    int                     blocksNum(int group_id) const;
     int                     blocksNum(std::string_view tag) const;
-    const BlockIndicesType& blocks(int group_id) const;
     const BlockIndicesType& blocks(std::string_view tag) const;
-    const BlockIndicesType& blocks(int layer_id, int group_id) const;
     const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(int group_id) const;
     const BlockIndicesType& kernelBlocks(std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(int layer_id, int group_id) const;
     const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
-    BlockIds&               mutableBlockIds(int group_id) const;
     BlockIds&               mutableBlockIds(std::string_view tag) const;
-    BlockIds&               mutableBlockIds(int layer_id, int group_id) const;
     BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
 
     const BlockIds& blockIds(std::string_view tag) const;
@@ -115,12 +113,18 @@ public:
     int layerNum() const;
     int groupNums() const;
 
-    GroupBlockIds&       groupBlocks();
-    const GroupBlockIds& groupBlocks() const;
+    CacheGroupBlockRecords&       groupBlocks();
+    const CacheGroupBlockRecords& groupBlocks() const;
 
-    LayerBlockIds            layerBlocks() const;
-    const LayerAttnBlockIds& layerGroupBlocks() const;
-    int                      groupId(int layer_id, int group_id) const;
+    // Group tags in the order the CacheConfig declared them, fixed at initGroups() time.
+    // Unlike groupBlocks(), this order is not affected by any later reordering of the local
+    // record vector, whose order is not contractual. Use it where a consumer must reproduce
+    // "the first group the parent config declared". The views alias tags owned by this
+    // resource and stay valid until the next initGroups().
+    std::vector<std::string_view> groupTagsInConfigOrder() const;
+
+    LayerBlockIds layerBlocks() const;
+    bool          layerOwnsTag(int layer_id, std::string_view tag) const;
 
     const CacheKeysType& cacheKeys() const;
     void                 setCacheKeysAndBlockDependencies(CacheKeysType keys, BlockDependenciesType dependencies);
@@ -165,24 +169,23 @@ public:
     size_t remoteReuseBlocksNum() const;
     void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
 
-    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
+    void swapBlocks(std::string_view tag, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 
 private:
-    int  groupIdForTag(std::string_view tag) const;
-    int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
-    bool hasOneGroupPerLayer() const;
+    bool               groupStorageMatchesIndex() const;
+    void               validateGroupStorage() const;
+    size_t             slotForTag(std::string_view tag) const;
+    bool               layerContainsTag(int layer_id, std::string_view tag) const;
+    bool               hasOneGroupPerLayer() const;
 
-    std::unordered_map<std::string, int>  tag_to_group_id_;
-    std::vector<std::vector<std::string>> layer_group_tags_;
-    // layer_id -> group_id -> block_indices
-    LayerAttnBlockIds layer_group_block_ids;
-    // group_id -> block_indices
-    GroupBlockIds         group_block_ids;
-    CacheKeysType         cache_keys;
-    BlockDependenciesType block_dependencies;
-    bool                  cache_keys_are_cp_canonical_{false};
+    std::vector<std::vector<std::string>>   layer_group_tags_;
+    CacheGroupBlockRecords                  group_blocks_;
+    std::unordered_map<std::string, size_t> tag_to_slot_;
+    CacheKeysType                           cache_keys;
+    BlockDependenciesType                   block_dependencies;
+    bool                                    cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

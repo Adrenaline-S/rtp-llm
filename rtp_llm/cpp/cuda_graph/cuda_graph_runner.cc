@@ -966,19 +966,24 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     inputs.attention_inputs_by_tag.clear();
     if (kv_cache_group_tags_.size() > 1) {
-        for (size_t group_id = 0; group_id < kv_cache_group_tags_.size(); ++group_id) {
+        // Boundary adapter: capture buffers are addressed by an adapter-local
+        // group_ordinal taken from the canonical sorted tag order, so which tag
+        // reuses the shared fast-path buffers does not depend on the topology's
+        // record order. The ordinal never leaves this function.
+        const auto sorted_tags = sortedCacheGroupTags(kv_cache_group_tags_, "CUDA graph KV cache");
+        for (size_t group_ordinal = 0; group_ordinal < sorted_tags.size(); ++group_ordinal) {
             auto tagged_inputs = inputs.attention_inputs;
-            if (group_id > 0) {
+            if (group_ordinal > 0) {
                 tagged_inputs.kv_cache_kernel_block_id_device =
                     torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
                 tagged_inputs.kv_cache_kernel_block_id =
                     torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
             }
             const auto [it, inserted] =
-                inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_id], std::move(tagged_inputs));
+                inputs.attention_inputs_by_tag.emplace(sorted_tags[group_ordinal], std::move(tagged_inputs));
             (void)it;
             RTP_LLM_CHECK_WITH_INFO(
-                inserted, "duplicate CUDA graph KV cache tag=%s", kv_cache_group_tags_[group_id].c_str());
+                inserted, "duplicate CUDA graph KV cache tag=%s", sorted_tags[group_ordinal].c_str());
         }
     }
 }

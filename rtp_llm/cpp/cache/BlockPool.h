@@ -10,7 +10,6 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
-#include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
@@ -31,7 +30,6 @@ public:
 
     bool init();
 
-    BlockCachePtr blockCache();
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
@@ -139,7 +137,6 @@ private:
     bool           use_pinned_cpu_backing_;
     bool           use_cuda_malloc_backing_;
 
-    BlockCachePtr block_cache_;
 
     torch::Tensor               cache_aligned_buffer_;
     void*                       cache_base_ptr_  = nullptr;

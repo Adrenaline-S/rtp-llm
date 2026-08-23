@@ -32,8 +32,8 @@ constexpr int    kLayerId        = 0;
 constexpr size_t kPhysicalBlocks = 8;
 
 struct TestCacheSpec: public KVCacheSpec {
-    TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes): bytes_(bytes) {
-        tag                = std::move(cache_tag);
+    TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes):
+        debug_tag_(std::move(cache_tag)), bytes_(bytes) {
         seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
         type               = KVCacheSpecType::OpaqueState;
     }
@@ -63,11 +63,12 @@ struct TestCacheSpec: public KVCacheSpec {
         return std::make_shared<TestCacheSpec>(*this);
     }
     std::string debugString(size_t = 0) const override {
-        return "TestCacheSpec{" + tag + "}";
+        return "TestCacheSpec{" + debug_tag_ + "}";
     }
 
 private:
-    size_t bytes_;
+    std::string debug_tag_;
+    size_t      bytes_;
 };
 
 struct GroupSpec {
@@ -356,16 +357,20 @@ struct Scenario {
     bool                             replace_cp_processor{false};
 };
 
-Scenario makeMultiTagScenario() {
-    // Keep topology order different from std::map order so the test catches
-    // accidental group-index routing in place of stable tag routing.
-    auto config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
+// Multi-tag prefill cache-store. The block-table group dimension is ordered by
+// the canonical sorted tag order ("full" then "linear"), so the default
+// declaration order below is deliberately different: a positional binding would
+// swap the two tags' block tables and move every published address.
+Scenario makeMultiTagScenario(bool declare_in_sorted_order) {
+    auto config = declare_in_sorted_order ? makeCacheConfig({{"full", 2, 16}, {"linear", 1, 24}}) :
+                                            makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
     auto layout = makeLayout(config);
     auto inputs = makeInputs(/*input_lengths=*/{4},
                              /*request_ids=*/{101},
                              /*cache_keys=*/{1001, 1002, 1003, 1004},
                              /*cache_keys_width=*/4,
-                             /*block_ids=*/{3, 4, 5, 6, 1, 2, -1, -1},
+                             // sorted-tag row 0 = "full", sorted-tag row 1 = "linear"
+                             /*block_ids=*/{1, 2, -1, -1, 3, 4, 5, 6},
                              /*group_count=*/2,
                              /*block_table_width=*/4,
                              /*global_tokens_per_block=*/2,
@@ -434,7 +439,10 @@ Scenario makeMtpScenario() {
 
 Scenario makeScenario(const std::string& name) {
     if (name == "multi_tag") {
-        return makeMultiTagScenario();
+        return makeMultiTagScenario(/*declare_in_sorted_order=*/false);
+    }
+    if (name == "multi_tag_sorted_declaration") {
+        return makeMultiTagScenario(/*declare_in_sorted_order=*/true);
     }
     if (name == "micro_batch") {
         return makeMicroBatchScenario();

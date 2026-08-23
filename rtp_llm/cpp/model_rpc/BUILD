@@ -98,3 +98,15 @@ cc_library(
         ":model_rpc_pool",
     ],
 )
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test. Only the
+# decode-side cache transfer sources are exposed: the rest of this package
+# carries request-batch group ids, which are a different, allowed concept.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = [
+        "DecodeRpcServer.cc",
+        "DecodeRpcServer.h",
+    ],
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
+)

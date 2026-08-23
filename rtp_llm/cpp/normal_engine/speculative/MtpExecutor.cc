@@ -677,9 +677,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    const auto  group_types  = cache_config.groupTypesSnapshot();
-    is_linear_attention_model_ =
-        std::any_of(group_types.begin(), group_types.end(), [](CacheGroupType type) { return type == CacheGroupType::LINEAR; });
+    const auto& cache_groups = cache_config.topology().groups();
+    is_linear_attention_model_ = std::any_of(cache_groups.begin(), cache_groups.end(), [](const GroupBase& group) {
+        return group.policy.group_type == CacheGroupType::LINEAR;
+    });
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,

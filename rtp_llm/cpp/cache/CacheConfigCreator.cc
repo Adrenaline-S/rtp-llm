@@ -44,12 +44,12 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     }
 
     budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        if (config.usesExplicitIndependentBlocks(gid)) {
+    for (const auto& group : config.topology().groups()) {
+        if (config.usesExplicitIndependentBlocks(group.tag)) {
             continue;
         }
-        const auto group_bytes = config.blockSizeBytesForGroup(gid);
-        switch (config.typeForGroup(gid)) {
+        const auto group_bytes = config.blockSizeBytes(group.tag);
+        switch (group.policy.group_type) {
             case CacheGroupType::FULL:
             case CacheGroupType::LINEAR:
                 budget.paged_block_bytes += group_bytes;
@@ -184,7 +184,7 @@ uint32_t localKvHeadNumForType(KVCacheSpecType          type,
     return 1;
 }
 
-KVCacheSpecPtr getSingleSpecFromLayers(const ModelConfig& model_config, const LayerKVCacheSpecs& runtime_specs) {
+BuiltLayerSpec getSingleSpecFromLayers(const ModelConfig& model_config, const LayerBuiltSpecs& runtime_specs) {
     RTP_LLM_CHECK_WITH_INFO(runtime_specs.size() == static_cast<size_t>(model_config.num_layers),
                             "single cache config requires layer-wise runtime specs for every layer, got %zu/%ld",
                             runtime_specs.size(),
@@ -193,10 +193,10 @@ KVCacheSpecPtr getSingleSpecFromLayers(const ModelConfig& model_config, const La
     RTP_LLM_CHECK_WITH_INFO(runtime_specs[0].size() == 1,
                             "single cache config requires exactly one spec for layer 0, got %zu",
                             runtime_specs[0].size());
-    auto spec = runtime_specs[0][0];
-    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "single cache config got null runtime spec for layer 0");
-    const auto& expected_tag = spec->tag;
-    const auto  fingerprint  = spec->fingerprint();
+    auto built_spec = runtime_specs[0][0];
+    RTP_LLM_CHECK_WITH_INFO(built_spec.spec != nullptr, "single cache config got null runtime spec for layer 0");
+    const auto& expected_tag = built_spec.tag;
+    const auto  fingerprint  = built_spec.spec->fingerprint();
     for (int64_t layer_id = 1; layer_id < model_config.num_layers; ++layer_id) {
         const auto layer = static_cast<size_t>(layer_id);
         RTP_LLM_CHECK_WITH_INFO(runtime_specs[layer].size() == 1,
@@ -205,17 +205,18 @@ KVCacheSpecPtr getSingleSpecFromLayers(const ModelConfig& model_config, const La
                                 runtime_specs[layer].size());
         const auto& layer_spec = runtime_specs[layer][0];
         RTP_LLM_CHECK_WITH_INFO(
-            layer_spec != nullptr, "single cache config got null runtime spec for layer %ld", layer_id);
+            layer_spec.spec != nullptr, "single cache config got null runtime spec for layer %ld", layer_id);
         RTP_LLM_CHECK_WITH_INFO(
-            layer_spec->tag == expected_tag,
+            layer_spec.tag == expected_tag,
             "single cache config requires consistent tag across layers, layer %ld has tag=%s but layer 0 has tag=%s",
             layer_id,
-            layer_spec->tag.c_str(),
+            layer_spec.tag.c_str(),
             expected_tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
-            layer_spec->fingerprint() == fingerprint, "single cache config spec differs at layer %ld", layer_id);
+            layer_spec.spec->fingerprint() == fingerprint, "single cache config spec differs at layer %ld", layer_id);
     }
-    return spec->clone();
+    built_spec.spec = built_spec.spec->clone();
+    return built_spec;
 }
 
 CacheConfig createSingleConfig(const ModelConfig&       model_config,
@@ -244,11 +245,12 @@ CacheConfig createSingleConfig(const ModelConfig&       model_config,
     config.dtype              = dtype;
     config.is_sparse          = model_config.attn_config.is_sparse;
 
-    auto             spec = getSingleSpecFromLayers(model_config, runtime_specs);
+    auto             built_spec = getSingleSpecFromLayers(model_config, runtime_specs);
+    const auto&      spec       = built_spec.spec;
     std::vector<int> layer_ids(static_cast<size_t>(model_config.num_layers));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     GroupBase group;
-    group.tag       = spec->tag;
+    group.tag       = built_spec.tag;
     group.spec      = spec;
     group.policy    = defaultCacheGroupPolicy(spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR :
                                                                                             CacheGroupType::FULL);
@@ -257,7 +259,7 @@ CacheConfig createSingleConfig(const ModelConfig&       model_config,
 
     std::vector<LayerBase> layers(static_cast<size_t>(model_config.num_layers));
     for (int64_t layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
-        layers[static_cast<size_t>(layer_id)] = {static_cast<int>(layer_id), {spec->tag}};
+        layers[static_cast<size_t>(layer_id)] = {static_cast<int>(layer_id), {built_spec.tag}};
     }
     config.setTopology({group}, std::move(layers));
     RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");
@@ -278,19 +280,7 @@ CacheConfig createSingleConfig(const ModelConfig&       model_config,
     return config;
 }
 
-std::string hybridLayoutFingerprint(const KVCacheSpec& spec) {
-    std::ostringstream os;
-    os << "type=" << static_cast<int>(spec.type) << ";dtype=" << static_cast<int>(spec.memoryLayoutDType())
-       << ";seq_size_per_block=" << spec.seq_size_per_block << ";block_elems=" << spec.block_size()
-       << ";k_block_elems=" << spec.k_block_size() << ";v_block_elems=" << spec.v_block_size()
-       << ";block_bytes=" << spec.block_size_bytes() << ";k_block_bytes=" << spec.k_block_size_bytes()
-       << ";v_block_bytes=" << spec.v_block_size_bytes() << ";scale_block_bytes=" << spec.scale_block_size_bytes()
-       << ";k_scale_block_bytes=" << spec.k_scale_block_size_bytes()
-       << ";v_scale_block_bytes=" << spec.v_scale_block_size_bytes();
-    return os.str();
-}
-
-const KVCacheSpecPtr& hybridSpecForLayer(const LayerKVCacheSpecs& runtime_specs, int layer_id) {
+const BuiltLayerSpec& hybridSpecForLayer(const LayerBuiltSpecs& runtime_specs, int layer_id) {
     RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < runtime_specs.size(),
                             "missing runtime kv_cache specs for layer %d",
                             layer_id);
@@ -299,12 +289,12 @@ const KVCacheSpecPtr& hybridSpecForLayer(const LayerKVCacheSpecs& runtime_specs,
                             "hybrid layer %d must have exactly one runtime kv_cache spec, got %zu",
                             layer_id,
                             layer_specs.size());
-    RTP_LLM_CHECK_WITH_INFO(layer_specs[0] != nullptr, "hybrid layer %d has null kv_cache spec", layer_id);
-    RTP_LLM_CHECK_WITH_INFO(!layer_specs[0]->tag.empty(), "hybrid layer %d has empty kv_cache spec tag", layer_id);
+    RTP_LLM_CHECK_WITH_INFO(layer_specs[0].spec != nullptr, "hybrid layer %d has null kv_cache spec", layer_id);
+    RTP_LLM_CHECK_WITH_INFO(!layer_specs[0].tag.empty(), "hybrid layer %d has empty kv_cache spec tag", layer_id);
     return layer_specs[0];
 }
 
-std::vector<GroupBase> buildHybridGroups(const LayerKVCacheSpecs& runtime_specs,
+std::vector<GroupBase> buildHybridGroups(const LayerBuiltSpecs&   runtime_specs,
                                          const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config) {
     const auto& types = model_config.hybrid_attention_config.hybrid_attention_types;
@@ -321,7 +311,8 @@ std::vector<GroupBase> buildHybridGroups(const LayerKVCacheSpecs& runtime_specs,
 
     std::vector<GroupBase> groups;
     for (int layer_id = 0; layer_id < static_cast<int>(model_config.num_layers); ++layer_id) {
-        const auto& spec = hybridSpecForLayer(runtime_specs, layer_id);
+        const auto& built_spec = hybridSpecForLayer(runtime_specs, layer_id);
+        const auto& spec       = built_spec.spec;
         const auto  group_type =
             spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
         const auto expected_type = types[static_cast<size_t>(layer_id)] == HybridAttentionType::LINEAR ?
@@ -330,14 +321,14 @@ std::vector<GroupBase> buildHybridGroups(const LayerKVCacheSpecs& runtime_specs,
         RTP_LLM_CHECK_WITH_INFO(group_type == expected_type,
                                 "hybrid layer %d desc tag=%s cache type %d does not match attention type %d",
                                 layer_id,
-                                spec->tag.c_str(),
+                                built_spec.tag.c_str(),
                                 static_cast<int>(group_type),
                                 static_cast<int>(expected_type));
         auto it = std::find_if(
-            groups.begin(), groups.end(), [&](const GroupBase& group) { return group.spec->tag == spec->tag; });
+            groups.begin(), groups.end(), [&](const GroupBase& group) { return group.tag == built_spec.tag; });
         if (it == groups.end()) {
             GroupBase group;
-            group.tag               = spec->tag;
+            group.tag               = built_spec.tag;
             group.spec              = spec;
             group.policy            = defaultCacheGroupPolicy(group_type);
             group.local_kv_head_num = localKvHeadNumForType(spec->type, model_config, parallelism_config);
@@ -346,10 +337,10 @@ std::vector<GroupBase> buildHybridGroups(const LayerKVCacheSpecs& runtime_specs,
         } else {
             RTP_LLM_CHECK_WITH_INFO(it->policy.group_type == group_type,
                                     "hybrid tag=%s maps to multiple cache group types",
-                                    spec->tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(hybridLayoutFingerprint(*it->spec) == hybridLayoutFingerprint(*spec),
+                                    built_spec.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(it->spec->fingerprint() == spec->fingerprint(),
                                     "hybrid tag=%s maps to different kv cache spec layouts",
-                                    spec->tag.c_str());
+                                    built_spec.tag.c_str());
             it->layer_ids.push_back(layer_id);
         }
     }
@@ -367,9 +358,9 @@ std::vector<GroupBase> buildHybridGroups(const LayerKVCacheSpecs& runtime_specs,
         static_cast<size_t>(full_group_num));
     if (full_group_num != 0
         && (groups[0].policy.group_type != CacheGroupType::FULL || groups[0].spec == nullptr
-            || groups[0].spec->tag != "full")) {
-        RTP_LLM_LOG_WARNING("hybrid full cache group is expected at gid 0 with tag=full, got tag=%s type=%d",
-                            groups[0].spec == nullptr ? "<null>" : groups[0].spec->tag.c_str(),
+            || groups[0].tag != "full")) {
+        RTP_LLM_LOG_WARNING("hybrid full cache group is expected to be tag=full, got tag=%s type=%d",
+                            groups[0].spec == nullptr ? "<null>" : groups[0].tag.c_str(),
                             static_cast<int>(groups[0].policy.group_type));
     }
     return groups;
@@ -398,7 +389,7 @@ void setupHybridTopology(CacheConfig& config, std::vector<GroupBase> groups) {
         for (int layer_id : group.layer_ids) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
                                     "hybrid tag=%s has invalid layer id %d",
-                                    group.spec->tag.c_str(),
+                                    group.tag.c_str(),
                                     layer_id);
             layers[static_cast<size_t>(layer_id)].group_tags.push_back(group.tag);
         }
@@ -417,20 +408,23 @@ void setupHybridPoolSizes(CacheConfig& config) {
     size_t                total_kv_block_bytes    = 0;
     size_t                total_scale_block_bytes = 0;
     config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        const auto& spec = config.specForGroup(gid);
-        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
-        const auto   layer_count         = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
-        const size_t group_bpk           = config.kernelBlocksPerKvBlockForGroup(gid);
-        const size_t kv_stride           = spec->block_size_bytes() * group_bpk;
-        const size_t scale_stride        = spec->scale_block_size_bytes() * group_bpk;
-        group_kv_block_stride_bytes[gid] = kv_stride;
-        group_kv_scale_stride_bytes[gid] = scale_stride;
+    // slot only walks the parallel stride vectors handed to setGroupBlockLayout;
+    // every value is read from the tagged group record it belongs to.
+    for (size_t slot = 0; slot < group_num; ++slot) {
+        const auto& group = config.topology().groups()[slot];
+        const auto& spec  = group.spec;
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache group tag=%s has null spec", group.tag.c_str());
+        const auto   layer_count          = static_cast<uint32_t>(group.layer_ids.size());
+        const size_t group_bpk            = config.kernelBlocksPerKvBlock(group.tag);
+        const size_t kv_stride            = spec->block_size_bytes() * group_bpk;
+        const size_t scale_stride         = spec->scale_block_size_bytes() * group_bpk;
+        group_kv_block_stride_bytes[slot] = kv_stride;
+        group_kv_scale_stride_bytes[slot] = scale_stride;
         total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
         total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         max_kv_stride    = std::max(max_kv_stride, kv_stride);
         max_scale_stride = std::max(max_scale_stride, scale_stride);
-        for (int layer_id : config.layerIdsForGroup(gid)) {
+        for (int layer_id : group.layer_ids) {
             config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] =
                 static_cast<int>(kv_stride + scale_stride);
         }
@@ -526,15 +520,10 @@ void validateIndependentDescs(const ModelConfig& model_config,
     }
 }
 
-void populateIndependentGroups(CacheConfig&                 config,
-                               const LayerKVCacheSpecDescs& layer_descs,
-                               const LayerKVCacheSpecs&     layer_specs,
-                               const ModelConfig&           model_config,
-                               const ParallelismConfig&     parallelism_config) {
-    RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(config.layer_num),
-                            "hybrid-pool layer desc count %zu != layer_num %u",
-                            layer_descs.size(),
-                            config.layer_num);
+void populateIndependentGroups(CacheConfig&             config,
+                               const LayerBuiltSpecs&   layer_specs,
+                               const ModelConfig&       model_config,
+                               const ParallelismConfig& parallelism_config) {
     RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(config.layer_num),
                             "hybrid-pool layer spec count %zu != layer_num %u",
                             layer_specs.size(),
@@ -550,27 +539,20 @@ void populateIndependentGroups(CacheConfig&                 config,
     std::map<std::string, GroupBuildState> group_by_tag;
     std::vector<std::string>               ordered_tags;
     for (uint32_t layer = 0; layer < config.layer_num; ++layer) {
-        const auto& descs = layer_descs[layer];
         const auto& specs = layer_specs[layer];
-        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "hybrid-pool layer %u has no descs", layer);
-        RTP_LLM_CHECK_WITH_INFO(descs.size() == specs.size(),
-                                "hybrid-pool layer %u desc count %zu != spec count %zu",
-                                layer,
-                                descs.size(),
-                                specs.size());
+        RTP_LLM_CHECK_WITH_INFO(!specs.empty(), "hybrid-pool layer %u has no specs", layer);
         std::set<std::string> layer_tags;
-        for (size_t idx = 0; idx < descs.size(); ++idx) {
-            const auto& desc = descs[idx];
-            const auto& spec = specs[idx];
+        for (const auto& built_spec : specs) {
+            const auto& spec = built_spec.spec;
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid-pool layer %u has null spec", layer);
-            RTP_LLM_CHECK_WITH_INFO(layer_tags.insert(spec->tag).second,
+            RTP_LLM_CHECK_WITH_INFO(layer_tags.insert(built_spec.tag).second,
                                     "hybrid-pool layer %u has duplicate tag=%s",
                                     layer,
-                                    spec->tag.c_str());
-            const auto policy            = SpecBuilder::groupPolicy(desc);
-            const auto type              = SpecBuilder::groupType(desc);
-            const auto local_kv_head_num = localKvHeadNumForType(desc.cache_type, model_config, parallelism_config);
-            auto       group_it          = group_by_tag.find(spec->tag);
+                                    built_spec.tag.c_str());
+            const auto& policy            = built_spec.policy;
+            const auto  type              = policy.group_type;
+            const auto  local_kv_head_num = localKvHeadNumForType(spec->type, model_config, parallelism_config);
+            auto        group_it          = group_by_tag.find(built_spec.tag);
             if (group_it == group_by_tag.end()) {
                 GroupBuildState state;
                 state.spec              = spec;
@@ -578,20 +560,21 @@ void populateIndependentGroups(CacheConfig&                 config,
                 state.type              = type;
                 state.policy            = policy;
                 state.local_kv_head_num = local_kv_head_num;
-                group_it                = group_by_tag.emplace(spec->tag, std::move(state)).first;
-                ordered_tags.push_back(spec->tag);
+                group_it                = group_by_tag.emplace(built_spec.tag, std::move(state)).first;
+                ordered_tags.push_back(built_spec.tag);
             } else {
                 RTP_LLM_CHECK_WITH_INFO(group_it->second.fingerprint == spec->fingerprint(),
                                         "hybrid-pool tag=%s has multiple physical prototypes",
-                                        spec->tag.c_str());
-                RTP_LLM_CHECK_WITH_INFO(
-                    group_it->second.type == type, "hybrid-pool tag=%s has inconsistent group type", spec->tag.c_str());
+                                        built_spec.tag.c_str());
+                RTP_LLM_CHECK_WITH_INFO(group_it->second.type == type,
+                                        "hybrid-pool tag=%s has inconsistent group type",
+                                        built_spec.tag.c_str());
                 RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(group_it->second.policy, policy),
                                         "hybrid-pool tag=%s has inconsistent policy",
-                                        spec->tag.c_str());
+                                        built_spec.tag.c_str());
                 RTP_LLM_CHECK_WITH_INFO(group_it->second.local_kv_head_num == local_kv_head_num,
                                         "hybrid-pool tag=%s has inconsistent local_kv_head_num",
-                                        spec->tag.c_str());
+                                        built_spec.tag.c_str());
             }
             group_it->second.layer_ids.push_back(static_cast<int>(layer));
         }
@@ -630,25 +613,28 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     size_t                total_scale_block_bytes = 0;
     uint32_t              max_group_layers        = 0;
     config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        const auto& spec = config.specForGroup(gid);
-        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
-        const auto   layer_count         = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
-        const size_t group_bpk           = config.kernelBlocksPerKvBlockForGroup(gid);
-        const size_t kv_stride           = spec->block_size_bytes() * group_bpk;
-        const size_t scale_stride        = spec->scale_block_size_bytes() * group_bpk;
-        group_kv_block_stride_bytes[gid] = kv_stride;
-        group_kv_scale_stride_bytes[gid] = scale_stride;
-        const auto type                  = config.typeForGroup(gid);
-        const bool is_paged_group        = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
-        if (is_paged_group && !config.usesExplicitIndependentBlocks(gid)) {
+    // slot only walks the parallel stride vectors handed to setGroupBlockLayout;
+    // every value is read from the tagged group record it belongs to.
+    for (size_t slot = 0; slot < group_num; ++slot) {
+        const auto& group = config.topology().groups()[slot];
+        const auto& spec  = group.spec;
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache group tag=%s has null spec", group.tag.c_str());
+        const auto   layer_count          = static_cast<uint32_t>(group.layer_ids.size());
+        const size_t group_bpk            = config.kernelBlocksPerKvBlock(group.tag);
+        const size_t kv_stride            = spec->block_size_bytes() * group_bpk;
+        const size_t scale_stride         = spec->scale_block_size_bytes() * group_bpk;
+        group_kv_block_stride_bytes[slot] = kv_stride;
+        group_kv_scale_stride_bytes[slot] = scale_stride;
+        const auto type                   = group.policy.group_type;
+        const bool is_paged_group         = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
+        if (is_paged_group && !config.usesExplicitIndependentBlocks(group.tag)) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         }
         max_kv_stride    = std::max(max_kv_stride, kv_stride);
         max_scale_stride = std::max(max_scale_stride, scale_stride);
         max_group_layers = std::max(max_group_layers, layer_count);
-        for (int layer_id : config.layerIdsForGroup(gid)) {
+        for (int layer_id : group.layer_ids) {
             config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] =
                 static_cast<int>(kv_stride + scale_stride);
         }
@@ -719,10 +705,9 @@ CacheConfig createIndependentConfig(const ModelConfig&       model_config,
         ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
         const auto layer_specs      = CacheConfigCreator::buildLayerSpecsFromDescs(
             model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
-        populateIndependentGroups(
-            config, model_config.kv_cache_spec_descs, layer_specs, model_config, parallelism_config);
-        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-            const auto& spec               = config.specForGroup(gid);
+        populateIndependentGroups(config, layer_specs, model_config, parallelism_config);
+        for (const auto& group : config.topology().groups()) {
+            const auto& spec               = group.spec;
             config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
                                              || spec->type == KVCacheSpecType::OpaqueState;
             config.use_opaque_kv_cache_store = config.use_opaque_kv_cache_store
@@ -763,14 +748,14 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
     return low;
 }
 
-LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
-                                                               const SpecBuildContext&      ctx,
-                                                               int64_t                      expected_layer_num) {
+LayerBuiltSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
+                                                             const SpecBuildContext&      ctx,
+                                                             int64_t                      expected_layer_num) {
     RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(expected_layer_num),
                             "kv_cache_spec_descs size %zu != num_layers %ld",
                             layer_descs.size(),
                             expected_layer_num);
-    LayerKVCacheSpecs layer_specs(layer_descs.size());
+    LayerBuiltSpecs layer_specs(layer_descs.size());
     for (size_t layer_id = 0; layer_id < layer_descs.size(); ++layer_id) {
         const auto& descs = layer_descs[layer_id];
         RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "kv_cache_spec_descs layer %zu has no descs", layer_id);

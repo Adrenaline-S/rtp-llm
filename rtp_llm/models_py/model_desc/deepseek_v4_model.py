@@ -1132,9 +1132,10 @@ class DeepSeekV4Model(GptModelBase):
         paged_pool_specs = build_paged_pool_specs(
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
         )
-        # Snapshot framework's group ordering — CUDA-graph replay path
-        # inside the impl's ``prepare`` has no live kv_cache, so carry
-        # the list in the config. Position IS the topology group id.
+        # Snapshot the framework's cache tags — the CUDA-graph replay path
+        # inside the impl's ``prepare`` has no live kv_cache, so carry the
+        # list in the config. It is a set of semantic identities in canonical
+        # sorted order; a position in it identifies nothing.
         group_tags_snapshot = (
             [str(tag) for tag in (self.kv_cache.group_tags or [])]
             if self.kv_cache is not None

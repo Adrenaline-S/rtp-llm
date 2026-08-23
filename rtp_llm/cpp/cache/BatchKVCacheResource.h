@@ -22,10 +22,9 @@ public:
         cache_keys_initialized_ = false;
     }
 
-    void initGroups(std::shared_ptr<const CacheTopology> topology) {
-        RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "BatchKVCacheResource::initGroups requires a topology");
+    void initGroups(const CacheConfig& config) {
         for (auto& batch : batch_resource) {
-            batch.initGroups(topology);
+            batch.initGroups(config);
         }
     }
 
@@ -40,11 +39,6 @@ public:
         }
     }
 
-    int blocksNum(int batch_id, int group_id) const {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].blocksNum(group_id);
-    }
-
     int blocksNum(int batch_id, std::string_view tag) const {
         return cacheResource(batch_id).blocksNum(tag);
     }
@@ -54,19 +48,12 @@ public:
             return 0;
         }
 
-        auto& resource   = batch_resource[0];
-        int   group_nums = resource.groupNums();
-
-        int max_blocks_num = 0;
-        for (int i = 0; i < group_nums; i++) {
-            max_blocks_num = std::max(max_blocks_num, resource.blocksNum(i));
+        const auto& resource       = batch_resource[0];
+        int         max_blocks_num = 0;
+        for (const auto& record : resource.groupBlocks()) {
+            max_blocks_num = std::max(max_blocks_num, resource.blocksNum(record->tag));
         }
         return max_blocks_num;
-    }
-
-    const BlockIndicesType& blocks(int batch_id, int group_id) const {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].blocks(group_id);
     }
 
     const BlockIndicesType& blocks(int batch_id, std::string_view tag) const {
@@ -77,16 +64,6 @@ public:
         return cacheResource(batch_id).blocksForLayer(layer_id, tag);
     }
 
-    const BlockIndicesType& blocks(int batch_id, int layer_id, int group_id) const {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].blocks(layer_id, group_id);
-    }
-
-    const BlockIndicesType& kernelBlocks(int batch_id, int group_id) const {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].kernelBlocks(group_id);
-    }
-
     const BlockIndicesType& kernelBlocks(int batch_id, std::string_view tag) const {
         return cacheResource(batch_id).kernelBlocks(tag);
     }
@@ -95,19 +72,9 @@ public:
         return cacheResource(batch_id).kernelBlocksForLayer(layer_id, tag);
     }
 
-    const BlockIndicesType& kernelBlocks(int batch_id, int layer_id, int group_id) const {
+    bool layerOwnsTag(int batch_id, int layer_id, std::string_view tag) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].kernelBlocks(layer_id, group_id);
-    }
-
-    int groupId(int batch_id, int layer_id, int group_id) const {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].groupId(layer_id, group_id);
-    }
-
-    BlockIds& mutableBlockIds(int batch_id, int group_id) {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].mutableBlockIds(group_id);
+        return batch_resource[batch_id].layerOwnsTag(layer_id, tag);
     }
 
     BlockIds& mutableBlockIds(int batch_id, std::string_view tag) {
@@ -118,12 +85,17 @@ public:
         return cacheResource(batch_id).mutableBlockIdsForLayer(layer_id, tag);
     }
 
-    int groupId(int layer_id, int group_id) const {
+    bool layerOwnsTag(int layer_id, std::string_view tag) const {
         RTP_LLM_CHECK(!batch_resource.empty());
-        return batch_resource[0].groupId(layer_id, group_id);
+        return batch_resource[0].layerOwnsTag(layer_id, tag);
     }
 
-    const GroupBlockIds& groupBlocks(int batch_id = 0) const {
+    CacheGroupBlockRecords& groupBlocks(int batch_id = 0) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        return batch_resource[batch_id].groupBlocks();
+    }
+
+    const CacheGroupBlockRecords& groupBlocks(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].groupBlocks();
     }
@@ -169,9 +141,8 @@ public:
         batch_resource[batch_id].appendCacheKey(key);
     }
 
-    void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].mutableBlockIds(group_id).assign(blocks);
+    void setBatchBlocks(int batch_id, std::string_view tag, const BlockIndicesType& blocks) {
+        cacheResource(batch_id).mutableBlockIds(tag).assign(blocks);
     }
 
     void setBatchCacheKeys(int batch_id, const CacheKeysType& keys) {
@@ -181,9 +152,23 @@ public:
 
     void check() const {
         RTP_LLM_CHECK(!batch_resource.empty());
-        size_t blocks_num = batch_resource[0].blocksNum(0);
+        // Faithful translation of the pre-tag check, which compared the block count
+        // of a single group across every batch. The group it compared was the one
+        // stored first, i.e. the first group in topology order, so that is the group
+        // named by tag here.
+        //
+        // FOLLOW-UP(cache-batch-resource-check-all-groups): widening this to every
+        // group is a deliberate later change, not an oversight -- it would reject
+        // batches that the pre-tag engine accepted, so it must not ride along with a
+        // behavior-preserving refactor.
+        const auto& records = batch_resource[0].groupBlocks();
+        // The pre-tag form resolved positional group 0 through a lookup that failed
+        // when the resource carried no groups, so an empty group list stays a failure.
+        RTP_LLM_CHECK(!records.empty());
+        const std::string& first_tag  = records.front()->tag;
+        const size_t       blocks_num = batch_resource[0].blocksNum(first_tag);
         for (const auto& resource : batch_resource) {
-            RTP_LLM_CHECK(resource.blocksNum(0) == blocks_num);
+            RTP_LLM_CHECK(resource.blocksNum(first_tag) == blocks_num);
         }
     }
 
@@ -208,15 +193,6 @@ public:
     void moveBatchResource(int batch_idx, KVCacheResource&& resource) {
         RTP_LLM_CHECK(batch_idx >= 0 && static_cast<size_t>(batch_idx) < batch_resource.size());
         batch_resource[batch_idx] = std::move(resource);
-    }
-
-    std::vector<BlockIndicesType> getAllBatchBlocks(int group_id) const {
-        std::vector<BlockIndicesType> all_blocks;
-        all_blocks.reserve(batch_resource.size());
-        for (const auto& resource : batch_resource) {
-            all_blocks.push_back(resource.blocks(group_id));
-        }
-        return all_blocks;
     }
 
     std::vector<BlockIndicesType> getAllBatchBlocks(std::string_view tag) const {
@@ -269,8 +245,8 @@ public:
         }
     }
 
-    void swapBlocks(int32_t batch_id, size_t group_id, size_t rhs, size_t lhs) {
-        batch_resource[batch_id].swapBlocks(group_id, rhs, lhs);
+    void swapBlocks(int32_t batch_id, std::string_view tag, size_t rhs, size_t lhs) {
+        cacheResource(batch_id).swapBlocks(tag, rhs, lhs);
     }
 
 private:
