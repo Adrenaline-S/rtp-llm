@@ -136,20 +136,6 @@ public:
         return topology().soleGroupForLayer(layer_id);
     }
 
-    // Canonical physical-layout identity for this cache plan. See
-    // CacheTopology.h for the exact inclusion/exclusion set. This is the value
-    // two ranks or two processes compare to fail fast on layout disagreement.
-    CacheTopologySignature physicalTopologySignature() const {
-        return ::rtp_llm::physicalTopologySignature(topology());
-    }
-
-    // Fail-fast physical-layout guard at a cache boundary. For every group tag
-    // present in boundary_topology, its physical layout (spec layout, local
-    // heads, physical B, K, KV stride, scale stride) must match this config's
-    // group of the same tag. Robust to layer-subset views (per-model /
-    // per-MTP-module layouts) where whole-signature equality does not apply.
-    void checkPhysicalGroupLayoutCompatible(const CacheTopology& boundary_topology, const char* boundary) const;
-
     // Total bytes one logical block of a cache group occupies across all of the
     // group's layers. Derived, so it stays a method.
     size_t blockSizeBytes(std::string_view tag) const {

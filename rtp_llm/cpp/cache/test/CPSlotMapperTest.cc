@@ -234,60 +234,14 @@ TEST_F(CPSlotMapperTest, TaggedGroupMethodsRejectMissingIdentity) {
     EXPECT_ANY_THROW(mapper.sliceBlockForPeer(config, "missing", {}, 0));
 }
 
-TEST_F(CPSlotMapperTest, TaggedTransferPlanningPreservesRoundRobinAndCompactSwa) {
-    CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
-    config.layer_all_num      = 1;
-
-    GroupBase full;
-    full.tag                       = "full";
-    full.spec                      = std::make_shared<MHAKVCacheSpec>();
-    full.layer_ids                 = {0};
-    full.seq_size_per_block        = 24;
-    full.kernel_seq_size_per_block = 8;
-    full.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    full.policy.cp_mapping         = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-
-    GroupBase swa;
-    swa.tag                       = "swa";
-    swa.spec                      = std::make_shared<MHAKVCacheSpec>();
-    swa.layer_ids                 = {0};
-    swa.seq_size_per_block        = 32;
-    swa.kernel_seq_size_per_block = 8;
-    swa.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa.policy.cp_mapping         = CpBlockMappingMode::COMPACT_LAST_RANK;
-    swa.policy.active_tail_blocks = 2;
-
-    config.setTopology({std::move(full), std::move(swa)}, {{0, {"full", "swa"}}});
-
-    auto full_selection =
-        projectTokenRangeForGroup(config, config.group("full"), 0, 96, true, /*cp_rank=*/1, /*cp_size=*/2);
-    EXPECT_EQ(full_selection.tag, "full");
-    EXPECT_EQ(full_selection.global_positions, (std::vector<size_t>{5, 11}));
-
-    auto swa_selection =
-        projectTokenRangeForGroup(config, config.group("swa"), 0, 256, true, /*cp_rank=*/0, /*cp_size=*/4);
-    EXPECT_EQ(swa_selection.tag, "swa");
-    EXPECT_EQ(swa_selection.global_positions, (std::vector<size_t>{15, 31}));
-
-    auto cache_store_transfer = planPhysicalBlocksForCacheTransfer(config.group("swa"),
-                                                                   /*block_num=*/8,
-                                                                   /*reuse_block_size=*/0,
-                                                                   /*use_hybrid=*/true,
-                                                                   /*hybrid_full_from_begin=*/true);
-    EXPECT_EQ(cache_store_transfer.tag, "swa");
-    EXPECT_EQ(cache_store_transfer.physical_block_positions, (std::vector<size_t>{6, 7}));
-}
-
-TEST_F(CPSlotMapperTest, TaggedTransferPlanningRejectsInvalidIdentity) {
-    GroupBase group;
-    group.seq_size_per_block = 8;
-    group.policy             = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    CacheConfig config;
-    config.seq_size_per_block = 8;
-    EXPECT_ANY_THROW(projectTokenRangeForGroup(config, group, 0, 8, true));
-    EXPECT_ANY_THROW(planPhysicalBlocksForCacheTransfer(group, 1, 0, false, true));
+TEST_F(CPSlotMapperTest, TransferPlannerReturnsDirectTailPositions) {
+    EXPECT_EQ(blockPositionsForCacheTransfer(/*block_num=*/8,
+                                             /*reuse_block_size=*/0,
+                                             /*use_hybrid=*/true,
+                                             /*transfer_tail_blocks=*/true,
+                                             /*tail_block_count=*/2,
+                                             /*hybrid_full_from_begin=*/true),
+              (std::vector<size_t>{6, 7}));
 }
 
 TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDummyTail) {
@@ -333,7 +287,7 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDu
     EXPECT_FALSE(projected.lastBlockAligned());
 }
 
-TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTaggedRecordsIndependentOfLocalOrder) {
+TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagMappedBlocks) {
     CacheConfig config;
     config.seq_size_per_block = 8;
     config.layer_num          = 1;
@@ -360,8 +314,6 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTaggedRecordsIndependentOfLocalO
     source.setLastBlockAligned(true);
     source.mutableBlockIds("full").assign({100, 101, 102, 103});
     source.mutableBlockIds("swa").assign({200, 201, 202, 203});
-    std::reverse(source.groupBlocks().begin(), source.groupBlocks().end());
-
     CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*global key B=*/8);
     auto projected = mapper.projectConnectorResource(source, config, mapper.canonicalCacheKeys(source.cacheKeys()));
 

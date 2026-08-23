@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -36,6 +37,15 @@ static CacheConfig makeTinyHybridConfig() {
                                                  /*local_head_num_kv=*/1,
                                                  /*size_per_head=*/1);
     config.kernel_seq_size_per_block = 2;
+    return config;
+}
+
+static CacheConfig makeReorderedTinyHybridConfig() {
+    auto config = makeTinyHybridConfig();
+    auto groups = config.topology().groups();
+    auto layers = config.topology().layers();
+    std::reverse(groups.begin(), groups.end());
+    config.setTopology(std::move(groups), std::move(layers));
     return config;
 }
 
@@ -1255,6 +1265,74 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReservationFailure
     linear_pool->requestFree(BlockIndicesType(linear_blocks.begin() + 1, linear_blocks.end()));
     full_pool->requestFree(BlockIndicesType(full_blocks.begin() + 1, full_blocks.end()));
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReorderedTopologyPreservesTagPayloadPairing) {
+    auto config    = makeReorderedTinyHybridConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    const auto linear_pool   = allocator->blockPool(kTinyLinearTag);
+    const auto full_pool     = allocator->blockPool(kTinyFullTag);
+    auto       linear_blocks = linear_pool->malloc(1);
+    auto       full_blocks   = full_pool->malloc(1);
+    ASSERT_EQ(linear_blocks.size(), 1u);
+    ASSERT_EQ(full_blocks.size(), 1u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100});
+    batch_res->mutableBlockIds(0, kTinyLinearTag).assign(linear_blocks);
+    batch_res->mutableBlockIds(0, kTinyFullTag).assign(full_blocks);
+
+    std::vector<TaggedBlockIdPair> update_mapping;
+    ASSERT_TRUE(allocator->updateKVBlock(batch_res, {0, 0}, true, update_mapping));
+    ASSERT_EQ(update_mapping.size(), 2u);
+    for (const auto& update : update_mapping) {
+        if (update.tag == kTinyLinearTag) {
+            EXPECT_EQ(update.src, linear_blocks.front());
+            EXPECT_EQ(batch_res->blocks(0, kTinyLinearTag).back(), update.dst);
+        } else if (update.tag == kTinyFullTag) {
+            EXPECT_EQ(update.src, full_blocks.front());
+            EXPECT_EQ(batch_res->blocks(0, kTinyFullTag).back(), update.dst);
+        } else {
+            ADD_FAILURE() << "unexpected cache-group tag " << update.tag;
+        }
+    }
+    allocator->free(FreeInfo{batch_res, nullptr});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReorderedTopologyRollsBackEarlierTagOnFailure) {
+    auto config    = makeReorderedTinyHybridConfig();
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    const auto linear_pool   = allocator->blockPool(kTinyLinearTag);
+    const auto full_pool     = allocator->blockPool(kTinyFullTag);
+    auto       linear_blocks = linear_pool->malloc(static_cast<int>(linear_pool->freeBlocksNum()));
+    auto       full_blocks   = full_pool->malloc(static_cast<int>(full_pool->freeBlocksNum() - 1));
+    ASSERT_EQ(linear_pool->freeBlocksNum(), 0u);
+    ASSERT_EQ(full_pool->freeBlocksNum(), 1u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100});
+    batch_res->mutableBlockIds(0, kTinyLinearTag).assign({linear_blocks.front()});
+    batch_res->mutableBlockIds(0, kTinyFullTag).assign({full_blocks.front()});
+    const auto linear_before = batch_res->blocks(0, kTinyLinearTag);
+    const auto full_before   = batch_res->blocks(0, kTinyFullTag);
+    const auto linear_refs   = linear_pool->requestRefBlocksNum();
+    const auto full_refs     = full_pool->requestRefBlocksNum();
+
+    std::vector<TaggedBlockIdPair> update_mapping{{"stale", 1, 2}};
+    EXPECT_FALSE(allocator->updateKVBlock(batch_res, {0, 0}, true, update_mapping));
+    EXPECT_TRUE(update_mapping.empty());
+    EXPECT_EQ(batch_res->blocks(0, kTinyLinearTag), linear_before);
+    EXPECT_EQ(batch_res->blocks(0, kTinyFullTag), full_before);
+    EXPECT_EQ(linear_pool->requestRefBlocksNum(), linear_refs);
+    EXPECT_EQ(full_pool->requestRefBlocksNum(), full_refs);
+    EXPECT_EQ(linear_pool->freeBlocksNum(), 0u);
+    EXPECT_EQ(full_pool->freeBlocksNum(), 1u) << "the earlier full-tag reservation must be rolled back";
+
+    allocator->free(FreeInfo{batch_res, nullptr});
+    linear_pool->requestFree(BlockIndicesType(linear_blocks.begin() + 1, linear_blocks.end()));
+    full_pool->requestFree(BlockIndicesType(full_blocks.begin() + 1, full_blocks.end()));
 }
 
 TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReusesDroppedBatchCapacityTransactionally) {

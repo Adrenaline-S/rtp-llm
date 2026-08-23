@@ -17,7 +17,7 @@ size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
 
     // Report the first non-empty group in the parent CacheConfig's declaration order. The pre-tag
     // form walked group ordinals 0..group_num and resolved each through the config-order tag list,
-    // so config order -- not local storage order -- is the contract. Iterating groupBlocks() would
+    // so config order -- not map iteration order -- is the contract. Iterating blocksByTag() would
     // instead follow the local record vector, whose order callers are free to change, and would
     // pick a different group whenever the groups hold unequal block counts.
     for (const auto tag : resource_->groupTagsInConfigOrder()) {

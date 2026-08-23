@@ -233,7 +233,7 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
     EXPECT_EQ(ctx.matchedBlockCount(), 3u);
 }
 
-TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesFirstNonEmptyConfigGroupAfterLocalReorder) {
+TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesFirstNonEmptyConfigGroup) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
     resource->mutableBlockIds("group0").assign({10, 11});
@@ -242,29 +242,7 @@ TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesFirstNonEmptyConfig
     P2PConnectorAsyncMatchContext ctx(resource);
     EXPECT_EQ(ctx.matchedBlockCount(), 2u);
 
-    auto& records = resource->groupBlocks();
-    std::reverse(records.begin(), records.end());
     EXPECT_EQ(ctx.matchedBlockCount(), 2u);
-}
-
-TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountRejectsNullAndCorruptTaggedRecords) {
-    const auto config = makeP2PTestCacheConfig(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}});
-
-    auto null_record = std::make_shared<KVCacheResource>();
-    null_record->initGroups(config);
-    null_record->mutableBlockIds("group0").assign({10, 11});
-    null_record->mutableBlockIds("group1").assign({20, 21, 22});
-    null_record->groupBlocks()[1] = nullptr;
-    P2PConnectorAsyncMatchContext null_ctx(null_record);
-    EXPECT_THROW(null_ctx.matchedBlockCount(), std::exception);
-
-    auto corrupt_record = std::make_shared<KVCacheResource>();
-    corrupt_record->initGroups(config);
-    corrupt_record->mutableBlockIds("group0").assign({10, 11});
-    corrupt_record->mutableBlockIds("group1").assign({20, 21, 22});
-    corrupt_record->groupBlocks()[0]->tag = "unknown";
-    P2PConnectorAsyncMatchContext corrupt_ctx(corrupt_record);
-    EXPECT_THROW(corrupt_ctx.matchedBlockCount(), std::exception);
 }
 
 // 测试: scheduler_->sendKVCache 失败，返回 INTERNAL 错误

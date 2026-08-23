@@ -2171,13 +2171,6 @@ TEST(CPSlotMapperTest, Dsv4SevenGroupsRouteCpAndTransferByTagIndependentOfRecord
                                              group.seq_size_per_block;
         EXPECT_EQ(mapper.logicalSeqSizePerBlock(config, tag), expected_key_span) << tag;
 
-        auto selection = projectTokenRangeForGroup(
-            config, group, 0, group.seq_size_per_block * static_cast<size_t>(cp_size), true, cp_size - 1, cp_size);
-        EXPECT_EQ(selection.tag, tag);
-        ASSERT_EQ(selection.global_positions.size(), 1u) << tag;
-        EXPECT_EQ(selection.global_positions.front(),
-                  group.seq_size_per_block * static_cast<size_t>(cp_size) / config.seq_size_per_block - 1)
-            << tag;
     }
     EXPECT_ANY_THROW(mapper.layoutForGroup(config, "missing_dsv4_tag"));
 }

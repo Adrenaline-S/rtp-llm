@@ -411,12 +411,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
         request.add_cache_keys(cache_key);
     }
     if (!load_context.group_blocks.empty()) {
-        for (const auto& record : load_context.group_blocks) {
-            RTP_LLM_CHECK_WITH_INFO(record != nullptr, "null cache group record in load context");
-            RTP_LLM_CHECK_WITH_INFO(!record->tag.empty(), "cache group record requires a non-empty tag");
+        for (const auto& [tag, block_ids] : load_context.group_blocks) {
+            RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cache group record requires a non-empty tag");
             auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(record->tag);
-            for (const auto& block_id : record->blocks.blocks()) {
+            tagged_row->set_tag(tag);
+            for (const auto& block_id : block_ids.blocks()) {
                 tagged_row->add_block_ids(block_id);
             }
         }
@@ -473,12 +472,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     }
     // Every cache group record carries its own semantic tag on the wire.
     if (!load_context.group_blocks.empty()) {
-        for (const auto& record : load_context.group_blocks) {
-            RTP_LLM_CHECK_WITH_INFO(record != nullptr, "null cache group record in load context");
-            RTP_LLM_CHECK_WITH_INFO(!record->tag.empty(), "cache group record requires a non-empty tag");
+        for (const auto& [tag, block_ids] : load_context.group_blocks) {
+            RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cache group record requires a non-empty tag");
             auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(record->tag);
-            for (const auto& block_id : record->blocks.blocks()) {
+            tagged_row->set_tag(tag);
+            for (const auto& block_id : block_ids.blocks()) {
                 tagged_row->add_block_ids(block_id);
             }
         }
@@ -494,7 +492,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto& cache_keys      = generate_stream->cacheKeys(0);
     // kvCachePtr() validates the batch resource, so the tagged records below are
     // already known to be non-null, non-empty and unique.
-    const auto& group_blocks = generate_stream->kvCachePtr()->groupBlocks(0);
+    const auto& group_blocks = generate_stream->kvCachePtr()->blocksByTag(0);
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
         && decode_context.peer_addrs.size() % resource_.workers.size() != 0) {
@@ -767,13 +765,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto& cache_config  = cache_manager->cacheConfig();
     auto        layer_num     = maga_init_params_.model_config_.num_layers;
 
-    // Fail fast on declared-vs-materialized physical layout drift before any
-    // prefill/decode KV transfer: transferring KV into a physically mismatched
-    // layout silently corrupts the cache. The comparison target is the layout
-    // the allocator actually materialized, so this check can genuinely fail.
-    std::call_once(cache_transfer_layout_checked_,
-                   [&] { checkCacheTransferLayout(cache_config, cache_manager->allLayerCacheBase()); });
-
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
@@ -808,20 +799,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     };
     const bool is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    // Tag -> blocks index over the owned records. Record order is not identity.
-    std::unordered_map<std::string, const BlockIds*> blocks_by_tag;
-    blocks_by_tag.reserve(load_context.group_blocks.size());
-    for (const auto& record : load_context.group_blocks) {
-        RTP_LLM_CHECK_WITH_INFO(record != nullptr, "null cache group record in load context");
-        RTP_LLM_CHECK_WITH_INFO(!record->tag.empty(), "cache group record requires a non-empty tag");
-        RTP_LLM_CHECK_WITH_INFO(blocks_by_tag.emplace(record->tag, &record->blocks).second,
-                                "duplicate cache group record tag=%s",
-                                record->tag.c_str());
-    }
+    const auto& blocks_by_tag = load_context.group_blocks;
     auto blocksForTag = [&blocks_by_tag](const std::string& tag) -> const BlockIds& {
         const auto it = blocks_by_tag.find(tag);
         RTP_LLM_CHECK_WITH_INFO(it != blocks_by_tag.end(), "load cache has no blocks for cache tag=%s", tag.c_str());
-        return *it->second;
+        return it->second;
     };
     // The single-group plan has exactly one cache group, so "the only group" is
     // not a positional choice.
@@ -904,24 +886,25 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         const size_t tail_block_count =
             policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
         if (!is_page_level_rr || !groupUsesCpSlice(cfg, tag) || load_context.prefill_cp_size <= 1) {
-            return planPhysicalBlocksForCacheTransfer(group,
-                                                      block_num,
-                                                      load_context.reuse_block_size,
-                                                      cfg_use_hybrid,
-                                                      /*hybrid_full_from_begin=*/true);
+            return blockPositionsForCacheTransfer(block_num,
+                                                  load_context.reuse_block_size,
+                                                  cfg_use_hybrid,
+                                                  tail_block_count > 0,
+                                                  tail_block_count,
+                                                  /*hybrid_full_from_begin=*/true);
         }
         if (isCompactFixedBlockTable(cfg, tag)) {
-            return planPhysicalBlocksForCacheTransfer(group,
-                                                      block_num,
-                                                      load_context.reuse_block_size,
-                                                      cfg_use_hybrid,
-                                                      /*hybrid_full_from_begin=*/true);
+            return blockPositionsForCacheTransfer(block_num,
+                                                  load_context.reuse_block_size,
+                                                  cfg_use_hybrid,
+                                                  tail_block_count > 0,
+                                                  tail_block_count,
+                                                  /*hybrid_full_from_begin=*/true);
         }
 
-        PhysicalBlockTransferPlan selection;
-        selection.tag = group.tag;
+        std::vector<size_t> block_positions;
         if (block_num == 0) {
-            return selection;
+            return block_positions;
         }
         const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
         const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
@@ -929,11 +912,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         const size_t tail_count     = std::max<size_t>(1, tail_block_count);
         const size_t start          = cfg_use_hybrid ? (compact_blocks > tail_count ? compact_blocks - tail_count : 0) :
                                                        std::min(reuse_blocks, compact_blocks);
-        selection.physical_block_positions.reserve(compact_blocks - start);
+        block_positions.reserve(compact_blocks - start);
         for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
-            selection.physical_block_positions.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
+            block_positions.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
         }
-        return selection;
+        return block_positions;
     };
     auto cacheKeyIndexForBlock = [&](const CacheConfig& cfg,
                                      const std::string& tag,
@@ -971,12 +954,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 size_t      model_id  = maga_init_params_.model_id;
 
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, tag);
-                auto transfer_selection   = blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, tag);
+                auto block_positions      = blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, tag);
 
                 if (!shouldLoadGroupFromPeer(cache_config, group_type, tag, i)) {
                     continue;
                 }
-                for (size_t block_pos : transfer_selection.physical_block_positions) {
+                for (size_t block_pos : block_positions) {
                     if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
                         continue;
                     }
@@ -1098,13 +1081,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             size_t      model_id  = module_plan.cache_model_id;
 
                             CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, tag);
-                            auto           transfer_selection =
+                            auto           block_positions =
                                 blockPositionsForLoad(block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, tag);
 
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, tag, i)) {
                                 continue;
                             }
-                            for (size_t block_pos : transfer_selection.physical_block_positions) {
+                            for (size_t block_pos : block_positions) {
                                 if (!shouldLoadBlockFromPeer(group_type, block_pos, i)) {
                                     continue;
                                 }
@@ -1279,26 +1262,19 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     return grpc::Status::OK;
 }
 
-void DecodeRpcServer::checkCacheTransferLayout(const CacheConfig&             declared,
-                                               const GroupedCacheLayerLayout& materialized) {
-    declared.checkPhysicalGroupLayoutCompatible(materialized.topology(), "prefill/decode cache transfer");
-}
-
-CacheGroupBlockRecords DecodeRpcServer::decodeGroupBlockRecords(const BroadcastLoadRequestPB& request,
-                                                                const CacheTopology&          topology) {
-    CacheGroupBlockRecords          records;
+std::map<std::string, BlockIds> DecodeRpcServer::decodeGroupBlockRecords(const BroadcastLoadRequestPB& request,
+                                                                         const CacheTopology&          topology) {
+    std::map<std::string, BlockIds> records;
     std::unordered_set<std::string> seen_tags;
-    records.reserve(static_cast<size_t>(request.tagged_group_block_ids_size()));
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
         const auto& tag = tagged_row.tag();
         RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "RPC cache group record requires a non-empty tag");
         // Rejects any tag the local cache plan does not own.
         topology.group(tag);
         RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(tag).second, "duplicate RPC cache tag=%s", tag.c_str());
-        auto record = std::make_shared<CacheGroupBlocks>();
-        record->tag = tag;
-        record->blocks.assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
-        records.push_back(std::move(record));
+        BlockIds block_ids;
+        block_ids.assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
+        records.emplace(tag, std::move(block_ids));
     }
     RTP_LLM_CHECK_WITH_INFO(records.size() == topology.groups().size(),
                             "RPC cache tag set does not match local topology, rows=%zu groups=%zu",

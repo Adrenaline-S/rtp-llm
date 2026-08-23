@@ -22,18 +22,22 @@
 //     quantization group indices in kernels. Those are a different domain and
 //     must not be disturbed.
 //
-// Explicitly allowed inside the scanned roots, by construction rather than by
-// exception list:
+// The gate scans production sources only. Characterization fixtures may name
+// the legacy types while proving the current behavior; those names must not
+// make a production architecture gate pass or fail vacuously.
 //
-//  * `group_ordinal` -- the adapter-local positional column produced at CUDA
-//    tensor and wire-bitmask boundaries from sorted unique tags. It is never
-//    persisted, returned to a config/resource API, or placed in a DTO, and it
-//    contains none of the rejected tokens.
-//  * the private `tag_to_slot` index inside a single container.
+// Explicitly allowed inside the scanned roots:
 //
-// This file is itself inside the scanned tree, so every rejected token is
-// assembled from fragments at runtime and never appears literally here. The
-// gate consequently polices itself and needs no self-exemption.
+//  * Exactly one `group_ordinal` member: the first column of
+//    `GroupOrdinalBlockIdPair`, the final [copies,3] CUDA tensor boundary
+//    record. No file-wide or general adapter-local ordinal exception exists.
+//  * CP-domain terminology in CPSlotMapper. CP's logical/physical slot is
+//    distinct from cache-group identity; the gate rejects only the five
+//    cache-group identity spellings below, never generic CP `slot` terms.
+//
+// This test source is staged with the cache tree, but the production-only
+// filter below excludes it. The forbidden-name list can therefore stay
+// literal and auditable without self-matching.
 
 #include <algorithm>
 #include <cstdlib>
@@ -43,6 +47,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -81,12 +86,14 @@ const std::vector<std::string>& requiredScannedFiles() {
         "rtp_llm/cpp/cache/BatchKVCacheResource.h",
         "rtp_llm/cpp/cache/BufferTypes.h",
         "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.cc",
+        "rtp_llm/cpp/cache/HybridPoolKVCacheAllocatorCoordinator.cc",
         "rtp_llm/cpp/cache/KVCacheManager.cc",
         "rtp_llm/cpp/cache/SharedBlockCache.h",
         "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.cc",
+        "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.cc",
+        "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.cc",
         "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.cc",
         "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.cc",
-        "rtp_llm/cpp/cache/test/CacheTagRoutingSourceTest.cc",
         "rtp_llm/cpp/model_rpc/DecodeRpcServer.cc",
     };
     return required;
@@ -95,10 +102,11 @@ const std::vector<std::string>& requiredScannedFiles() {
 struct Rule {
     std::string why;
     std::regex  pattern;
+    std::string identifier_fragment;
 };
 
-// Rejected tokens are assembled from fragments at runtime so this source
-// contains no literal rejected token and is therefore scannable by itself.
+// Legacy positional patterns are assembled from fragments because they are
+// still checked over a broad source scope.
 std::string lit(const std::string& fragment) {
     return fragment;
 }
@@ -147,6 +155,33 @@ const std::vector<Rule>& rules() {
              std::regex("(" + alternation + ")" + kForGroup)});
         built.push_back({"parallel-vector group snapshot builder indexed by slot; iterate tagged group records instead",
                          std::regex(kGroup + R"([A-Za-z]*Snapshot)")});
+
+        // These types were introduced during the Phase 1 attempt but are not
+        // needed for the approved flat tag-keyed representation. Their
+        // absence is an intentional architecture acceptance criterion, not a
+        // proxy for behavior: the semantic fixtures exercise the behavior.
+        const std::vector<std::string> forbidden_phase1_types = {
+            "GroupAllocationCheckpoint", "BatchAllocationCheckpoint", "AllocationRollbackJournal",
+            "NativeTransferSelection", "NativeTransferSelections", "PhysicalBlockTransferPlan",
+            "TaggedBlockPool", "TaggedSharedGroupEntry", "TaggedCacheItem",
+        };
+        for (const auto& type : forbidden_phase1_types) {
+            built.push_back({"premature Phase 1 abstraction " + type,
+                             std::regex("$^"),
+                             type});
+        }
+
+        // A tag is the cache-group business identity. A vector index may be
+        // named idx only where local storage needs one; none of these names
+        // may reintroduce a cache-group slot/id abstraction.
+        const std::vector<std::string> forbidden_identity_names = {
+            "tag_to_slot", "group_slot", "groupIdForTag", "groupById", "layer_group_ids",
+        };
+        for (const auto& name : forbidden_identity_names) {
+            built.push_back({"cache-group identity must remain tag-keyed (" + name + ")",
+                             std::regex("$^"),
+                             name});
+        }
         return built;
     }();
     return all;
@@ -177,6 +212,117 @@ bool isScannedExtension(const fs::path& path) {
     return ext == ".h" || ext == ".hpp" || ext == ".cc" || ext == ".cpp" || ext == ".cu" || ext == ".cuh";
 }
 
+bool isProductionSource(const fs::path& relative) {
+    for (const auto& component : relative) {
+        if (component == "test") {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool isIdentifierStart(char c) {
+    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+bool isIdentifierContinue(char c) {
+    return isIdentifierStart(c) || (c >= '0' && c <= '9');
+}
+
+// This intentionally tracks only block-comment continuation between lines. It
+// is not a complete C++ lexer: string and character literals are consumed on
+// their own line, which is sufficient for identifier-rule source gating.
+struct IdentifierLexerState {
+    bool in_block_comment = false;
+};
+
+std::vector<std::string_view> identifierTokens(const std::string& line, IdentifierLexerState& state) {
+    std::vector<std::string_view> tokens;
+    for (size_t cursor = 0; cursor < line.size();) {
+        if (state.in_block_comment) {
+            const auto comment_end = line.find("*/", cursor);
+            if (comment_end == std::string::npos) {
+                break;
+            }
+            state.in_block_comment = false;
+            cursor                 = comment_end + 2;
+            continue;
+        }
+        if (line.compare(cursor, 2, "//") == 0) {
+            break;
+        }
+        if (line.compare(cursor, 2, "/*") == 0) {
+            const auto comment_end = line.find("*/", cursor + 2);
+            if (comment_end == std::string::npos) {
+                state.in_block_comment = true;
+                break;
+            }
+            cursor = comment_end + 2;
+            continue;
+        }
+        if (line[cursor] == '"' || line[cursor] == '\'') {
+            const char quote = line[cursor++];
+            while (cursor < line.size()) {
+                if (line[cursor++] == '\\' && cursor < line.size()) {
+                    ++cursor;
+                } else if (line[cursor - 1] == quote) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if (!isIdentifierStart(line[cursor])) {
+            ++cursor;
+            continue;
+        }
+        const size_t begin = cursor++;
+        while (cursor < line.size() && isIdentifierContinue(line[cursor])) {
+            ++cursor;
+        }
+        tokens.emplace_back(line.data() + begin, cursor - begin);
+    }
+    return tokens;
+}
+
+bool containsIdentifierFragment(const std::vector<std::string_view>& tokens, std::string_view fragment) {
+    for (const auto token : tokens) {
+        if (token.find(fragment) != std::string_view::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool matchesRule(const Rule& rule, const std::string& line, const std::vector<std::string_view>& tokens) {
+    return rule.identifier_fragment.empty() ? std::regex_search(line, rule.pattern)
+                                            : containsIdentifierFragment(tokens, rule.identifier_fragment);
+}
+
+bool matchesRule(const Rule& rule, const std::string& line) {
+    IdentifierLexerState state;
+    return matchesRule(rule, line, identifierTokens(line, state));
+}
+
+bool isAllowedFinalBoundaryOrdinal(const std::string&                   relative,
+                                   std::string_view                     enclosing_record,
+                                   const std::vector<std::string_view>& tokens) {
+    return relative == "rtp_llm/cpp/cache/Types.h" && enclosing_record == "GroupOrdinalBlockIdPair"
+           && tokens.size() == 2 && tokens[0] == "int32_t" && tokens[1] == "group_ordinal";
+}
+
+bool hasProjectedCacheGroupSlotIdentity(const std::vector<std::string_view>& tokens) {
+    for (const auto token : tokens) {
+        const auto tag_to = token.find("tag_to_");
+        if (tag_to == std::string_view::npos || token.size() < 5) {
+            continue;
+        }
+        if (token.substr(token.size() - 5) == "_slot") {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct Finding {
     std::string relative_path;
     int         line_no = 0;
@@ -191,10 +337,35 @@ void scanFile(const fs::path& absolute, const std::string& relative, std::vector
     }
     std::string line;
     int         line_no = 0;
+    std::string active_record;
+    size_t      allowed_boundary_ordinals = 0;
+    IdentifierLexerState lexer_state;
     while (std::getline(input, line)) {
         ++line_no;
+        const auto tokens = identifierTokens(line, lexer_state);
+        if (tokens.size() >= 2 && tokens[0] == "struct") {
+            active_record = std::string(tokens[1]);
+        }
+        if (std::find(tokens.begin(), tokens.end(), "group_ordinal") != tokens.end()) {
+            if (isAllowedFinalBoundaryOrdinal(relative, active_record, tokens)) {
+                ++allowed_boundary_ordinals;
+            } else {
+                findings.push_back({relative,
+                                    line_no,
+                                    "group ordinal is allowed only as GroupOrdinalBlockIdPair::group_ordinal",
+                                    line});
+                continue;
+            }
+        }
+        if (hasProjectedCacheGroupSlotIdentity(tokens)) {
+            findings.push_back({relative,
+                                line_no,
+                                "cache-group vector positions must use idx rather than a projected slot identity",
+                                line});
+            continue;
+        }
         for (const auto& rule : rules()) {
-            if (std::regex_search(line, rule.pattern)) {
+            if (matchesRule(rule, line, tokens)) {
                 std::string trimmed = line;
                 const auto  first   = trimmed.find_first_not_of(" \t");
                 if (first != std::string::npos) {
@@ -207,12 +378,21 @@ void scanFile(const fs::path& absolute, const std::string& relative, std::vector
                 break;
             }
         }
+        if (!active_record.empty() && line.find("};") != std::string::npos) {
+            active_record.clear();
+        }
+    }
+    if (relative == "rtp_llm/cpp/cache/Types.h" && allowed_boundary_ordinals != 1) {
+        findings.push_back({relative,
+                            0,
+                            "Types.h must contain exactly one GroupOrdinalBlockIdPair::group_ordinal member",
+                            "observed count=" + std::to_string(allowed_boundary_ordinals)});
     }
 }
 
 }  // namespace
 
-TEST(CacheTagRoutingSourceTest, CacheSourcesCarryNoPositionalGroupRouting) {
+TEST(CacheTagRoutingSourceTest, ProductionSourcesCarryNoForbiddenPhase1AbstractionsOrPositionalGroupRouting) {
     const std::string root = workspaceRoot();
     ASSERT_FALSE(root.empty()) << "TEST_SRCDIR is unset; the source gate cannot locate the staged cache sources";
 
@@ -247,6 +427,9 @@ TEST(CacheTagRoutingSourceTest, CacheSourcesCarryNoPositionalGroupRouting) {
             if (relative.empty() || relative.compare(0, 2, "..") == 0) {
                 continue;
             }
+            if (!isProductionSource(fs::path(relative))) {
+                continue;
+            }
             if (!scanned.insert(relative).second) {
                 continue;
             }
@@ -264,13 +447,121 @@ TEST(CacheTagRoutingSourceTest, CacheSourcesCarryNoPositionalGroupRouting) {
 
     if (!findings.empty()) {
         std::ostringstream report;
-        report << "positional cache group routing survives in " << findings.size() << " place(s):\n";
+        report << "forbidden Phase 1 abstractions or positional cache-group routing survive in " << findings.size()
+               << " place(s):\n";
         for (const auto& finding : findings) {
             report << "  " << finding.relative_path << ":" << finding.line_no << ": " << finding.why << "\n"
                    << "      " << finding.line << "\n";
         }
         FAIL() << report.str();
     }
+}
+
+TEST(CacheTagRoutingSourceTest, ForbiddenIdentifierRulesCatchPrivateAndPrefixedSpellings) {
+    const auto& all = rules();
+    const auto find_rule = [&all](const std::string& fragment) -> const Rule& {
+        const auto it = std::find_if(all.begin(), all.end(), [&fragment](const Rule& rule) {
+            return rule.identifier_fragment == fragment;
+        });
+        EXPECT_NE(it, all.end()) << fragment;
+        return *it;
+    };
+
+    EXPECT_TRUE(matchesRule(find_rule("tag_to_slot"), "size_t tag_to_slot_ = 0;"));
+    EXPECT_TRUE(matchesRule(find_rule("tag_to_slot"), "size_t staged_tag_to_slot = 0;"));
+    EXPECT_TRUE(matchesRule(find_rule("group_slot"), "size_t group_slot = 0;"));
+    EXPECT_TRUE(matchesRule(find_rule("GroupAllocationCheckpoint"), "PrivateGroupAllocationCheckpoint value;"));
+    EXPECT_TRUE(matchesRule(find_rule("NativeTransferSelection"), "NativeTransferSelections selections;"));
+    EXPECT_FALSE(matchesRule(find_rule("tag_to_slot"), "const char* label = \"tag_to_slot\";"));
+    EXPECT_FALSE(matchesRule(find_rule("tag_to_slot"), "// staged_tag_to_slot is forbidden only as code"));
+    EXPECT_FALSE(matchesRule(find_rule("group_slot"), "CPSlotMapper cp_slot_mapper;"));
+}
+
+TEST(CacheTagRoutingSourceTest, IdentifierLexerCarriesBlockCommentStateAcrossLines) {
+    const auto& all = rules();
+    const auto it = std::find_if(all.begin(), all.end(), [](const Rule& rule) {
+        return rule.identifier_fragment == "GroupAllocationCheckpoint";
+    });
+    ASSERT_NE(it, all.end());
+
+    IdentifierLexerState state;
+    EXPECT_FALSE(matchesRule(*it, "/* comment begins", identifierTokens("/* comment begins", state)));
+    EXPECT_FALSE(matchesRule(*it,
+                             "PrivateGroupAllocationCheckpoint remains comment text",
+                             identifierTokens("PrivateGroupAllocationCheckpoint remains comment text", state)));
+    EXPECT_TRUE(matchesRule(*it,
+                            "*/ PrivateGroupAllocationCheckpoint real_identifier;",
+                            identifierTokens("*/ PrivateGroupAllocationCheckpoint real_identifier;", state)));
+}
+
+TEST(CacheTagRoutingSourceTest, GroupOrdinalIsAllowedOnlyInFinalCudaBoundaryRecord) {
+    IdentifierLexerState state;
+    EXPECT_FALSE(isAllowedFinalBoundaryOrdinal(
+        "rtp_llm/cpp/cache/HybridPoolKVCacheAllocatorCoordinator.cc",
+        "",
+        identifierTokens("size_t group_ordinal = 0;", state)));
+    state = {};
+    EXPECT_TRUE(isAllowedFinalBoundaryOrdinal(
+        "rtp_llm/cpp/cache/Types.h",
+        "GroupOrdinalBlockIdPair",
+        identifierTokens("int32_t group_ordinal;", state)));
+    state = {};
+    EXPECT_FALSE(isAllowedFinalBoundaryOrdinal(
+        "rtp_llm/cpp/cache/Types.h", "OtherRecord", identifierTokens("int32_t group_ordinal;", state)));
+    state = {};
+    EXPECT_FALSE(isAllowedFinalBoundaryOrdinal(
+        "rtp_llm/cpp/cache/Types.h",
+        "GroupOrdinalBlockIdPair",
+        identifierTokens("int32_t extra_group_ordinal;", state)));
+}
+
+TEST(CacheTagRoutingSourceTest, ProjectedAndPrefixedCacheGroupSlotsAreForbidden) {
+    IdentifierLexerState state;
+    EXPECT_TRUE(hasProjectedCacheGroupSlotIdentity(identifierTokens(
+        "std::unordered_map<std::string, size_t> tag_to_projected_slot;", state)));
+    state = {};
+    EXPECT_TRUE(hasProjectedCacheGroupSlotIdentity(identifierTokens("size_t private_tag_to_reordered_slot = 0;", state)));
+    state = {};
+    EXPECT_FALSE(hasProjectedCacheGroupSlotIdentity(identifierTokens("CPSlotMapper cp_slot_mapper;", state)));
+}
+
+TEST(CacheTagRoutingSourceTest, ScannerRejectsSameFileOrdinalAndPrefixedSlotMutations) {
+    const char* tmpdir = std::getenv("TEST_TMPDIR");
+    ASSERT_NE(tmpdir, nullptr);
+
+    const fs::path ordinal_mutation = fs::path(tmpdir) / "cache_tag_routing_types_mutation.h";
+    {
+        std::ofstream output(ordinal_mutation);
+        ASSERT_TRUE(output.is_open());
+        output << "struct GroupOrdinalBlockIdPair {\n"
+                  "    int32_t group_ordinal;\n"
+                  "};\n"
+                  "struct OtherRecord {\n"
+                  "    int32_t group_ordinal;\n"
+                  "};\n";
+    }
+    std::vector<Finding> ordinal_findings;
+    scanFile(ordinal_mutation, "rtp_llm/cpp/cache/Types.h", ordinal_findings);
+    ASSERT_EQ(ordinal_findings.size(), 1u);
+    EXPECT_EQ(ordinal_findings.front().line_no, 5);
+    EXPECT_NE(ordinal_findings.front().why.find("GroupOrdinalBlockIdPair::group_ordinal"), std::string::npos);
+
+    const fs::path slot_mutation = fs::path(tmpdir) / "cache_tag_routing_slot_mutation.cc";
+    {
+        std::ofstream output(slot_mutation);
+        ASSERT_TRUE(output.is_open());
+        output << "size_t private_tag_to_projected_slot = 0;\n";
+    }
+    std::vector<Finding> slot_findings;
+    scanFile(slot_mutation, "rtp_llm/cpp/cache/KVCacheManager.cc", slot_findings);
+    ASSERT_EQ(slot_findings.size(), 1u);
+    EXPECT_EQ(slot_findings.front().line_no, 1);
+    EXPECT_NE(slot_findings.front().why.find("idx"), std::string::npos);
+
+    std::error_code ec;
+    fs::remove(ordinal_mutation, ec);
+    ec.clear();
+    fs::remove(slot_mutation, ec);
 }
 
 }  // namespace rtp_llm

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <map>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -78,6 +80,11 @@ public:
 protected:
     // Narrow failure-injection seam for validating transactional initialization.
     virtual bool initGroup(const KVCacheGroupPtr& group);
+    // Narrow test-only seam for the incremental transaction boundary. The default
+    // is false, so production allocation follows the identical normal path.
+    virtual bool shouldInjectGroupAllocationFailureForTest(const BatchKVCacheResource&, int, std::string_view, bool) const {
+        return false;
+    }
 
 private:
     bool   doInit() override;
@@ -120,15 +127,23 @@ private:
                           int               failed_need_blocks) const;
     bool skipReuseCacheGroup(std::string_view tag) const;
     bool cpCompactSwaGroup(std::string_view tag, const std::shared_ptr<CPSlotMapper>& mapper) const;
-    void rollbackGroupAllocation(BlockIds& block_ids, const GroupAllocationCheckpoint& checkpoint);
-    void rollbackInitMalloc(BatchKVCacheResource& kv_resource, AllocationRollbackJournal& journal);
-    void rollbackIncrMalloc(BatchKVCacheResource&      kv_resource,
-                            AllocationRollbackJournal& journal,
-                            size_t                     last_touched_batch);
+    void rollbackBlockIdsToSize(std::string_view          tag,
+                                BlockIds&                 block_ids,
+                                size_t                    original_size,
+                                const std::vector<size_t>& backfilled_positions);
+    void rollbackInitMalloc(BatchKVCacheResource&                                  kv_resource,
+                            const std::map<std::string, BlockIndicesType>&          referenced_blocks,
+                            const std::map<std::string, size_t>&                    original_sizes,
+                            const std::map<std::string, std::vector<size_t>>&       backfilled_positions);
+    void rollbackIncrMalloc(
+        BatchKVCacheResource&                                            kv_resource,
+        const std::vector<std::map<std::string, size_t>>&                batch_original_sizes,
+        const std::vector<std::map<std::string, std::vector<size_t>>>&   batch_backfilled_positions,
+        size_t                                                           last_touched_batch);
     void copyBlockMappingForGroup(std::string_view tag, const std::vector<BlockIdPair>& block_update_mapping) const;
     MemoryType memoryTypeForGroup(std::string_view tag) const;
 
-    size_t                 groupSlot(std::string_view tag) const;
+    size_t                 storageIdxForTag(std::string_view tag) const;
     const KVCacheGroupPtr& groupStrategy(std::string_view tag) const;
     const GroupBase&       validateGroupForLayer(int layer_id, std::string_view tag) const;
     const GroupBase&       defaultGroupForLayer(int layer_id) const;
@@ -139,7 +154,7 @@ private:
 
     std::vector<BlockPoolPtr>               group_block_pools_;
     std::vector<KVCacheGroupPtr>            kv_cache_groups_;
-    std::unordered_map<std::string, size_t> tag_to_group_slot_;
+    std::unordered_map<std::string, size_t> tag_to_idx_;
     std::vector<std::string>                full_group_tags_;
     std::vector<std::string>                linear_group_tags_;
     std::vector<std::string>                swa_group_tags_;

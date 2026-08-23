@@ -433,6 +433,8 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory/test:cache_tag_routing_scan_srcs",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:cache_tag_routing_scan_srcs",
         "//rtp_llm/cpp/cache/connector/p2p:cache_tag_routing_scan_srcs",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:cache_tag_routing_scan_srcs",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:cache_tag_routing_scan_srcs",
         "//rtp_llm/cpp/cache/connector/p2p/test:cache_tag_routing_scan_srcs",
         "//rtp_llm/cpp/cache/connector/remote_connector:cache_tag_routing_scan_srcs",
         "//rtp_llm/cpp/cache/connector/remote_connector/test:cache_tag_routing_scan_srcs",

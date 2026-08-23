@@ -35,8 +35,9 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
             auto& kv_cache = stream->kvCacheMutable();
             // System prompt cache is a single-FULL-group path; resolve that group
             // by its tag rather than by storage position.
-            const auto& sole_group_tag = kv_cache.cacheResource(0).groupBlocks().front()->tag;
-            auto&       blocks         = kv_cache.blocks(0, sole_group_tag);
+            const auto group_tags = kv_cache.cacheResource(0).groupTagsInConfigOrder();
+            RTP_LLM_CHECK(group_tags.size() == 1);
+            auto& blocks = kv_cache.blocks(0, group_tags.front());
             RTP_LLM_CHECK(blocks.size() > 0);
             rtp_llm::InsertInfo insert_info{
                 stream->kvCachePtr(),

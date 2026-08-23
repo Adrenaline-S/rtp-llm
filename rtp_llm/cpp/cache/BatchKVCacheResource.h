@@ -50,8 +50,9 @@ public:
 
         const auto& resource       = batch_resource[0];
         int         max_blocks_num = 0;
-        for (const auto& record : resource.groupBlocks()) {
-            max_blocks_num = std::max(max_blocks_num, resource.blocksNum(record->tag));
+        for (const auto& [tag, block_ids] : resource.blocksByTag()) {
+            (void)block_ids;
+            max_blocks_num = std::max(max_blocks_num, resource.blocksNum(tag));
         }
         return max_blocks_num;
     }
@@ -90,14 +91,9 @@ public:
         return batch_resource[0].layerOwnsTag(layer_id, tag);
     }
 
-    CacheGroupBlockRecords& groupBlocks(int batch_id = 0) {
+    const std::map<std::string, BlockIds>& blocksByTag(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].groupBlocks();
-    }
-
-    const CacheGroupBlockRecords& groupBlocks(int batch_id = 0) const {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].groupBlocks();
+        return batch_resource[batch_id].blocksByTag();
     }
 
     const KVCacheResource& cacheResource(int batch_id = 0) const {
@@ -161,11 +157,11 @@ public:
         // group is a deliberate later change, not an oversight -- it would reject
         // batches that the pre-tag engine accepted, so it must not ride along with a
         // behavior-preserving refactor.
-        const auto& records = batch_resource[0].groupBlocks();
+        const auto tags = batch_resource[0].groupTagsInConfigOrder();
         // The pre-tag form resolved positional group 0 through a lookup that failed
         // when the resource carried no groups, so an empty group list stays a failure.
-        RTP_LLM_CHECK(!records.empty());
-        const std::string& first_tag  = records.front()->tag;
+        RTP_LLM_CHECK(!tags.empty());
+        const std::string_view first_tag  = tags.front();
         const size_t       blocks_num = batch_resource[0].blocksNum(first_tag);
         for (const auto& resource : batch_resource) {
             RTP_LLM_CHECK(resource.blocksNum(first_tag) == blocks_num);

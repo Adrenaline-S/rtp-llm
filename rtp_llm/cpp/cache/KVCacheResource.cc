@@ -9,24 +9,23 @@ namespace rtp_llm {
 void KVCacheResource::initGroups(const CacheConfig& config) {
 
     layer_group_tags_.clear();
-    group_blocks_.clear();
-    tag_to_slot_.clear();
+    group_tags_in_config_order_.clear();
+    blocks_by_tag_.clear();
 
     const auto& groups = config.topology().groups();
 
-    group_blocks_.reserve(groups.size());
+    group_tags_in_config_order_.reserve(groups.size());
     for (const auto& group : groups) {
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "KVCacheResource requires a non-empty cache group tag");
 
         const size_t blocks_per_kv_block = group.seq_size_per_block / group.kernel_seq_size_per_block;
         const size_t stored_blocks_per_kv_block =
             group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
-        const size_t slot = group_blocks_.size();
         RTP_LLM_CHECK_WITH_INFO(
-            tag_to_slot_.emplace(group.tag, slot).second, "KVCacheResource has duplicate tag=%s", group.tag.c_str());
-
-        group_blocks_.push_back(
-            std::make_shared<CacheGroupBlocks>(CacheGroupBlocks{group.tag, BlockIds(stored_blocks_per_kv_block)}));
+            blocks_by_tag_.emplace(group.tag, BlockIds(stored_blocks_per_kv_block)).second,
+            "KVCacheResource has duplicate tag=%s",
+            group.tag.c_str());
+        group_tags_in_config_order_.push_back(group.tag);
     }
 
     const auto& layers = config.topology().layers();
@@ -157,11 +156,9 @@ void BlockIds::syncKernelBlocks() {
 }
 
 void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
-    if (!groupStorageMatchesIndex()) {
-        validateGroupStorage();
-    }
-    for (auto& group : group_blocks_) {
-        group->blocks.resize(reserver_blocks, value);
+    for (auto& [tag, block_ids] : blocks_by_tag_) {
+        (void)tag;
+        block_ids.resize(reserver_blocks, value);
     }
 }
 
@@ -186,7 +183,10 @@ const BlockIndicesType& KVCacheResource::kernelBlocksForLayer(int layer_id, std:
 }
 
 BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
-    return group_blocks_[slotForTag(tag)]->blocks;
+    const auto value = std::string(tag);
+    const auto it    = blocks_by_tag_.find(value);
+    RTP_LLM_CHECK_WITH_INFO(it != blocks_by_tag_.end(), "KVCacheResource missing tag=%s", value.c_str());
+    return it->second;
 }
 
 BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) const {
@@ -203,54 +203,6 @@ const BlockIds& KVCacheResource::blockIds(std::string_view tag) const {
 
 const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view tag) const {
     return mutableBlockIdsForLayer(layer_id, tag);
-}
-
-void KVCacheResource::validateGroupStorage() const {
-    RTP_LLM_CHECK_WITH_INFO(group_blocks_.size() == tag_to_slot_.size(),
-                            "KVCacheResource group storage size=%zu expected=%zu",
-                            group_blocks_.size(),
-                            tag_to_slot_.size());
-
-    for (size_t slot = 0; slot < group_blocks_.size(); ++slot) {
-        const auto& record = group_blocks_[slot];
-        RTP_LLM_CHECK_WITH_INFO(record != nullptr, "KVCacheResource has null group record at slot=%zu", slot);
-        RTP_LLM_CHECK_WITH_INFO(!record->tag.empty(), "KVCacheResource has empty group tag at slot=%zu", slot);
-        RTP_LLM_CHECK_WITH_INFO(tag_to_slot_.find(record->tag) != tag_to_slot_.end(),
-                                "KVCacheResource has unknown tag=%s",
-                                record->tag.c_str());
-        for (size_t other = slot + 1; other < group_blocks_.size(); ++other) {
-            RTP_LLM_CHECK_WITH_INFO(group_blocks_[other] == nullptr || record->tag != group_blocks_[other]->tag,
-                                    "KVCacheResource has duplicate tag=%s",
-                                    record->tag.c_str());
-        }
-    }
-}
-
-bool KVCacheResource::groupStorageMatchesIndex() const {
-    if (group_blocks_.size() != tag_to_slot_.size()) {
-        return false;
-    }
-    for (const auto& [tag, slot] : tag_to_slot_) {
-        if (slot >= group_blocks_.size() || group_blocks_[slot] == nullptr || group_blocks_[slot]->tag != tag) {
-            return false;
-        }
-    }
-    return true;
-}
-
-size_t KVCacheResource::slotForTag(std::string_view tag) const {
-    const auto value = std::string(tag);
-    const auto it    = tag_to_slot_.find(value);
-    RTP_LLM_CHECK_WITH_INFO(it != tag_to_slot_.end(), "KVCacheResource missing tag=%s", value.c_str());
-    if (groupStorageMatchesIndex()) {
-        return it->second;
-    }
-    validateGroupStorage();
-    const auto record = std::find_if(group_blocks_.begin(), group_blocks_.end(), [&value](const auto& candidate) {
-        return candidate->tag == value;
-    });
-    RTP_LLM_CHECK_WITH_INFO(record != group_blocks_.end(), "KVCacheResource missing tag=%s", value.c_str());
-    return static_cast<size_t>(std::distance(group_blocks_.begin(), record));
 }
 
 bool KVCacheResource::layerContainsTag(int layer_id, std::string_view tag) const {
@@ -274,70 +226,29 @@ const std::string& KVCacheResource::soleGroupTagForLayer(int layer_id) const {
     return tags.front();
 }
 
-bool KVCacheResource::hasOneGroupPerLayer() const {
-    return std::all_of(
-        layer_group_tags_.begin(), layer_group_tags_.end(), [](const auto& tags) { return tags.size() == 1; });
-}
-
 int KVCacheResource::layerNum() const {
     return static_cast<int>(layer_group_tags_.size());
 }
 
 int KVCacheResource::groupNums() const {
-    if (!groupStorageMatchesIndex()) {
-        validateGroupStorage();
-    }
-    return static_cast<int>(group_blocks_.size());
+    return static_cast<int>(blocks_by_tag_.size());
 }
 
-CacheGroupBlockRecords& KVCacheResource::groupBlocks() {
-    return group_blocks_;
-}
-
-const CacheGroupBlockRecords& KVCacheResource::groupBlocks() const {
-    if (!groupStorageMatchesIndex()) {
-        validateGroupStorage();
-    }
-    return group_blocks_;
+const std::map<std::string, BlockIds>& KVCacheResource::blocksByTag() const {
+    return blocks_by_tag_;
 }
 
 std::vector<std::string_view> KVCacheResource::groupTagsInConfigOrder() const {
-    // tag_to_slot_ was filled by initGroups() walking config.topology().groups() in order, so a
-    // tag's slot is its declaration ordinal. Inverting the map recovers config order without
-    // reading group_blocks_, whose order callers are free to change.
-    std::vector<std::string_view> tags(tag_to_slot_.size());
-    for (const auto& [tag, slot] : tag_to_slot_) {
-        RTP_LLM_CHECK_WITH_INFO(slot < tags.size(),
-                                "KVCacheResource tag=%s has out-of-range config slot=%zu group_num=%zu",
-                                tag.c_str(),
-                                slot,
-                                tags.size());
-        tags[slot] = tag;
+    std::vector<std::string_view> tags;
+    tags.reserve(group_tags_in_config_order_.size());
+    for (const auto& tag : group_tags_in_config_order_) {
+        tags.push_back(tag);
     }
     return tags;
 }
 
-LayerBlockIds KVCacheResource::layerBlocks() const {
-    RTP_LLM_CHECK_WITH_INFO(hasOneGroupPerLayer(),
-                            "KVCacheResource::layerBlocks is a deprecated single-group-per-layer projection; "
-                            "use blockIdsForLayer(layer, tag) for multi-group layers");
-    LayerBlockIds layer_blocks;
-    layer_blocks.reserve(layer_group_tags_.size());
-    for (size_t layer = 0; layer < layer_group_tags_.size(); ++layer) {
-        const auto& tags = layer_group_tags_[layer];
-        RTP_LLM_CHECK_WITH_INFO(tags.size() == 1,
-                                "KVCacheResource::layerBlocks requires exactly one group per layer, layer=%zu "
-                                "group_num=%zu",
-                                layer,
-                                tags.size());
-        const auto& record = group_blocks_[slotForTag(tags.front())];
-        layer_blocks.emplace_back(record, &record->blocks);
-    }
-    return layer_blocks;
-}
-
 bool KVCacheResource::layerOwnsTag(int layer_id, std::string_view tag) const {
-    if (tag.empty() || tag_to_slot_.find(std::string(tag)) == tag_to_slot_.end()) {
+    if (tag.empty() || blocks_by_tag_.find(std::string(tag)) == blocks_by_tag_.end()) {
         return false;
     }
     return layerContainsTag(layer_id, tag);
@@ -464,9 +375,9 @@ void KVCacheResource::setLastBlockAligned(bool last_block_aligned) {
 
 std::string KVCacheResource::debugString() const {
     std::stringstream debug_string;
-    for (const auto& group : groupBlocks()) {
-        debug_string << "group:[" << group->tag << "], block:[";
-        const auto& block_indices = group->blocks.blocks();
+    for (const auto& [tag, block_ids] : blocks_by_tag_) {
+        debug_string << "group:[" << tag << "], block:[";
+        const auto& block_indices = block_ids.blocks();
         for (auto& block : block_indices) {
             debug_string << block << ", ";
         }

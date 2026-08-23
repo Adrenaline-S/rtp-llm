@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <mutex>
 
 #include "grpc++/grpc++.h"
@@ -32,7 +33,7 @@ public:
                            const std::string&               request_key,
                            const std::vector<std::string>&  peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
-                           const CacheGroupBlockRecords&    group_blocks,
+                           const std::map<std::string, BlockIds>& group_blocks,
                            int64_t                          reuse_block_size,
                            int64_t                          timeout_ms,
                            int                              partition_count,
@@ -55,7 +56,7 @@ public:
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
         // Tag-bearing cache group records; the record order is not identity.
-        const CacheGroupBlockRecords& group_blocks;
+        const std::map<std::string, BlockIds>& group_blocks;
         int64_t                       reuse_block_size;
         int64_t                       timeout_ms;
         int                           partition_count;
@@ -94,29 +95,8 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static CacheGroupBlockRecords decodeGroupBlockRecords(const BroadcastLoadRequestPB& request,
-                                                          const CacheTopology&          topology);
-    // Cache-plan wiring-drift guard for the prefill/decode cache transfer
-    // boundary. `materialized` MUST come from KVCacheManager::allLayerCacheBase()
-    // rather than from `declared` itself: a config compared against its own
-    // topology can only fail on a null spec, so it validates nothing.
-    //
-    // Scope of what this actually compares: allLayerCacheBase() forwards to the
-    // allocator, and the returned GroupedCacheLayerLayout carries the allocator's
-    // own CacheConfig::topologyPtr(), where KVCacheAllocator::config_ is an
-    // unmutated by-value CacheConfig copy. So this compares two independently held
-    // CacheConfig copies -- `declared` against the copy the allocator was
-    // constructed from. It catches wiring drift (decode server and allocator built
-    // from different cache plans); it does NOT verify the geometry of the CUDA
-    // tensors the allocator materialized against the config.
-    //
-    // FOLLOW-UP(cache-topology-signature-wire-exchange): this establishes only
-    // local same-process cache-plan agreement. Exchanging
-    // CacheConfig::physicalTopologySignature() with the *peer* prefill instance
-    // is a material wire-interface change and is a deliberate, named deferred
-    // follow-up -- do not read this in-process guard as cross-process agreement.
-    static void checkCacheTransferLayout(const CacheConfig&             declared,
-                                         const GroupedCacheLayerLayout& materialized);
+    static std::map<std::string, BlockIds> decodeGroupBlockRecords(const BroadcastLoadRequestPB& request,
+                                                                  const CacheTopology&          topology);
     static std::string            makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
@@ -131,10 +111,6 @@ private:
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
     size_t                   model_id;
-    // The cache layout is materialized once at allocation and is immutable
-    // afterwards, so the declared-vs-materialized guard runs on the first
-    // transfer instead of rebuilding the layout on every request.
-    std::once_flag cache_transfer_layout_checked_;
 };
 
 }  // namespace rtp_llm

@@ -3,6 +3,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <string_view>
 #include <vector>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -134,6 +135,7 @@ protected:
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
+    static int      debugLinearSeqSizePerBlock(const CacheConfig& cache_config, std::string_view tag);
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
     GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
     SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,

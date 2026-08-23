@@ -885,39 +885,6 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnTrue_WithWorkerAddrs) {
     EXPECT_EQ(conn->broadcast_manager_->workerNum(), server_addrs_.size());
 }
 
-TEST_F(KVCacheMemoryConnectorTest, init_RejectsDeclaredVsMaterializedPhysicalDrift) {
-    // Same tag, physically different group: halving the spec's KV heads halves the
-    // group's KV block stride, so the declared plan no longer matches the layout
-    // the fixture allocator materialized from cache_config_.
-    auto drifted = makeSimpleMhaCacheConfig(/*layer_num=*/4,
-                                            /*block_num=*/10,
-                                            /*tokens_per_block=*/8,
-                                            rtp_llm::DataType::TYPE_FP16,
-                                            /*local_head_num_kv=*/4,
-                                            /*size_per_head=*/128);
-    ASSERT_NE(drifted.group("default").kv_block_stride_bytes, cache_config_.group("default").kv_block_stride_bytes);
-
-    // The replaced self-comparison resolved every boundary group by tag from the
-    // very config under test, so it accepted this drift; only a comparison
-    // against the materialized layout can reject it.
-    EXPECT_NO_THROW(drifted.checkPhysicalGroupLayoutCompatible(drifted.topology(), "self-comparison"));
-    EXPECT_ANY_THROW(drifted.checkPhysicalGroupLayoutCompatible(allocator_->allLayerCacheBase().topology(),
-                                                                "memory connector cache transfer"));
-
-    auto kv_cfg                         = kv_cache_config_;
-    kv_cfg.memory_cache_size_mb         = 64;
-    kv_cfg.memory_cache_sync_timeout_ms = 1000;
-
-    // allocator_ was materialized from cache_config_ (8 heads), so init() must reject.
-    auto drifted_conn = std::make_shared<KVCacheMemoryConnector>(drifted, kv_cfg, allocator_, server_addrs_);
-    EXPECT_THROW(drifted_conn->init(), std::runtime_error);
-
-    // Control: the same declared plan is accepted once the materialized layout agrees.
-    auto matched_conn =
-        std::make_shared<KVCacheMemoryConnector>(drifted, kv_cfg, materializedAllocatorFor(drifted), server_addrs_);
-    EXPECT_TRUE(matched_conn->init());
-}
-
 TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_UsesLocalRankPathAndPreallocatesFile) {
     DiskTempDir disk0;
     DiskTempDir disk1;
@@ -1929,9 +1896,6 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     resource->initGroups(cfg);
     resource->mutableBlockIds("csa_kv").assign({11, 12, 13});
     resource->mutableBlockIds("swa_kv").assign({21, NULL_BLOCK_IDX, 23});
-    // Shuffle group storage order: tag-keyed resolution must be unaffected by it.
-    std::reverse(resource->groupBlocks().begin(), resource->groupBlocks().end());
-
     bool no_need_write = true;
     auto plan          = conn->buildCopyPlanForWrite(resource->cacheKeys(),
                                             conn->resourceLayerTagBlocks(*resource, slots),
@@ -1957,6 +1921,25 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     EXPECT_TRUE(isNullBlockIdx(plan->copy_infos[1].tagged_gpu_blocks[1].block_id));
     EXPECT_EQ(plan->copy_infos[2].tagged_gpu_blocks[0].block_id, 13);
     EXPECT_EQ(plan->copy_infos[2].tagged_gpu_blocks[1].block_id, 23);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, WireRowsSortTagsIndependentlyOfLocalGroupDeclarationOrder) {
+    auto cfg          = cache_config_;
+    cfg.layer_num     = 1;
+    cfg.layer_all_num = 1;
+    cfg.fromGroupedSpecs({makeMhaSpec("zeta", cfg.seq_size_per_block, cfg.dtype, 1, 8),
+                          makeMhaSpec("alpha", cfg.seq_size_per_block, cfg.dtype, 1, 16)},
+                         /*layers_by_group=*/{{0}, {0}},
+                         {CacheGroupType::FULL, CacheGroupType::FULL},
+                         {"zeta", "alpha"});
+    cfg.setGroupBlockLayout({cfg.block_num, cfg.block_num}, {16, 32}, {0, 0});
+
+    const auto slots = KVCacheMemoryConnector::buildLayerTagSlots(cfg);
+    ASSERT_EQ(slots.size(), 2u);
+    EXPECT_EQ(slots[0].layer_id, 0);
+    EXPECT_EQ(slots[0].tag, "alpha");
+    EXPECT_EQ(slots[1].layer_id, 0);
+    EXPECT_EQ(slots[1].tag, "zeta");
 }
 
 TEST_F(KVCacheMemoryConnectorTest, LayerTagSlotsCarryCpSlicePolicyAndPhysicalLayout) {
@@ -2068,20 +2051,29 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
     EXPECT_TRUE(plan->copy_infos[1].is_complete);
     ASSERT_EQ(plan->copy_infos[0].tagged_gpu_blocks.size(), slots.size());
     ASSERT_EQ(plan->copy_infos[1].tagged_gpu_blocks.size(), slots.size());
-    EXPECT_EQ(plan->copy_infos[0].tagged_gpu_blocks[0].block_id, 11);
-    EXPECT_EQ(plan->copy_infos[0].tagged_gpu_blocks[1].block_id, 61);
-    EXPECT_EQ(plan->copy_infos[0].tagged_gpu_blocks[2].block_id, 1);
-    EXPECT_EQ(plan->copy_infos[0].tagged_gpu_blocks[3].block_id, 21);
-    EXPECT_EQ(plan->copy_infos[0].tagged_gpu_blocks[4].block_id, 31);
-    EXPECT_EQ(plan->copy_infos[0].tagged_gpu_blocks[5].block_id, 41);
-    EXPECT_EQ(plan->copy_infos[0].tagged_gpu_blocks[6].block_id, 61);
-    EXPECT_EQ(plan->copy_infos[1].tagged_gpu_blocks[0].block_id, 12);
-    EXPECT_EQ(plan->copy_infos[1].tagged_gpu_blocks[1].block_id, 62);
-    EXPECT_EQ(plan->copy_infos[1].tagged_gpu_blocks[2].block_id, 2);
-    EXPECT_EQ(plan->copy_infos[1].tagged_gpu_blocks[3].block_id, 22);
-    EXPECT_EQ(plan->copy_infos[1].tagged_gpu_blocks[4].block_id, 32);
-    EXPECT_EQ(plan->copy_infos[1].tagged_gpu_blocks[5].block_id, 42);
-    EXPECT_EQ(plan->copy_infos[1].tagged_gpu_blocks[6].block_id, 62);
+    const auto blocks_by_route = [](const auto& tagged_blocks) {
+        std::map<std::pair<int, std::string>, BlockIdxType> result;
+        for (const auto& tagged : tagged_blocks) {
+            result.emplace(std::make_pair(tagged.slot.layer_id, tagged.slot.tag), tagged.block_id);
+        }
+        return result;
+    };
+    EXPECT_EQ(blocks_by_route(plan->copy_infos[0].tagged_gpu_blocks),
+              (std::map<std::pair<int, std::string>, BlockIdxType>{{{0, "hca_kv"}, 11},
+                                                                   {{0, "swa_kv"}, 61},
+                                                                   {{1, "csa_kv"}, 1},
+                                                                   {{1, "csa_state"}, 41},
+                                                                   {{1, "indexer_kv"}, 21},
+                                                                   {{1, "indexer_state"}, 31},
+                                                                   {{1, "swa_kv"}, 61}}));
+    EXPECT_EQ(blocks_by_route(plan->copy_infos[1].tagged_gpu_blocks),
+              (std::map<std::pair<int, std::string>, BlockIdxType>{{{0, "hca_kv"}, 12},
+                                                                   {{0, "swa_kv"}, 62},
+                                                                   {{1, "csa_kv"}, 2},
+                                                                   {{1, "csa_state"}, 42},
+                                                                   {{1, "indexer_kv"}, 22},
+                                                                   {{1, "indexer_state"}, 32},
+                                                                   {{1, "swa_kv"}, 62}}));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenGpuReuseLenGEKeysSize) {
@@ -2116,7 +2108,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WithHybridGroups)
     auto          res = makeHybridCacheResource(cache_keys,
                                        /*group0_blocks=*/{1, 2, 3},
                                        /*group1_blocks=*/{4, 5, 6});
-    ASSERT_EQ(res->layerBlocks().size(), static_cast<size_t>(cache_config_.layer_all_num));
+    ASSERT_EQ(res->layerNum(), static_cast<int>(cache_config_.layer_all_num));
     putItemsToCache({cache_keys[0]}, memoryCacheBlockBytes());
 
     auto ctx = connector_->asyncMatch(res, std::make_shared<TestReadMeta>(true));

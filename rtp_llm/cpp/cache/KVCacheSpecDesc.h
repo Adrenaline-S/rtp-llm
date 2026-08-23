@@ -90,6 +90,8 @@ struct SpecBuildContext {
 };
 
 struct BuiltLayerSpec {
+    // Minimal descriptor-lowering result: tag remains business identity while
+    // the built physical spec and policy are consumed by the common grouper.
     std::string      tag;
     KVCacheSpecPtr   spec;
     CacheGroupPolicy policy;

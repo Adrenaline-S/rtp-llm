@@ -1437,7 +1437,7 @@ TEST_F(KVCacheManagerTest, DSV4PopCachedBlocksPreservesGroupShape) {
     ASSERT_NE(evicted, nullptr);
     ASSERT_TRUE(evicted->hasCacheKeys());
     EXPECT_EQ(evicted->groupNums(), kDsv4PoolNum);
-    EXPECT_EQ(evicted->cacheResource(0).groupBlocks().size(), manager_config.topology().groups().size());
+    EXPECT_EQ(evicted->cacheResource(0).blocksByTag().size(), manager_config.topology().groups().size());
 
     bool saw_paged_block = false;
     bool saw_tail_block  = false;
@@ -1614,12 +1614,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
     ASSERT_NE(shared_cache, nullptr);
     {
-        SharedBlockCache::TaggedSharedGroupEntry group{cache_config.soleGroupForLayer(0).tag, 1};
-        shared_cache->put(10, {group}, false);
-        group.block_id = 2;
-        shared_cache->put(11, {group}, false);
-        group.block_id = 3;
-        shared_cache->put(12, {group}, false);
+        const auto& tag = cache_config.soleGroupForLayer(0).tag;
+        shared_cache->put(10, {{tag, 1}}, false);
+        shared_cache->put(11, {{tag, 2}}, false);
+        shared_cache->put(12, {{tag, 3}}, false);
     }
 
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:
@@ -1666,10 +1664,9 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
     ASSERT_NE(shared_cache, nullptr);
 
-    SharedBlockCache::TaggedSharedGroupEntry group{cache_config.soleGroupForLayer(0).tag, 1};
-    shared_cache->put(10, {group}, false);
-    group.block_id = 2;
-    shared_cache->put(11, {group}, false);
+    const auto& tag = cache_config.soleGroupForLayer(0).tag;
+    shared_cache->put(10, {{tag, 1}}, false);
+    shared_cache->put(11, {{tag, 2}}, false);
 
     kv_cache_manager->refreshKVCacheInfoSnapshot();
 
@@ -1679,8 +1676,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     std::sort(first_keys.begin(), first_keys.end());
     EXPECT_EQ(first_keys, (std::vector<CacheKeyType>{10, 11}));
 
-    group.block_id = 3;
-    shared_cache->put(12, {group}, false);
+    shared_cache->put(12, {{tag, 3}}, false);
 
     auto unchanged = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
     EXPECT_EQ(unchanged.version, first.version);

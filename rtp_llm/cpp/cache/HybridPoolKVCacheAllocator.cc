@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -30,7 +31,7 @@ inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapp
 
 void appendPoolSummary(std::ostringstream&    os,
                        bool&                  has_any,
-                       size_t                 group_ordinal,
+                       size_t                 idx,
                        const std::string&     tag,
                        CacheGroupType         group_type,
                        const BlockPoolConfig& pool_config) {
@@ -39,7 +40,7 @@ void appendPoolSummary(std::ostringstream&    os,
         os << "; ";
     }
     has_any = true;
-    os << "pool_name=" << pool_config.pool_name << ", group_ordinal=" << group_ordinal << ", tag=" << tag
+    os << "pool_name=" << pool_config.pool_name << ", idx=" << idx << ", tag=" << tag
        << ", type=" << cacheGroupTypeName(group_type) << ", size=" << pool_config.total_size_bytes << " bytes("
        << std::fixed << std::setprecision(2) << static_cast<double>(pool_config.total_size_bytes) / kBytesPerMB
        << " MB)"
@@ -62,18 +63,18 @@ BlockPoolPtr HybridPoolKVCacheAllocator::soleGroupBlockPool() const {
     return group_block_pools_[0];
 }
 
-size_t HybridPoolKVCacheAllocator::groupSlot(std::string_view tag) const {
-    const auto it = tag_to_group_slot_.find(std::string(tag));
+size_t HybridPoolKVCacheAllocator::storageIdxForTag(std::string_view tag) const {
+    const auto it = tag_to_idx_.find(std::string(tag));
     RTP_LLM_CHECK_WITH_INFO(
-        it != tag_to_group_slot_.end(), "missing allocator cache group tag=%s", std::string(tag).c_str());
+        it != tag_to_idx_.end(), "missing allocator cache group tag=%s", std::string(tag).c_str());
     return it->second;
 }
 
 const KVCacheGroupPtr& HybridPoolKVCacheAllocator::groupStrategy(std::string_view tag) const {
-    const auto slot = groupSlot(tag);
+    const auto idx = storageIdxForTag(tag);
     RTP_LLM_CHECK_WITH_INFO(
-        slot < kv_cache_groups_.size(), "missing cache group strategy for tag=%s", std::string(tag).c_str());
-    return kv_cache_groups_[slot];
+        idx < kv_cache_groups_.size(), "missing cache group strategy for tag=%s", std::string(tag).c_str());
+    return kv_cache_groups_[idx];
 }
 
 bool HybridPoolKVCacheAllocator::initGroup(const KVCacheGroupPtr& group) {
@@ -81,10 +82,10 @@ bool HybridPoolKVCacheAllocator::initGroup(const KVCacheGroupPtr& group) {
 }
 
 BlockPoolPtr HybridPoolKVCacheAllocator::blockPool(std::string_view tag) const {
-    const auto slot = groupSlot(tag);
+    const auto idx = storageIdxForTag(tag);
     RTP_LLM_CHECK_WITH_INFO(
-        slot < group_block_pools_.size(), "missing block pool for tag=%s", std::string(tag).c_str());
-    return group_block_pools_[slot];
+        idx < group_block_pools_.size(), "missing block pool for tag=%s", std::string(tag).c_str());
+    return group_block_pools_[idx];
 }
 
 bool HybridPoolKVCacheAllocator::doInit() {
@@ -93,13 +94,13 @@ bool HybridPoolKVCacheAllocator::doInit() {
     const int                               group_nums = config_.groupNums();
     std::vector<BlockPoolPtr>               staged_group_block_pools;
     std::vector<KVCacheGroupPtr>            staged_kv_cache_groups;
-    std::unordered_map<std::string, size_t> staged_tag_to_group_slot;
+    std::unordered_map<std::string, size_t> staged_tag_to_idx;
     std::vector<std::string>                staged_full_group_tags;
     std::vector<std::string>                staged_linear_group_tags;
     std::vector<std::string>                staged_swa_group_tags;
     staged_group_block_pools.reserve(static_cast<size_t>(group_nums));
     staged_kv_cache_groups.reserve(static_cast<size_t>(group_nums));
-    staged_tag_to_group_slot.reserve(static_cast<size_t>(group_nums));
+    staged_tag_to_idx.reserve(static_cast<size_t>(group_nums));
     staged_full_group_tags.reserve(static_cast<size_t>(group_nums));
     staged_linear_group_tags.reserve(static_cast<size_t>(group_nums));
     staged_swa_group_tags.reserve(static_cast<size_t>(group_nums));
@@ -113,10 +114,10 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
     std::vector<BlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
-    for (size_t group_ordinal = 0; group_ordinal < config_.topology().groups().size(); ++group_ordinal) {
-        const auto& group       = config_.topology().groups()[group_ordinal];
+    for (size_t idx = 0; idx < config_.topology().groups().size(); ++idx) {
+        const auto& group       = config_.topology().groups()[idx];
         auto        pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, group.tag);
-        appendPoolSummary(pool_summary, has_pool, group_ordinal, group.tag, group.policy.group_type, pool_config);
+        appendPoolSummary(pool_summary, has_pool, idx, group.tag, group.policy.group_type, pool_config);
         pool_total_bytes += pool_config.total_size_bytes;
         pool_total_blocks += pool_config.block_num;
         group_pool_configs.push_back(std::move(pool_config));
@@ -132,16 +133,16 @@ bool HybridPoolKVCacheAllocator::doInit() {
                          pool_total_blocks);
     }
 
-    for (size_t group_ordinal = 0; group_ordinal < config_.topology().groups().size(); ++group_ordinal) {
-        const auto& pool_config = group_pool_configs[group_ordinal];
-        const auto& cache_group = config_.topology().groups()[group_ordinal];
+    for (size_t idx = 0; idx < config_.topology().groups().size(); ++idx) {
+        const auto& pool_config = group_pool_configs[idx];
+        const auto& cache_group = config_.topology().groups()[idx];
         const auto  group_type  = cache_group.policy.group_type;
         auto        group_pool =
             std::make_shared<BlockPool>(pool_config, allocation_type_, false, use_cuda_malloc_block_pool_);
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s", pool_config.pool_name.c_str());
 
-        RTP_LLM_CHECK_WITH_INFO(staged_tag_to_group_slot.emplace(cache_group.tag, group_ordinal).second,
+        RTP_LLM_CHECK_WITH_INFO(staged_tag_to_idx.emplace(cache_group.tag, idx).second,
                                 "duplicate allocator cache group tag=%s",
                                 cache_group.tag.c_str());
 
@@ -167,16 +168,15 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
     group_block_pools_.swap(staged_group_block_pools);
     kv_cache_groups_.swap(staged_kv_cache_groups);
-    tag_to_group_slot_.swap(staged_tag_to_group_slot);
+    tag_to_idx_.swap(staged_tag_to_idx);
     full_group_tags_.swap(staged_full_group_tags);
     linear_group_tags_.swap(staged_linear_group_tags);
     swa_group_tags_.swap(staged_swa_group_tags);
 
     if (shared_block_cache_) {
-        std::vector<SharedBlockCache::TaggedBlockPool> tagged_group_pools;
-        tagged_group_pools.reserve(group_block_pools_.size());
-        for (size_t group_slot = 0; group_slot < config_.topology().groups().size(); ++group_slot) {
-            tagged_group_pools.push_back({config_.topology().groups()[group_slot].tag, group_block_pools_[group_slot]});
+        std::map<std::string, BlockPoolPtr> tagged_group_pools;
+        for (size_t idx = 0; idx < config_.topology().groups().size(); ++idx) {
+            tagged_group_pools.emplace(config_.topology().groups()[idx].tag, group_block_pools_[idx]);
         }
         shared_block_cache_->init(config_, tagged_group_pools);
     }
@@ -426,9 +426,9 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
             }
             evicted_dependencies.push_back(dependency);
         }
-        for (const auto& group : groups) {
-            if (!isNullBlockIdx(group.block_id)) {
-                batch_resource->mutableBlockIds(0, group.tag).setAt(evicted_idx, group.block_id);
+        for (const auto& [tag, block_id] : groups) {
+            if (!isNullBlockIdx(block_id)) {
+                batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
             }
         }
     }
@@ -446,18 +446,17 @@ void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& b
         return;
     }
     for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (const auto& group_blocks : batch_kv_cache_resource->groupBlocks(batch_id)) {
-            RTP_LLM_CHECK_WITH_INFO(group_blocks != nullptr, "null cache group blocks during block-cache free");
+        for (const auto& [tag, block_ids] : batch_kv_cache_resource->blocksByTag(batch_id)) {
             BlockIndicesType                 blocks_to_free;
             std::unordered_set<BlockIdxType> seen_blocks;
-            for (auto block_idx : group_blocks->blocks.blocks()) {
+            for (auto block_idx : block_ids.blocks()) {
                 if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
                     continue;
                 }
                 blocks_to_free.push_back(block_idx);
             }
             if (!blocks_to_free.empty()) {
-                blockPool(group_blocks->tag)->blockCacheFree(blocks_to_free);
+                blockPool(tag)->blockCacheFree(blocks_to_free);
             }
         }
     }
@@ -666,9 +665,10 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
     }
 
     MallocStatus status = MallocStatus::NONE;
-    for (const auto& group : config_.topology().groups()) {
+    const auto& groups = config_.topology().groups();
+    for (size_t idx = 0; idx < groups.size(); ++idx) {
+        const auto& group = groups[idx];
         // Diagnostic-only positional column in the rejection logs; never an identity.
-        const size_t group_ordinal    = groupSlot(group.tag);
         const int    group_common_seq = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, raw_common_seq_len);
         const int    group_seq_len    = cpEffectiveSeqLenForReserve(cp_mapper, config_, group.tag, raw_seq_len);
         const int    group_reuse_blocks_len =
@@ -691,11 +691,11 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
         if (required_blocks > total_blocks || total_reserve_blocks > total_blocks - required_blocks) {
             if (malloc_info.verbose) {
                 RTP_LLM_LOG_INFO("HybridPool initMalloc permanently rejected: request_id=%ld pool_name=%s "
-                                 "group_ordinal=%zu tag=%s need_blocks=%d total_blocks=%zu "
+                                 "idx=%zu tag=%s need_blocks=%d total_blocks=%zu "
                                  "reserve_blocks=%zu group_reserve_blocks=%zu",
                                  malloc_info.request_id,
                                  pool->poolName().c_str(),
-                                 group_ordinal,
+                                 idx,
                                  group.tag.c_str(),
                                  need_blocks,
                                  total_blocks,
@@ -713,11 +713,11 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
         if (available_blocks < required_blocks + group_reserve_blocks) {
             if (malloc_info.verbose) {
                 RTP_LLM_LOG_INFO("HybridPool initMalloc rejected by reserve blocks: request_id=%ld pool_name=%s "
-                                 "group_ordinal=%zu tag=%s need_blocks=%d total_blocks=%zu available_blocks=%zu "
+                                 "idx=%zu tag=%s need_blocks=%d total_blocks=%zu available_blocks=%zu "
                                  "reserve_blocks=%zu group_reserve_blocks=%zu",
                                  malloc_info.request_id,
                                  pool->poolName().c_str(),
-                                 group_ordinal,
+                                 idx,
                                  group.tag.c_str(),
                                  need_blocks,
                                  total_blocks,
@@ -785,11 +785,15 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                         failed_need_blocks,
                         reserve_blocks);
 
+    size_t idx               = 0;
+    bool   before_failed_tag = !failed_tag.empty();
     for (const auto& group_config : config_.topology().groups()) {
         const auto& tag        = group_config.tag;
         const auto  group_type = group_config.policy.group_type;
+        if (tag == failed_tag) {
+            before_failed_tag = false;
+        }
         // Diagnostic-only positional column in the failure log; never an identity.
-        const size_t group_ordinal = groupSlot(tag);
         const int    group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, planning_raw_seq_len);
 
         int    need_blocks          = 0;
@@ -809,7 +813,7 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
             // (LINEAR / SWA) skip slots, so their exact physical request is the
             // value the group allocator reported immediately before this snapshot.
             need_blocks = groupStrategy(tag)->hasSparseSlots() ? -1 : need_slots;
-        } else if (!reserve_admission && group_ordinal < groupSlot(failed_tag)) {
+        } else if (!reserve_admission && before_failed_tag) {
             // These groups already completed their initial allocation before
             // a later group failed.
             need_blocks = 0;
@@ -833,7 +837,7 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
         const long long shortfall =
             required_available < 0 ? -1 : std::max(required_available - static_cast<long long>(available), 0LL);
 
-        RTP_LLM_LOG_WARNING("HybridPool malloc failure pool: error_code=602 request_id=%ld group_ordinal=%zu "
+        RTP_LLM_LOG_WARNING("HybridPool malloc failure pool: error_code=602 request_id=%ld idx=%zu "
                             "pool_name=%s "
                             "group_type=%s tag=%s failed=%d need_blocks=%d need_slots=%d "
                             "group_reserve_blocks=%zu required_available_blocks=%lld shortfall_blocks=%lld "
@@ -842,7 +846,7 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                             "request_ref_blocks=%zu connector_ref_blocks=%zu block_cache_ref_blocks=%zu "
                             "layer_count=%zu block_bytes=%zu seq_size_per_block=%zu",
                             malloc_info.request_id,
-                            group_ordinal,
+                            idx,
                             pool->poolName().c_str(),
                             cacheGroupTypeName(group_type),
                             tag.c_str(),
@@ -863,6 +867,7 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                             group_config.layer_ids.size(),
                             config_.blockSizeBytes(tag),
                             group_config.seq_size_per_block);
+        ++idx;
     }
 }
 

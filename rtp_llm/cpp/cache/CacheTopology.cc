@@ -21,14 +21,14 @@ void CacheTopology::validateAndBuildIndex() {
     RTP_LLM_CHECK_WITH_INFO(!groups_.empty(), "CacheTopology requires at least one cache group");
     RTP_LLM_CHECK_WITH_INFO(!layers_.empty(), "CacheTopology requires at least one cache layer");
 
-    tag_to_slot_.reserve(groups_.size());
+    tag_to_idx_.reserve(groups_.size());
     std::vector<std::unordered_set<int>> group_layers(groups_.size());
-    for (size_t slot = 0; slot < groups_.size(); ++slot) {
-        const auto& group = groups_[slot];
-        RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "CacheTopology group at slot=%zu has empty tag", slot);
+    for (size_t idx = 0; idx < groups_.size(); ++idx) {
+        const auto& group = groups_[idx];
+        RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "CacheTopology group at idx=%zu has empty tag", idx);
         RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheTopology tag=%s has null spec", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
-            tag_to_slot_.emplace(group.tag, slot).second, "CacheTopology has duplicate tag=%s", group.tag.c_str());
+            tag_to_idx_.emplace(group.tag, idx).second, "CacheTopology has duplicate tag=%s", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
             group.seq_size_per_block > 0, "CacheTopology tag=%s has zero seq_size_per_block", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0,
@@ -45,7 +45,7 @@ void CacheTopology::validateAndBuildIndex() {
                                     "CacheTopology tag=%s has invalid layer_id=%d",
                                     group.tag.c_str(),
                                     layer_id);
-            RTP_LLM_CHECK_WITH_INFO(group_layers[slot].emplace(layer_id).second,
+            RTP_LLM_CHECK_WITH_INFO(group_layers[idx].emplace(layer_id).second,
                                     "CacheTopology tag=%s has duplicate layer_id=%d",
                                     group.tag.c_str(),
                                     layer_id);
@@ -61,8 +61,8 @@ void CacheTopology::validateAndBuildIndex() {
         RTP_LLM_CHECK_WITH_INFO(!layer.group_tags.empty(), "CacheTopology layer=%zu has no cache group", layer_index);
         std::unordered_set<std::string> seen_tags;
         for (const auto& tag : layer.group_tags) {
-            const auto slot_it = tag_to_slot_.find(tag);
-            RTP_LLM_CHECK_WITH_INFO(slot_it != tag_to_slot_.end(),
+            const auto idx_it = tag_to_idx_.find(tag);
+            RTP_LLM_CHECK_WITH_INFO(idx_it != tag_to_idx_.end(),
                                     "CacheTopology layer=%zu references unknown tag=%s",
                                     layer_index,
                                     tag.c_str());
@@ -70,7 +70,7 @@ void CacheTopology::validateAndBuildIndex() {
                                     "CacheTopology layer=%zu has duplicate tag=%s",
                                     layer_index,
                                     tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(group_layers[slot_it->second].count(static_cast<int>(layer_index)) != 0,
+            RTP_LLM_CHECK_WITH_INFO(group_layers[idx_it->second].count(static_cast<int>(layer_index)) != 0,
                                     "CacheTopology layer=%zu tag=%s is missing reverse group membership",
                                     layer_index,
                                     tag.c_str());
@@ -90,10 +90,10 @@ void CacheTopology::validateAndBuildIndex() {
 
 const GroupBase& CacheTopology::group(std::string_view tag) const {
     const std::string value(tag);
-    const auto        it = tag_to_slot_.find(value);
-    RTP_LLM_CHECK_WITH_INFO(it != tag_to_slot_.end(), "CacheTopology missing tag=%s", value.c_str());
+    const auto        it = tag_to_idx_.find(value);
+    RTP_LLM_CHECK_WITH_INFO(it != tag_to_idx_.end(), "CacheTopology missing tag=%s", value.c_str());
     RTP_LLM_CHECK_WITH_INFO(it->second < groups_.size(),
-                            "CacheTopology tag=%s resolves to out-of-range slot=%zu size=%zu",
+                            "CacheTopology tag=%s resolves to out-of-range idx=%zu size=%zu",
                             value.c_str(),
                             it->second,
                             groups_.size());
@@ -143,83 +143,6 @@ bool CacheTopology::hasSingleGlobalGroup() const {
 bool CacheTopology::hasOneGroupPerLayer() const {
     return std::all_of(
         layers_.begin(), layers_.end(), [](const LayerBase& layer) { return layer.group_tags.size() == 1; });
-}
-
-namespace {
-
-void appendU32(std::string& out, uint32_t value) {
-    for (int i = 0; i < 4; ++i) {
-        out.push_back(static_cast<char>((value >> (8 * i)) & 0xFFu));
-    }
-}
-
-void appendU64(std::string& out, uint64_t value) {
-    for (int i = 0; i < 8; ++i) {
-        out.push_back(static_cast<char>((value >> (8 * i)) & 0xFFull));
-    }
-}
-
-void appendLengthPrefixedString(std::string& out, const std::string& value) {
-    appendU32(out, static_cast<uint32_t>(value.size()));
-    out.append(value);
-}
-
-uint64_t kernelBlocksPerKvBlock(const GroupBase& group) {
-    if (group.kernel_seq_size_per_block == 0) {
-        return 1;
-    }
-    return std::max<size_t>(1, group.seq_size_per_block / group.kernel_seq_size_per_block);
-}
-
-}  // namespace
-
-CacheTopologySignature physicalTopologySignature(const CacheTopology& topology) {
-    // Local declaration order carries no identity: emit groups by sorted tag.
-    std::vector<const GroupBase*> ordered_groups;
-    ordered_groups.reserve(topology.groups().size());
-    for (const auto& group : topology.groups()) {
-        ordered_groups.push_back(&group);
-    }
-    std::sort(ordered_groups.begin(), ordered_groups.end(), [](const GroupBase* lhs, const GroupBase* rhs) {
-        return lhs->tag < rhs->tag;
-    });
-
-    std::string bytes;
-    appendU32(bytes, static_cast<uint32_t>(ordered_groups.size()));
-    for (const auto* group : ordered_groups) {
-        RTP_LLM_CHECK_WITH_INFO(
-            group->spec != nullptr, "physicalTopologySignature group tag=%s has null spec", group->tag.c_str());
-        appendLengthPrefixedString(bytes, group->tag);
-        // Physical layout only: spec layout type, local heads, physical B, K,
-        // KV stride and scale stride. No policy, capacity, address, or budget.
-        appendU32(bytes, static_cast<uint32_t>(group->spec->type));
-        appendU32(bytes, group->local_kv_head_num);
-        appendU64(bytes, static_cast<uint64_t>(group->spec->seq_size_per_block));
-        appendU64(bytes, kernelBlocksPerKvBlock(*group));
-        appendU64(bytes, static_cast<uint64_t>(group->kv_block_stride_bytes));
-        appendU64(bytes, static_cast<uint64_t>(group->kv_scale_stride_bytes));
-    }
-
-    // Layer membership: per layer in layer_id order, the sorted set of tags. The
-    // layer position is a physical fact; the tag order within a layer is not.
-    appendU32(bytes, static_cast<uint32_t>(topology.layers().size()));
-    for (const auto& layer : topology.layers()) {
-        std::vector<std::string> layer_tags = layer.group_tags;
-        std::sort(layer_tags.begin(), layer_tags.end());
-        appendU32(bytes, static_cast<uint32_t>(layer_tags.size()));
-        for (const auto& tag : layer_tags) {
-            appendLengthPrefixedString(bytes, tag);
-        }
-    }
-    return bytes;
-}
-
-void checkPhysicalTopologyMatches(const CacheTopologySignature& expected,
-                                  const CacheTopologySignature& actual,
-                                  const char*                   boundary) {
-    RTP_LLM_CHECK_WITH_INFO(expected == actual,
-                            "physical cache topology signature mismatch at %s boundary: layouts disagree",
-                            boundary != nullptr ? boundary : "unknown");
 }
 
 }  // namespace rtp_llm

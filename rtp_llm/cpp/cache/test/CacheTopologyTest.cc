@@ -36,8 +36,8 @@ CacheConfig makeConfig(std::vector<GroupBase> groups, std::vector<LayerBase> lay
     return config;
 }
 
-// Build a group with a fully explicit physical layout so signature tests can
-// vary each physical dimension independently. K = physical_b / kernel_b.
+// Build a group with a fully explicit physical layout so tag lookup can prove
+// that each group retains its own complete record.
 GroupBase makeSigGroup(std::string      tag,
                        std::vector<int> layer_ids,
                        uint32_t         heads,
@@ -65,7 +65,7 @@ GroupBase makeSigGroup(std::string      tag,
     return group;
 }
 
-TEST(CacheTopologySignatureTest, TwoTagsOnOneLayerCarryDistinctPhysicalRecords) {
+TEST(CacheTopologyTest, TwoTagsOnOneLayerCarryDistinctPhysicalRecords) {
     // Two FULL groups share layer 0 but have different heads, B, K and strides.
     // No global scalar or group-parallel projection can describe layer 0; every
     // consumer must read the exact group record by tag.
@@ -86,136 +86,6 @@ TEST(CacheTopologySignatureTest, TwoTagsOnOneLayerCarryDistinctPhysicalRecords) 
     EXPECT_EQ(a.kv_block_stride_bytes, 64u);
     EXPECT_EQ(b.kv_block_stride_bytes, 48u);
 
-    // The signature reflects both distinct physical records, not a single value.
-    const auto signature = config.physicalTopologySignature();
-    EXPECT_FALSE(signature.empty());
-}
-
-TEST(CacheTopologySignatureTest, EncodesExactCanonicalBytes) {
-    auto config = makeConfig({makeSigGroup("a", {0}, /*heads=*/3, /*B=*/4, /*kernel=*/2, /*kv=*/16, /*scale=*/0)},
-                             {{0, {"a"}}});
-
-    const auto put_u32 = [](std::string& out, uint32_t value) {
-        for (int i = 0; i < 4; ++i) {
-            out.push_back(static_cast<char>((value >> (8 * i)) & 0xFFu));
-        }
-    };
-    const auto put_u64 = [](std::string& out, uint64_t value) {
-        for (int i = 0; i < 8; ++i) {
-            out.push_back(static_cast<char>((value >> (8 * i)) & 0xFFull));
-        }
-    };
-    const auto put_str = [&](std::string& out, const std::string& value) {
-        put_u32(out, static_cast<uint32_t>(value.size()));
-        out.append(value);
-    };
-
-    std::string expected;
-    put_u32(expected, 1);                                                 // group count
-    put_str(expected, "a");                                               // tag
-    put_u32(expected, static_cast<uint32_t>(KVCacheSpecType::MultiHeadAttention));  // spec layout
-    put_u32(expected, 3);                                                 // local heads
-    put_u64(expected, 4);                                                 // physical B
-    put_u64(expected, 2);                                                 // K = B / kernel
-    put_u64(expected, 16);                                                // KV stride
-    put_u64(expected, 0);                                                 // scale stride
-    put_u32(expected, 1);                                                 // layer count
-    put_u32(expected, 1);                                                 // layer 0 tag count
-    put_str(expected, "a");                                               // layer 0 tag
-
-    EXPECT_EQ(config.physicalTopologySignature(), expected);
-    EXPECT_EQ(config.physicalTopologySignature().size(), expected.size());
-}
-
-TEST(CacheTopologySignatureTest, IgnoresDeclarationOrderCapacityPolicyAndBudget) {
-    auto baseline = makeConfig({makeSigGroup("a", {0}, 2, 8, 2, 64, 8),
-                                makeSigGroup("b", {0}, 5, 4, 4, 48, 0)},
-                               {{0, {"a", "b"}}});
-
-    // Reversed declaration order.
-    auto reversed = makeConfig({makeSigGroup("b", {0}, 5, 4, 4, 48, 0),
-                                makeSigGroup("a", {0}, 2, 8, 2, 64, 8)},
-                               {{0, {"a", "b"}}});
-    EXPECT_EQ(baseline.physicalTopologySignature(), reversed.physicalTopologySignature());
-
-    // Different capacity (block_num) and budget (explicit_block_num) and policy.
-    auto variant_a          = makeSigGroup("a", {0}, 2, 8, 2, 64, 8);
-    auto variant_b          = makeSigGroup("b", {0}, 5, 4, 4, 48, 0);
-    variant_a.block_num     = 999;
-    variant_b.block_num     = 7;
-    variant_a.policy.explicit_block_num = 123;             // budget
-    variant_a.policy.enable_prefix_reuse = !variant_a.policy.enable_prefix_reuse;  // behavior
-    variant_b.policy.evict_policy        = CacheEvictPolicy::INDEPENDENT;
-    auto capacity_policy_variant =
-        makeConfig({std::move(variant_a), std::move(variant_b)}, {{0, {"a", "b"}}});
-    EXPECT_EQ(baseline.physicalTopologySignature(), capacity_policy_variant.physicalTopologySignature());
-}
-
-TEST(CacheTopologySignatureTest, ChangesWithTagMembershipAndPhysicalLayout) {
-    auto baseline = makeConfig({makeSigGroup("a", {0, 1}, 2, 8, 2, 64, 8),
-                                makeSigGroup("b", {1}, 5, 4, 4, 48, 0)},
-                               {{0, {"a"}}, {1, {"a", "b"}}});
-    const auto base_sig = baseline.physicalTopologySignature();
-
-    // Tag rename.
-    auto tag_changed = makeConfig({makeSigGroup("a", {0, 1}, 2, 8, 2, 64, 8),
-                                   makeSigGroup("c", {1}, 5, 4, 4, 48, 0)},
-                                  {{0, {"a"}}, {1, {"a", "c"}}});
-    EXPECT_NE(base_sig, tag_changed.physicalTopologySignature());
-
-    // Layer membership change (move "b" to layer 0 as well).
-    auto membership_changed = makeConfig({makeSigGroup("a", {0, 1}, 2, 8, 2, 64, 8),
-                                          makeSigGroup("b", {0, 1}, 5, 4, 4, 48, 0)},
-                                         {{0, {"a", "b"}}, {1, {"a", "b"}}});
-    EXPECT_NE(base_sig, membership_changed.physicalTopologySignature());
-
-    const auto sig_of = [](GroupBase a, GroupBase b) {
-        return makeConfig({std::move(a), std::move(b)}, {{0, {"a"}}, {1, {"a", "b"}}}).physicalTopologySignature();
-    };
-
-    // spec layout.
-    EXPECT_NE(base_sig,
-              sig_of(makeSigGroup("a", {0, 1}, 2, 8, 2, 64, 8, KVCacheSpecType::MultiHeadLatentAttention),
-                     makeSigGroup("b", {1}, 5, 4, 4, 48, 0)));
-    // head count.
-    EXPECT_NE(base_sig, sig_of(makeSigGroup("a", {0, 1}, 9, 8, 2, 64, 8), makeSigGroup("b", {1}, 5, 4, 4, 48, 0)));
-    // physical B.
-    EXPECT_NE(base_sig, sig_of(makeSigGroup("a", {0, 1}, 2, 16, 2, 64, 8), makeSigGroup("b", {1}, 5, 4, 4, 48, 0)));
-    // K (same B, different kernel).
-    EXPECT_NE(base_sig, sig_of(makeSigGroup("a", {0, 1}, 2, 8, 4, 64, 8), makeSigGroup("b", {1}, 5, 4, 4, 48, 0)));
-    // KV stride.
-    EXPECT_NE(base_sig, sig_of(makeSigGroup("a", {0, 1}, 2, 8, 2, 128, 8), makeSigGroup("b", {1}, 5, 4, 4, 48, 0)));
-    // scale stride.
-    EXPECT_NE(base_sig, sig_of(makeSigGroup("a", {0, 1}, 2, 8, 2, 64, 16), makeSigGroup("b", {1}, 5, 4, 4, 48, 0)));
-}
-
-TEST(CacheTopologySignatureTest, MatchGuardAcceptsEqualAndRejectsDifferentSignatures) {
-    auto config = makeConfig({makeSigGroup("a", {0}, 2, 8, 2, 64, 8)}, {{0, {"a"}}});
-    const auto sig = config.physicalTopologySignature();
-
-    EXPECT_NO_THROW(checkPhysicalTopologyMatches(sig, sig, "unit"));
-    EXPECT_ANY_THROW(checkPhysicalTopologyMatches(sig, sig + "x", "unit"));
-}
-
-TEST(CacheTopologySignatureTest, GroupPhysicalLayoutGuardValidatesSubsetTopologies) {
-    auto config = makeConfig({makeSigGroup("a", {0, 1}, 2, 8, 2, 64, 8),
-                              makeSigGroup("b", {1}, 5, 4, 4, 48, 0)},
-                             {{0, {"a"}}, {1, {"a", "b"}}});
-
-    // A layer-subset view carrying the same physical layout is compatible.
-    auto subset =
-        CacheTopology::create({makeSigGroup("a", {0}, 2, 8, 2, 64, 8)}, {{0, {"a"}}});
-    EXPECT_NO_THROW(config.checkPhysicalGroupLayoutCompatible(*subset, "unit"));
-
-    // A physically divergent group with the same tag fails fast.
-    auto divergent =
-        CacheTopology::create({makeSigGroup("a", {0}, 3, 8, 2, 64, 8)}, {{0, {"a"}}});
-    EXPECT_ANY_THROW(config.checkPhysicalGroupLayoutCompatible(*divergent, "unit"));
-
-    // An unknown tag fails fast.
-    auto unknown =
-        CacheTopology::create({makeSigGroup("z", {0}, 2, 8, 2, 64, 8)}, {{0, {"z"}}});
-    EXPECT_ANY_THROW(config.checkPhysicalGroupLayoutCompatible(*unknown, "unit"));
 }
 
 

@@ -64,6 +64,15 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
     EXPECT_TRUE(MtpExecutor::dsparkDraftGraphAllowed(/*is_dspark=*/false, RoleType::DECODE));
 }
 
+TEST(MtpExecutorPolicyTest, LinearDebugGeometryUsesTaggedGroupBlockSize) {
+    auto spec = test::makeLinearSpec("linear", 8, DataType::TYPE_FP16, 1, 1);
+    auto config = test::makeSingleGroupCacheConfig(
+        std::move(spec), CacheGroupType::LINEAR, /*layer_num=*/1, /*block_num=*/4, "linear");
+    config.seq_size_per_block = 2;
+
+    EXPECT_EQ(MtpExecutor::debugLinearSeqSizePerBlock(config, "linear"), 8);
+}
+
 struct MtpExecutorTestConfig {
     size_t  max_seq_len            = 2048;
     size_t  vocab_size             = 4;

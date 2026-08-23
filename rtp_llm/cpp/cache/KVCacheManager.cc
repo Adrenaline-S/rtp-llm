@@ -140,12 +140,12 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
 std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
                                                      const std::vector<size_t>& global_layer_ids) {
     std::vector<GroupBase> groups = source.groups();
-    // Local slot index over the projected copy built here. The tag remains the
-    // identity; this slot never leaves the function.
-    std::unordered_map<std::string, size_t> tag_to_projected_slot;
-    for (size_t slot = 0; slot < groups.size(); ++slot) {
-        groups[slot].layer_ids.clear();
-        tag_to_projected_slot.emplace(groups[slot].tag, slot);
+    // Local vector index over the projected copy built here. The tag remains
+    // the identity; this idx never leaves the function.
+    std::unordered_map<std::string, size_t> tag_to_projected_idx;
+    for (size_t idx = 0; idx < groups.size(); ++idx) {
+        groups[idx].layer_ids.clear();
+        tag_to_projected_idx.emplace(groups[idx].tag, idx);
     }
 
     std::vector<LayerBase> layers;
@@ -156,9 +156,9 @@ std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       
         layer.layer_id   = static_cast<int>(local_layer_id);
         layer.group_tags = source_layer.group_tags;
         for (const auto& tag : layer.group_tags) {
-            const auto projected = tag_to_projected_slot.find(tag);
+            const auto projected = tag_to_projected_idx.find(tag);
             RTP_LLM_CHECK_WITH_INFO(
-                projected != tag_to_projected_slot.end(), "projectLayout missing projected cache tag=%s", tag.c_str());
+                projected != tag_to_projected_idx.end(), "projectLayout missing projected cache tag=%s", tag.c_str());
             groups[projected->second].layer_ids.push_back(static_cast<int>(local_layer_id));
         }
         layers.push_back(std::move(layer));

@@ -64,32 +64,7 @@ private:
 
     std::vector<GroupBase> groups_;
     std::vector<LayerBase> layers_;
-    // Private storage slot of each tag inside groups_. Never an interface value:
-    // it is not returned, bound, serialized, or used as a cross-module key.
-    std::unordered_map<std::string, size_t> tag_to_slot_;
+    std::unordered_map<std::string, size_t> tag_to_idx_;
 };
-
-// Canonical physical-layout identity of a cache topology.
-//
-// The signature is raw canonical bytes -- never a hash, checksum, std::hash,
-// schema field, version field, or pointer value -- built from fixed-width
-// little-endian integers and length-prefixed strings so the encoding is
-// unambiguous and directly comparable byte-for-byte across ranks and processes.
-//
-// It INCLUDES exactly: sorted unique group tags, per-layer group membership,
-// and each group's physical layout (spec layout type, local KV heads, physical
-// block size B from the spec, kernel blocks per KV block K, KV block stride, and
-// KV scale stride). It EXCLUDES policy/behavior, block counts and capacity,
-// addresses, rank-local budgets, ranks, versions, and any positional ordinal.
-// Local group declaration order therefore never changes the signature.
-using CacheTopologySignature = std::string;
-
-CacheTopologySignature physicalTopologySignature(const CacheTopology& topology);
-
-// Fails fast when two physical topology signatures disagree. Used before
-// allocation and transfer at cross-process / cross-rank cache boundaries.
-void checkPhysicalTopologyMatches(const CacheTopologySignature& expected,
-                                  const CacheTopologySignature& actual,
-                                  const char*                   boundary);
 
 }  // namespace rtp_llm

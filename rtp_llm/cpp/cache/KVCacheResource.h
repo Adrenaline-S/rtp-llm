@@ -1,11 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -81,16 +81,6 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-struct CacheGroupBlocks {
-    std::string tag;
-    BlockIds    blocks;
-};
-
-using CacheGroupBlockRecords = std::vector<std::shared_ptr<CacheGroupBlocks>>;
-// Legacy per-layer view. Valid only when each layer maps to exactly one group.
-using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
-using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
-
 class KVCacheResource {
 public:
     void initGroups(const CacheConfig& config);
@@ -113,18 +103,14 @@ public:
     int layerNum() const;
     int groupNums() const;
 
-    CacheGroupBlockRecords&       groupBlocks();
-    const CacheGroupBlockRecords& groupBlocks() const;
+    const std::map<std::string, BlockIds>& blocksByTag() const;
 
     // Group tags in the order the CacheConfig declared them, fixed at initGroups() time.
-    // Unlike groupBlocks(), this order is not affected by any later reordering of the local
-    // record vector, whose order is not contractual. Use it where a consumer must reproduce
-    // "the first group the parent config declared". The views alias tags owned by this
-    // resource and stay valid until the next initGroups().
+    // Use it where a consumer must reproduce "the first group the parent config declared".
+    // The views alias tags owned by this resource and stay valid until the next initGroups().
     std::vector<std::string_view> groupTagsInConfigOrder() const;
 
-    LayerBlockIds layerBlocks() const;
-    bool          layerOwnsTag(int layer_id, std::string_view tag) const;
+    bool layerOwnsTag(int layer_id, std::string_view tag) const;
 
     const CacheKeysType& cacheKeys() const;
     void                 setCacheKeysAndBlockDependencies(CacheKeysType keys, BlockDependenciesType dependencies);
@@ -174,18 +160,14 @@ public:
     std::string debugString() const;
 
 private:
-    bool               groupStorageMatchesIndex() const;
-    void               validateGroupStorage() const;
-    size_t             slotForTag(std::string_view tag) const;
     bool               layerContainsTag(int layer_id, std::string_view tag) const;
-    bool               hasOneGroupPerLayer() const;
 
-    std::vector<std::vector<std::string>>   layer_group_tags_;
-    CacheGroupBlockRecords                  group_blocks_;
-    std::unordered_map<std::string, size_t> tag_to_slot_;
-    CacheKeysType                           cache_keys;
-    BlockDependenciesType                   block_dependencies;
-    bool                                    cache_keys_are_cp_canonical_{false};
+    std::vector<std::vector<std::string>> layer_group_tags_;
+    std::vector<std::string>              group_tags_in_config_order_;
+    mutable std::map<std::string, BlockIds> blocks_by_tag_;
+    CacheKeysType                         cache_keys;
+    BlockDependenciesType                 block_dependencies;
+    bool                                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

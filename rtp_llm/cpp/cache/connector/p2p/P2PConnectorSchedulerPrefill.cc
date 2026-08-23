@@ -41,8 +41,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
         }
     };
 
-    auto selections          = LayerCacheBufferUtil::selectBlocks(cache_config_, *resource);
-    auto layer_cache_buffers = LayerCacheBufferUtil::convertBySelections(cache_config_, *resource, 0, selections);
+    auto layer_cache_buffers = LayerCacheBufferUtil::convert(cache_config_, *resource, 0);
     if (layer_cache_buffers.empty()) {
         std::string error_msg = "sendKVCache: layer_cache_buffers is empty, request_id: " + std::to_string(request_id);
         RTP_LLM_LOG_WARNING("%s", error_msg.c_str());

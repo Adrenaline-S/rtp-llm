@@ -197,17 +197,18 @@ uint8_t dsv4PdPattern(int layer_id, std::string_view tag, size_t block_pos) {
 }
 
 // Physical block-table positions a group actually transfers on the PD
-// prefill->decode path. This deliberately consumes PhysicalBlockTransferPlan,
-// not NativeTransferSelection's canonical global cache-key ordinals.
+// prefill->decode path.
 std::vector<size_t>
 dsv4TransferPositions(const CacheConfig& config, std::string_view tag, size_t block_num, size_t reuse_block_size) {
-    auto plan = planPhysicalBlocksForCacheTransfer(config.group(tag),
-                                                   block_num,
-                                                   reuse_block_size,
-                                                   /*use_hybrid=*/config.groupNums() > 1,
-                                                   /*hybrid_full_from_begin=*/true);
-    EXPECT_EQ(plan.tag, tag);
-    return plan.physical_block_positions;
+    const auto& group = config.group(tag);
+    const size_t tail_block_count =
+        group.policy.active_tail_blocks > 0 ? static_cast<size_t>(group.policy.active_tail_blocks) : 0;
+    return blockPositionsForCacheTransfer(block_num,
+                                          reuse_block_size,
+                                          /*use_hybrid=*/config.groupNums() > 1,
+                                          tail_block_count > 0,
+                                          tail_block_count,
+                                          /*hybrid_full_from_begin=*/true);
 }
 
 torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, std::string_view tag) {
@@ -754,8 +755,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
     EXPECT_EQ(decode_stream->reuseLength(), 0)
         << "Hybrid DSV4 decode first malloc must not consume local device-cache reuse; PD load owns reuse.";
     EXPECT_EQ(decode_resource.kvCache().groupNums(), kDsv4PoolNum);
-    for (const auto& record : decode_resource.kvCache().groupBlocks()) {
-        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, record->tag), 4) << "group " << record->tag;
+    for (const auto& [tag, block_ids] : decode_resource.kvCache().blocksByTag()) {
+        (void)block_ids;
+        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
     }
 
     decode_stream->releaseResource();
@@ -882,7 +884,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      "dsv4-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->blocksByTag(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1022,7 +1024,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                      "dsv4-decoupled-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->blocksByTag(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1166,7 +1168,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      "dsv4-cache-store-pd-prefix-reuse",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->blocksByTag(),
                                                      reuse_num,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,

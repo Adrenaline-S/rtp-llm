@@ -351,9 +351,9 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
             }
             evicted_dependencies.push_back(dependency);
         }
-        for (const auto& group : groups) {
-            if (!isNullBlockIdx(group.block_id)) {
-                batch_resource->mutableBlockIds(0, group.tag).setAt(evicted_idx, group.block_id);
+        for (const auto& [tag, block_id] : groups) {
+            if (!isNullBlockIdx(block_id)) {
+                batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
             }
         }
     }
@@ -374,9 +374,9 @@ void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_ca
     BlockIndicesType                 blocks_to_free;
     std::unordered_set<BlockIdxType> seen_blocks;
     for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (const auto& group_blocks : batch_kv_cache_resource->groupBlocks(batch_id)) {
-            RTP_LLM_CHECK_WITH_INFO(group_blocks != nullptr, "null cache group blocks during block-cache free");
-            for (const auto block_idx : group_blocks->blocks.blocks()) {
+        for (const auto& [tag, block_ids] : batch_kv_cache_resource->blocksByTag(batch_id)) {
+            (void)tag;
+            for (const auto block_idx : block_ids.blocks()) {
                 if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
                     continue;
                 }

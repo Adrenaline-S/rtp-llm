@@ -1756,6 +1756,17 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
     return spec_logits_verify_runner_->run(task);
 }
 
+int MtpExecutor::debugLinearSeqSizePerBlock(const CacheConfig& cache_config, std::string_view tag) {
+    const auto& group = cache_config.group(tag);
+    RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::LINEAR,
+                            "debug linear block geometry requested for non-LINEAR tag=%s",
+                            std::string(tag).c_str());
+    RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block > 0,
+                            "debug linear block geometry has zero seq_size_per_block for tag=%s",
+                            std::string(tag).c_str());
+    return static_cast<int>(group.seq_size_per_block);
+}
+
 void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                        const StreamGroups&   stream_groups) const {
     // Diagnose causal_conv1d_update IMA: it reads block_map[(seq_len - 2) / SBP].
@@ -1768,11 +1779,6 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     if (cache_manager_ == nullptr) {
         return;
     }
-    const int sbp = static_cast<int>(cache_manager_->cacheConfig().seq_size_per_block);
-    if (sbp <= 0) {
-        return;
-    }
-
     auto seq_len_cpu  = model_input.sequence_lengths.to(torch::kCPU);
     auto block_id_cpu = model_input.kv_cache_kernel_block_id.to(torch::kCPU);
     if (seq_len_cpu.scalar_type() != torch::kInt32 || block_id_cpu.scalar_type() != torch::kInt32) {
@@ -1787,6 +1793,9 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     const int64_t batch_dim   = block_id_cpu.size(1);
     const int64_t max_blocks  = block_id_cpu.size(2);
     const int     batch       = static_cast<int>(seq_len_cpu.numel());
+    if (model_input.kv_cache_group_tags.size() != static_cast<size_t>(group_dim)) {
+        return;
+    }
 
     auto dump_row = [&](int64_t g, int64_t b) {
         std::ostringstream oss;
@@ -1804,11 +1813,10 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     const auto*        sl         = seq_len_cpu.data_ptr<int32_t>();
     bool               found_null = false;
     std::ostringstream summary;
-    summary << "[debug-target-verify] batch=" << batch << " sbp=" << sbp << " group_dim=" << group_dim
+    summary << "[debug-target-verify] batch=" << batch << " group_dim=" << group_dim
             << " batch_dim=" << batch_dim << " max_blocks=" << max_blocks;
     for (int b = 0; b < batch && b < batch_dim; ++b) {
         const int seq_len   = sl[b];
-        const int read_off  = (seq_len - 2) / sbp;
         int64_t   stream_id = -1;
         if (b < static_cast<int>(all_streams.size())) {
             auto it = all_streams.begin();
@@ -1818,6 +1826,13 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
             }
         }
         for (int64_t g = 0; g < group_dim; ++g) {
+            const auto& tag   = model_input.kv_cache_group_tags[static_cast<size_t>(g)];
+            const auto& group = cache_manager_->cacheConfig().group(tag);
+            if (group.policy.group_type != CacheGroupType::LINEAR) {
+                continue;
+            }
+            const int sbp      = debugLinearSeqSizePerBlock(cache_manager_->cacheConfig(), tag);
+            const int read_off = (seq_len - 2) / sbp;
             std::string row_dump;
             if (always_print || (read_off >= 0 && read_off < max_blocks)) {
                 row_dump = dump_row(g, b);
@@ -1837,8 +1852,8 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
             }
             const int32_t bid = block_id_cpu.select(0, g).select(0, b).index({read_off}).item<int32_t>();
             if (always_print) {
-                summary << "\n  batch=" << b << " stream=" << stream_id << " group=" << g << " seq_len=" << seq_len
-                        << " read_off=" << read_off << " bid=" << bid << " row=" << row_dump;
+                summary << "\n  batch=" << b << " stream=" << stream_id << " tag=" << tag << " seq_len=" << seq_len
+                        << " sbp=" << sbp << " read_off=" << read_off << " bid=" << bid << " row=" << row_dump;
             }
             if (bid == -1) {
                 RTP_LLM_LOG_ERROR(

@@ -234,10 +234,8 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
     }
     selected.setCacheKeysAndBlockDependencies(std::move(projected_keys), std::move(projected_dependencies));
 
-    for (const auto& group_blocks : source.groupBlocks()) {
-        RTP_LLM_CHECK_WITH_INFO(group_blocks != nullptr, "connector projection got null cache group record");
-        const auto&      tag        = group_blocks->tag;
-        const auto&      src_blocks = group_blocks->blocks.blocks();
+    for (const auto& [tag, block_ids] : source.blocksByTag()) {
+        const auto&      src_blocks = block_ids.blocks();
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 

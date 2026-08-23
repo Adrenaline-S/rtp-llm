@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -15,14 +16,6 @@
 namespace rtp_llm {
 
 struct TensorHolder;
-
-// One cache group as the gatherer sees it. The record owns its semantic tag, so
-// the vector's local order carries no meaning; every positional payload the
-// gatherer packs is ordered by sortedCacheGroupTags() instead.
-struct GathererCacheGroup {
-    std::string    tag;
-    CacheGroupType type = CacheGroupType::FULL;
-};
 
 struct NormalModelInputGathererConfig {
     size_t                          num_layers{};
@@ -40,7 +33,7 @@ struct NormalModelInputGathererConfig {
     size_t                          kernel_seq_size_per_block{};
     size_t                          kernel_blocks_per_kv_block = 1;
     bool                            use_opaque_kv_cache_store  = false;
-    std::vector<GathererCacheGroup> kv_cache_groups;
+    std::unordered_map<std::string, GroupBase> kv_cache_groups;
     bool                            warm_up{};
     bool                            enable_detail_log{};
     bool                            enable_model_inputs_log{};
@@ -59,6 +52,8 @@ public:
                                                              TensorHolder&       host_holder) const;
 
 private:
+    void           gatherKvCacheKernelBlockIdToHost(const StreamGroups& stream_groups,
+                                                     torch::Tensor&      host_tensor) const;
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
     absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;

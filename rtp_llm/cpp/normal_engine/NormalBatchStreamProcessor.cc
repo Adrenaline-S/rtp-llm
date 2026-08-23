@@ -22,7 +22,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.scale_stride_bytes         = cache_config.kv_scale_stride_bytes;
     model_input_gatherer_config_.seq_size_per_block         = cache_config.seq_size_per_block;
     model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.kernel_seq_size_per_block;
-    model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
+    model_input_gatherer_config_.kernel_blocks_per_kv_block = 1;
     model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;
     // Tagged group records in CacheConfig's own order; the gatherer sorts them
     // into the canonical boundary order before packing any positional payload.
@@ -31,9 +31,13 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.kv_cache_groups.clear();
     if (cache_config.groupNums() > 0) {
         const auto& groups = cache_config.topology().groups();
-        model_input_gatherer_config_.kv_cache_groups.reserve(groups.size());
         for (const auto& group : groups) {
-            model_input_gatherer_config_.kv_cache_groups.push_back({group.tag, group.policy.group_type});
+            const auto [it, inserted] = model_input_gatherer_config_.kv_cache_groups.emplace(group.tag, group);
+            (void)it;
+            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate model-input cache tag=%s", group.tag.c_str());
+            model_input_gatherer_config_.kernel_blocks_per_kv_block =
+                std::max(model_input_gatherer_config_.kernel_blocks_per_kv_block,
+                         cache_config.kernelBlocksPerKvBlock(group.tag));
         }
     }
     model_input_gatherer_config_.warm_up                 = warm_up;

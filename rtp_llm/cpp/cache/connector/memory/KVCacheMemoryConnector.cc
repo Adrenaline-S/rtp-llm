@@ -169,33 +169,6 @@ bool KVCacheMemoryConnector::init() {
 
     checkLayerBlockStrideBytes();
 
-    // Fail fast on cache-plan wiring drift before the connector enables any cache
-    // transfer: a drifted layout would corrupt a broadcast copy plan.
-    //
-    // Scope of what this actually compares: allocator_->allLayerCacheBase()
-    // derives its group/layer layout from the allocator's own
-    // CacheConfig::topologyPtr(), and KVCacheAllocator::config_ is an unmutated
-    // by-value CacheConfig copy. So this guard compares two independently held
-    // CacheConfig copies -- this connector's cache_config_ against the copy the
-    // allocator was constructed from. It catches wiring drift (connector and
-    // allocator built from different cache plans); it does NOT verify the geometry
-    // of the CUDA tensors the allocator materialized against the config.
-    //
-    // A null allocator is an already-supported state (the batched/staged copy
-    // paths fall back when it is absent); there is then no second CacheConfig copy
-    // to disagree with, so there is nothing to validate.
-    //
-    // FOLLOW-UP(cache-topology-signature-wire-exchange): this establishes only
-    // local same-process cache-plan agreement. Exchanging
-    // CacheConfig::physicalTopologySignature() with the peer ranks reached via
-    // tp_addrs_ is a material wire-interface change and is a deliberate, named
-    // deferred follow-up -- do not read this in-process guard as cross-rank
-    // layout agreement.
-    if (allocator_ != nullptr) {
-        cache_config_.checkPhysicalGroupLayoutCompatible(allocator_->allLayerCacheBase().topology(),
-                                                         "memory connector cache transfer");
-    }
-
     initBlockPool();
     RTP_LLM_CHECK_WITH_INFO(!(kv_cache_config_.enable_memory_cache_disk && kv_cache_config_.enable_tiered_memory_cache
                               && !usePrefixTreeMemoryCache()),
@@ -530,7 +503,13 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot>
 KVCacheMemoryConnector::buildLayerTagSlots(const CacheConfig& cache_config) {
     std::vector<LayerTagSlot> slots;
     for (size_t layer = 0; layer < cache_config.layer_all_num; ++layer) {
-        for (const auto& tag : cache_config.groupsForLayer(static_cast<int>(layer))) {
+        auto sorted_tags = cache_config.groupsForLayer(static_cast<int>(layer));
+        RTP_LLM_CHECK_WITH_INFO(!sorted_tags.empty(), "memory connector layer=%zu has no cache group tags", layer);
+        std::sort(sorted_tags.begin(), sorted_tags.end());
+        RTP_LLM_CHECK_WITH_INFO(std::adjacent_find(sorted_tags.begin(), sorted_tags.end()) == sorted_tags.end(),
+                                "memory connector layer=%zu has duplicate cache group tags",
+                                layer);
+        for (const auto& tag : sorted_tags) {
             const auto& group = cache_config.groupForLayer(static_cast<int>(layer), tag);
             if (!group.policy.enable_prefix_reuse) {
                 continue;
@@ -2424,17 +2403,7 @@ KVCacheMemoryConnector::LayerTagBlockIds
 KVCacheMemoryConnector::resourceLayerTagBlocks(const KVCacheResource&           resource,
                                                const std::vector<LayerTagSlot>& slots) const {
     LayerTagBlockIds                                 layer_blocks(static_cast<size_t>(cache_config_.layer_all_num));
-    const auto&                                      records = resource.groupBlocks();
-    std::unordered_map<std::string, const BlockIds*> blocks_by_tag;
-    blocks_by_tag.reserve(records.size());
-    for (const auto& record : records) {
-        if (record == nullptr) {
-            continue;
-        }
-        RTP_LLM_CHECK_WITH_INFO(blocks_by_tag.emplace(record->tag, &record->blocks).second,
-                                "KVCacheMemoryConnector duplicate resource tag=%s",
-                                record->tag.c_str());
-    }
+    const auto& blocks_by_tag = resource.blocksByTag();
     for (const auto& slot : slots) {
         RTP_LLM_CHECK_WITH_INFO(slot.layer_id >= 0 && static_cast<size_t>(slot.layer_id) < layer_blocks.size(),
                                 "KVCacheMemoryConnector invalid slot layer=%d tag=%s",
@@ -2444,7 +2413,7 @@ KVCacheMemoryConnector::resourceLayerTagBlocks(const KVCacheResource&           
         if (record == blocks_by_tag.end()) {
             continue;
         }
-        const auto inserted = layer_blocks[static_cast<size_t>(slot.layer_id)].emplace(slot.tag, record->second);
+        const auto inserted = layer_blocks[static_cast<size_t>(slot.layer_id)].emplace(slot.tag, &record->second);
         RTP_LLM_CHECK_WITH_INFO(
             inserted.second, "KVCacheMemoryConnector duplicate slot layer=%d tag=%s", slot.layer_id, slot.tag.c_str());
     }

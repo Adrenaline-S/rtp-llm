@@ -103,7 +103,7 @@ void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
-        shared_cache_->put(cache_keys[i], {{tag(), block_indices[i], true}}, is_resident);
+        shared_cache_->put(cache_keys[i], {{tag(), block_indices[i]}}, is_resident);
     }
 }
 

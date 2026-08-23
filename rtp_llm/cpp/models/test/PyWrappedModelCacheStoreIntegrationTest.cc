@@ -18,7 +18,9 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#define private public
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#undef private
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -98,7 +100,11 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         GroupBase group;
         group.tag    = spec.tag;
         group.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
-        group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.policy = defaultCacheGroupPolicy(spec.tag == "linear" ? CacheGroupType::LINEAR : CacheGroupType::FULL);
+        // This integration fixture exercises boundary association, not tail-only
+        // transfer policy; retain all four physical rows while using distinct
+        // group types so a type/tag permutation bug is observable.
+        group.policy.active_tail_blocks = 0;
         group.policy.explicit_block_num = kPhysicalBlocks;
         group.layer_ids                 = {kLayerId};
         group.block_num                 = kPhysicalBlocks;
@@ -375,6 +381,9 @@ Scenario makeMultiTagScenario(bool declare_in_sorted_order) {
                              /*block_table_width=*/4,
                              /*global_tokens_per_block=*/2,
                              /*global_stride_bytes=*/24);
+    inputs.kv_cache_group_tags = {"full", "linear"};
+    inputs.kv_cache_group_types = pinnedTensor(
+        {static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::LINEAR)}, {2});
     return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
 }
 
@@ -390,6 +399,8 @@ Scenario makeMicroBatchScenario() {
                              /*block_table_width=*/2,
                              /*global_tokens_per_block=*/2,
                              /*global_stride_bytes=*/16);
+    inputs.kv_cache_group_tags = {"default"};
+    inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
     return scenario;
@@ -407,12 +418,48 @@ Scenario makeContextParallelScenario() {
                              /*block_table_width=*/3,
                              /*global_tokens_per_block=*/2,
                              /*global_stride_bytes=*/16);
+    inputs.kv_cache_group_tags = {"default"};
+    inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.parallelism.tp_size                            = 2;
     scenario.parallelism.tp_rank                            = 1;
     scenario.parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     scenario.parallelism.prefill_cp_config.kv_cache_sharded = true;
     scenario.replace_cp_processor                           = true;
+    return scenario;
+}
+
+Scenario makeTpNonRootSingleTagScenario() {
+    auto     config = makeCacheConfig({{"default", 2, 16}});
+    auto     layout = makeLayout(config);
+    auto     inputs = makeInputs(/*input_lengths=*/{4},
+                             /*request_ids=*/{351},
+                             /*cache_keys=*/{3501, 3502, 3503, 3504},
+                             /*cache_keys_width=*/4,
+                             /*block_ids=*/{1, 2},
+                             /*group_count=*/1,
+                             /*block_table_width=*/2,
+                             /*global_tokens_per_block=*/2,
+                             /*global_stride_bytes=*/16);
+    // This is the documented post-tpSyncModelInputs non-root state: tensor
+    // payloads and types are present, while string tags are reconstructed from
+    // the rank-local CacheConfig rather than broadcast.
+    inputs.kv_cache_group_tags.clear();
+    inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
+    Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+    scenario.parallelism.tp_size = 2;
+    scenario.parallelism.tp_rank = 1;
+    return scenario;
+}
+
+Scenario makeTpNonRootMultiTagScenario() {
+    auto scenario = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
+    // The projected topology declaration is deliberately LINEAR then FULL,
+    // while synchronized tensor rows/types remain in canonical FULL, LINEAR
+    // order and the non-root-only string vector remains empty.
+    scenario.inputs.kv_cache_group_tags.clear();
+    scenario.parallelism.tp_size = 2;
+    scenario.parallelism.tp_rank = 1;
     return scenario;
 }
 
@@ -430,6 +477,8 @@ Scenario makeMtpScenario() {
                              /*block_table_width=*/2,
                              /*global_tokens_per_block=*/2,
                              /*global_stride_bytes=*/32);
+    inputs.kv_cache_group_tags = {"draft"};
+    inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
     Scenario scenario{
         std::move(main_config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.model_id               = 7;
@@ -444,6 +493,44 @@ Scenario makeScenario(const std::string& name) {
     if (name == "multi_tag_sorted_declaration") {
         return makeMultiTagScenario(/*declare_in_sorted_order=*/true);
     }
+    if (name == "missing_boundary_tags") {
+        auto scenario = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
+        scenario.inputs.kv_cache_group_tags.clear();
+        return scenario;
+    }
+    if (name == "reordered_boundary_tags") {
+        auto scenario = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
+        scenario.inputs.kv_cache_group_tags = {"linear", "full"};
+        auto order = torch::tensor({1, 0}, torch::kInt64);
+        scenario.inputs.kv_cache_block_id =
+            scenario.inputs.kv_cache_block_id.index_select(0, order).contiguous().pin_memory();
+        scenario.inputs.kv_cache_kernel_block_id =
+            scenario.inputs.kv_cache_kernel_block_id.index_select(0, order).contiguous().pin_memory();
+        scenario.inputs.kv_cache_group_types =
+            scenario.inputs.kv_cache_group_types.index_select(0, order).contiguous().pin_memory();
+        return scenario;
+    }
+    if (name == "duplicate_boundary_tags") {
+        auto scenario = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
+        scenario.inputs.kv_cache_group_tags = {"full", "full"};
+        return scenario;
+    }
+    if (name == "unknown_boundary_tag") {
+        auto scenario = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
+        scenario.inputs.kv_cache_group_tags = {"full", "unknown"};
+        return scenario;
+    }
+    if (name == "unequal_group_types") {
+        auto scenario = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
+        scenario.inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
+        return scenario;
+    }
+    if (name == "late_group_type_mismatch") {
+        auto scenario = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
+        scenario.inputs.kv_cache_group_types = pinnedTensor(
+            {static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::FULL)}, {2});
+        return scenario;
+    }
     if (name == "micro_batch") {
         return makeMicroBatchScenario();
     }
@@ -452,6 +539,18 @@ Scenario makeScenario(const std::string& name) {
     }
     if (name == "mtp_sub_config") {
         return makeMtpScenario();
+    }
+    if (name == "tp_non_root_single_tag") {
+        return makeTpNonRootSingleTagScenario();
+    }
+    if (name == "tp_non_root_multi_tag") {
+        return makeTpNonRootMultiTagScenario();
+    }
+    if (name == "tp_non_root_group_type_mismatch") {
+        auto scenario = makeTpNonRootMultiTagScenario();
+        scenario.inputs.kv_cache_group_types = pinnedTensor(
+            {static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::FULL)}, {2});
+        return scenario;
     }
     throw std::invalid_argument("unknown PyWrappedModel cache-store integration scenario: " + name);
 }
@@ -551,6 +650,66 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     return serializeResult(*cache_store, scenario.base_addresses);
 }
 
+py::dict runInvalidBoundaryDiagnostics(py::object py_model, const std::string& scenario_name) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() {
+        initRuntime(/*device_id=*/0,
+                    /*trace_memory=*/false,
+                    /*enable_comm_overlap=*/false,
+                    MlaOpsType::AUTO);
+    });
+    auto scenario    = makeScenario(scenario_name);
+    auto cache_store = std::make_shared<RecordingCacheStore>();
+    auto manager     = std::make_shared<KVCacheManager>(scenario.manager_config,
+                                                    /*warmup=*/true,
+                                                    /*metrics_reporter=*/nullptr,
+                                                    KVCacheConfig{},
+                                                    scenario.parallelism);
+    manager->setCacheStore(cache_store);
+    Weights weights;
+    weights.layers.resize(1);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_FP16;
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = 1;
+    const auto& active_config = manager->cacheConfig();
+    GptModelInitParams params{weights,
+                              description,
+                              scenario.layout,
+                              scenario.model_id,
+                              scenario.parallelism,
+                              HWKernelConfig{},
+                              ProfilingDebugLoggingConfig{},
+                              RuntimeConfig{},
+                              ConcurrencyConfig{},
+                              SpeculativeExecutionConfig{},
+                              scenario.device_resources,
+                              MlaOpsType::AUTO,
+                              /*max_seq_len=*/64,
+                              /*hidden_size=*/1,
+                              active_config.seq_size_per_block,
+                              active_config.kernel_seq_size_per_block,
+                              manager,
+                              std::nullopt};
+    PyWrappedModel model(params, std::move(py_model));
+    const auto held_before   = model.buffer_holder_.tensors.size();
+    const auto copies_before = model.d2d_copies_.num_copies;
+    std::string message;
+    try {
+        (void)model.forward(scenario.inputs);
+    } catch (const std::exception& e) {
+        message = e.what();
+    }
+    py::dict result;
+    result["message"]          = message;
+    result["held_delta"]       = model.buffer_holder_.tensors.size() - held_before;
+    result["device_copy_delta"] = model.d2d_copies_.num_copies - copies_before;
+    result["store_records"]    = cache_store->snapshot().size();
+    return result;
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
@@ -558,6 +717,10 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
+          py::arg("py_model"),
+          py::arg("scenario_name"));
+    m.def("run_invalid_boundary_diagnostics",
+          &rtp_llm::test::runInvalidBoundaryDiagnostics,
           py::arg("py_model"),
           py::arg("scenario_name"));
 }

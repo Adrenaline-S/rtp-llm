@@ -87,7 +87,14 @@ private:
     torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
-                                                                   const GptModelInputs&         inputs);
+                                                                   const GptModelInputs&         inputs,
+                                                                   const std::vector<size_t>&     input_idx_by_tag);
+    std::vector<size_t> validateTaggedCacheBoundary(const GptModelInputs& inputs) const;
+    GptModelOutputs forwardMicroBatchedValidated(const GptModelInputs& inputs,
+                                                  const std::vector<size_t>& input_idx_by_tag);
+    void prepareAttentionInputsValidated(const GptModelInputs&     inputs,
+                                         bool                      skip_forward_event_sync,
+                                         const std::vector<size_t>& input_idx_by_tag);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,

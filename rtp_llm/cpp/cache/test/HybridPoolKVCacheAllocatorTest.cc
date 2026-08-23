@@ -281,6 +281,40 @@ makeAllocator(const CacheConfig& config, RoleType role_type = RoleType::PDFUSION
     return allocator;
 }
 
+class IncrementalFailureInjectingAllocator final: public HybridPoolKVCacheAllocator {
+public:
+    explicit IncrementalFailureInjectingAllocator(const CacheConfig& config):
+        HybridPoolKVCacheAllocator(config, AllocationType::DEVICE, nullptr, 0, RoleType::PDFUSION) {}
+
+    std::string              fail_tag;
+    bool                     failure_enabled = false;
+    mutable std::vector<std::string> observed_tags;
+    mutable BlockIndicesType linear_blocks_at_failure;
+
+protected:
+    bool shouldInjectGroupAllocationFailureForTest(const BatchKVCacheResource& resource,
+                                                   int                         batch_id,
+                                                   std::string_view            tag,
+                                                   bool                        incremental) const override {
+        if (!failure_enabled || !incremental) {
+            return false;
+        }
+        observed_tags.emplace_back(tag);
+        if (tag != fail_tag) {
+            return false;
+        }
+        linear_blocks_at_failure = resource.blocks(batch_id, "linear");
+        return true;
+    }
+};
+
+static std::shared_ptr<IncrementalFailureInjectingAllocator> makeFailingAllocator(const CacheConfig& config) {
+    auto allocator = std::make_shared<IncrementalFailureInjectingAllocator>(config);
+    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    allocator->fail_tag = "full";
+    return allocator;
+}
+
 class RecordingMemoryUtil: public MemoryUtil {
 public:
     bool regUserMr(void*, uint64_t, bool gpu, uint64_t) override {
@@ -455,25 +489,6 @@ protected:
 private:
     bool failed_once_ = false;
 };
-
-TEST_F(HybridPoolKVCacheAllocatorTest, AllocationRollbackJournalCarriesTaggedGroupState) {
-    AllocationRollbackJournal journal{{
-        3,
-        {
-            {"linear", 7, {11, 12}, {1, 5}},
-            {"full", 4, {21}, {}},
-        },
-    }};
-
-    ASSERT_EQ(journal.size(), 1u);
-    EXPECT_EQ(journal[0].batch_index, 3u);
-    ASSERT_EQ(journal[0].groups.size(), 2u);
-    EXPECT_EQ(journal[0].groups[0].tag, "linear");
-    EXPECT_EQ(journal[0].groups[0].original_block_count, 7u);
-    EXPECT_EQ(journal[0].groups[0].referenced_blocks, (BlockIndicesType{11, 12}));
-    EXPECT_EQ(journal[0].groups[0].backfilled_positions, (std::vector<size_t>{1, 5}));
-    EXPECT_EQ(journal[0].groups[1].tag, "full");
-}
 
 // ---------------------------------------------------------------------------
 // Init / per-group pool creation
@@ -1296,8 +1311,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedGroupBlocks) {
-    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/2);
-    auto allocator = makeAllocator(config);
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/4);
+    auto allocator = makeFailingAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
@@ -1314,9 +1329,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     const auto linear_block_before = batch_res->blocks(0, "linear")[0];
     const auto full_block_before   = batch_res->blocks(0, "full")[0];
     const auto counters_before     = snapshotPoolCounters(allocator, config);
+    const auto device_reuse_before = batch_res->cacheResource(0).deviceReuseBlockNum();
+    allocator->failure_enabled     = true;
 
-    // "linear" can append one real LINEAR tail block. "full" has no remaining
-    // free blocks and no cache to evict, so FULL allocation fails.
+    // The injected FULL failure occurs only after the preceding LINEAR strategy
+    // has run. Both pools have capacity, so this is independent of pool pressure.
     token_ids->setSeqLength(9);
     MallocInfo incr_info{batch_res, token_ids};
     incr_info.enable_device_cache = false;
@@ -1328,14 +1345,26 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     ASSERT_EQ(batch_res->blocksNum(0, "full"), 1u);
     EXPECT_EQ(batch_res->blocks(0, "linear")[0], linear_block_before);
     EXPECT_EQ(batch_res->blocks(0, "full")[0], full_block_before);
+    EXPECT_EQ(batch_res->cacheResource(0).deviceReuseBlockNum(), device_reuse_before);
     expectPoolCountersEq(allocator, config, counters_before);
+    EXPECT_EQ(allocator->observed_tags, (std::vector<std::string>{"linear", "full"}));
+    EXPECT_GT(allocator->linear_blocks_at_failure.size(), 1u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfilledSlots) {
     // Block 0 is reserved by each pool, so FULL needs three configured blocks
     // to provide the two request blocks used by the initial allocation.
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/3);
-    auto allocator = makeAllocator(config);
+    auto policies  = std::vector<CacheGroupPolicy>{};
+    for (const auto& group : config.topology().groups()) {
+        auto policy = group.policy;
+        if (group.tag == "linear") {
+            policy.active_tail_blocks = 2;
+        }
+        policies.push_back(std::move(policy));
+    }
+    config.setGroupPolicies(policies);
+    auto allocator = makeFailingAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     const auto linear_reused = seedCacheItem(allocator, config, "linear", /*key=*/100, /*is_resident=*/true);
@@ -1356,21 +1385,22 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
 
     const auto keys_before         = batch_res->cacheKeys(0);
     const auto dependencies_before = batch_res->cacheResource(0).blockDependencies();
+    const auto device_reuse_before = batch_res->cacheResource(0).deviceReuseBlockNum();
     auto&      linear_ids          = batch_res->mutableBlockIds(0, "linear");
     auto       removed_block_id    = linear_ids.blocks()[1];
     ASSERT_FALSE(isNullBlockIdx(removed_block_id));
     allocator->blockPool("linear")->requestFree({removed_block_id});
     linear_ids.setAt(1, NULL_BLOCK_IDX);
+    const auto blocks_before = std::map<std::string, BlockIndicesType>{{"linear", batch_res->blocks(0, "linear")},
+                                                                         {"full", batch_res->blocks(0, "full")}};
     const auto counters_before = snapshotPoolCounters(allocator, config);
-
-    // Request-local record order is deliberately unrelated to topology order.
-    std::reverse(batch_res->groupBlocks(0).begin(), batch_res->groupBlocks(0).end());
+    allocator->failure_enabled = true;
 
     // The resource already owns reused prefix references in both groups.
     // LINEAR first backfills the old sparse tail and appends a new tail block;
-    // FULL then fails because its independent pool is exhausted. Rollback must
+    // FULL then fails through the narrow test seam. Rollback must
     // restore the historical NULL slot, original logical length, cache refs,
-    // request refs, and dependency timeline by tag despite the reordered records.
+    // request refs, and dependency timeline by tag.
     token_ids->setSeqLength(9);
     MallocInfo incr_info{batch_res, token_ids};
     incr_info.enable_device_cache = false;
@@ -1380,6 +1410,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
     ASSERT_EQ(batch_res->blocksNum(0, "linear"), 2u);
     ASSERT_EQ(batch_res->blocksNum(0, "full"), 2u);
     EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, "linear")[1]));
+    EXPECT_EQ(batch_res->blocks(0, "linear"), blocks_before.at("linear"));
+    EXPECT_EQ(batch_res->blocks(0, "full"), blocks_before.at("full"));
+    EXPECT_EQ(batch_res->cacheResource(0).deviceReuseBlockNum(), device_reuse_before);
     EXPECT_EQ(batch_res->cacheKeys(0), keys_before);
     const auto& dependencies_after = batch_res->cacheResource(0).blockDependencies();
     ASSERT_EQ(dependencies_after.size(), dependencies_before.size());
@@ -1389,6 +1422,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
         EXPECT_EQ(dependencies_after[i].ordinal, dependencies_before[i].ordinal);
     }
     expectPoolCountersEq(allocator, config, counters_before);
+    EXPECT_EQ(allocator->observed_tags, (std::vector<std::string>{"linear", "full"}));
+    ASSERT_GE(allocator->linear_blocks_at_failure.size(), 2u);
+    EXPECT_FALSE(isNullBlockIdx(allocator->linear_blocks_at_failure[1]));
 }
 
 // ---------------------------------------------------------------------------

@@ -35,20 +35,6 @@ struct KVCachePoolMetricsSnapshot {
     float       used_ratio           = 0.0f;
 };
 
-struct GroupAllocationCheckpoint {
-    std::string         tag;
-    size_t              original_block_count = 0;
-    BlockIndicesType    referenced_blocks;
-    std::vector<size_t> backfilled_positions;
-};
-
-struct BatchAllocationCheckpoint {
-    size_t                                 batch_index = 0;
-    std::vector<GroupAllocationCheckpoint> groups;
-};
-
-using AllocationRollbackJournal = std::vector<BatchAllocationCheckpoint>;
-
 class KVCacheAllocator {
 public:
     KVCacheAllocator(const CacheConfig&                 config,

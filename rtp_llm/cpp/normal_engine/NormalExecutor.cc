@@ -200,17 +200,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                   cache_manager->cacheConfig()) :
                                    CacheConfig();
 
-    // C++/Python model cache boundary: the layout handed to the Python model
-    // must physically match the cache plan the allocator materialized. Validate
-    // per-group physical layout (spec, heads, B/K, strides) before any forward
-    // packs a positional cache payload.
-    if (cache_manager) {
-        const auto model_kv_layout =
-            is_propose_ ? cache_manager->getMTPModuleGroupedCacheLayerLayout(propose_model_index_) :
-                          cache_manager->getMainModelGroupedCacheLayerLayout();
-        cache_config.checkPhysicalGroupLayoutCompatible(model_kv_layout.topology(), "cpp/python model cache");
-    }
-
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
     LogitsProcessorFactory::init(params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);

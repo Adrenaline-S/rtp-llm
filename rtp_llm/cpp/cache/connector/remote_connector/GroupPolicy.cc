@@ -1,6 +1,7 @@
 #include <sstream>
 #include <bitset>
 #include <algorithm>
+#include <iterator>
 #include <typeinfo>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
@@ -184,15 +185,25 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& ta
                             "remote cache tag/block count mismatch: tags=%zu blocks=%zu",
                             tags.size(),
                             block_ids.size());
-    block_buffers.reserve(block_ids.size());
+    RTP_LLM_CHECK_WITH_INFO(!tags.empty(), "remote cache transfer requires at least one tagged block");
+    for (const auto& tag : tags) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "remote cache transfer requires a non-empty cache tag");
+        RTP_LLM_CHECK_WITH_INFO(groups_.find(tag) != groups_.end(),
+                                "remote cache policy missing tag=%s",
+                                tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(tag_to_layer_ids_.find(tag) != tag_to_layer_ids_.end(),
+                                "remote cache policy missing layer route for tag=%s",
+                                tag.c_str());
+    }
+
+    kv_cache_manager::BlockBuffers staged_block_buffers;
+    staged_block_buffers.reserve(block_ids.size());
     for (size_t i = 0; i < block_ids.size(); ++i) {
         const auto& tag = tags[i];
-        RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "remote cache transfer requires a non-empty cache tag");
         const auto group_it = groups_.find(tag);
-        RTP_LLM_CHECK_WITH_INFO(group_it != groups_.end(), "remote cache policy missing tag=%s", tag.c_str());
-        block_buffers.push_back({});
+        staged_block_buffers.push_back({});
         const auto& layer_ids          = tag_to_layer_ids_.at(tag);
-        auto&       iovs               = block_buffers.back().iovs;
+        auto&       iovs               = staged_block_buffers.back().iovs;
         size_t      actual_block_bytes = 0;
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
@@ -223,10 +234,12 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& ta
                 block_ids[i],
                 expected_block_bytes,
                 actual_block_bytes);
-            block_buffers.pop_back();
             return false;
         }
     }
+    block_buffers.insert(block_buffers.end(),
+                         std::make_move_iterator(staged_block_buffers.begin()),
+                         std::make_move_iterator(staged_block_buffers.end()));
     return true;
 }
 

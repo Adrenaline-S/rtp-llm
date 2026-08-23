@@ -2,6 +2,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <string_view>
+#include <tuple>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
@@ -126,6 +129,13 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
+    std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, std::string_view tag, int block_id) const override {
+        tagged_buffer_requests_.emplace_back(layer_id, tag, block_id);
+        BlockInfo info;
+        info.addr       = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
+        info.size_bytes = config_.group(tag).kv_block_stride_bytes + config_.group(tag).kv_scale_stride_bytes;
+        return {info};
+    }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
         RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
         GroupedCacheLayerLayout::GroupLayouts groups;
@@ -204,6 +214,10 @@ public:
         return true;
     }
 
+    const std::vector<std::tuple<int, std::string, int>>& taggedBufferRequests() const {
+        return tagged_buffer_requests_;
+    }
+
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override {
         return {};
@@ -214,6 +228,7 @@ protected:
 
 private:
     std::shared_ptr<const CacheTopology> topology_;
+    mutable std::vector<std::tuple<int, std::string, int>> tagged_buffer_requests_;
 };
 
 MATCHER_P(LocationsEqLocationsView, locations_view, "") {
@@ -1130,10 +1145,23 @@ TEST_F(GroupPolicyTest, test_GroupPolicy_rejects_invalid_transfer_tag_payload) {
     // A remote transfer payload carries one (tag, block) pair per cache key, so a
     // repeated tag is legal; an empty, unknown or unpaired tag is not.
     kv_cache_manager::BlockBuffers buffers;
+    EXPECT_ANY_THROW(group_policy_->genBlockBuffers({}, {}, buffers));
     EXPECT_ANY_THROW(group_policy_->genBlockBuffers({""}, {1}, buffers));
     EXPECT_ANY_THROW(group_policy_->genBlockBuffers({"unknown"}, {1}, buffers));
     EXPECT_ANY_THROW(group_policy_->genBlockBuffers({"full", "full"}, {1}, buffers));
     EXPECT_TRUE(buffers.empty());
+}
+
+TEST_F(GroupPolicyTest, InvalidLaterTagIsRejectedBeforeAnyBufferLookupOrOutputMutation) {
+    initGroupPolicy(/*tp_size=*/1,
+                    RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
+                    /*per_group_layer_num=*/2,
+                    /*full_tags=*/{"full"});
+
+    kv_cache_manager::BlockBuffers buffers(1);
+    EXPECT_ANY_THROW(group_policy_->genBlockBuffers({"full", "unknown"}, {7, 9}, buffers));
+    EXPECT_EQ(buffers.size(), 1u);
+    EXPECT_TRUE(std::static_pointer_cast<FakeKVCacheAllocator>(allocator_)->taggedBufferRequests().empty());
 }
 
 }  // namespace test
