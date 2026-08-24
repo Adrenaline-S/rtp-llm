@@ -154,6 +154,15 @@ std::array<int64_t, 2> decodeMtpHiddenStatesShape(int64_t total_numel, int64_t r
     return {rows, cols};
 }
 
+void refreshKVCacheBlockTableDeviceReplicas(GptModelInputs& inputs) {
+    if (inputs.kv_cache_block_id.numel() > 0) {
+        inputs.kv_cache_block_id_device.copy_(inputs.kv_cache_block_id, /*non_blocking=*/true);
+    }
+    if (inputs.kv_cache_kernel_block_id.numel() > 0) {
+        inputs.kv_cache_kernel_block_id_device.copy_(inputs.kv_cache_kernel_block_id, /*non_blocking=*/true);
+    }
+}
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
@@ -576,14 +585,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
-    if (!is_root) {
-        if (inputs.kv_cache_block_id.numel() > 0) {
-            inputs.kv_cache_block_id_device.copy_(inputs.kv_cache_block_id, /*non_blocking=*/true);
-        }
-        if (inputs.kv_cache_kernel_block_id.numel() > 0) {
-            inputs.kv_cache_kernel_block_id_device.copy_(inputs.kv_cache_kernel_block_id, /*non_blocking=*/true);
-        }
-    }
+    // Host block tables are authoritative on every rank. In particular, rank
+    // 0 may enter TP sync with device replicas from the preceding MTP step.
+    refreshKVCacheBlockTableDeviceReplicas(inputs);
 }
 
 }  // namespace rtp_llm

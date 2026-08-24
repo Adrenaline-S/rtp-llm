@@ -127,6 +127,21 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
 }
 
+TEST_F(ModelDataTest, testRefreshKVCacheBlockTableDeviceReplicasUsesHostTables) {
+    GptModelInputs inputs;
+    inputs.kv_cache_block_id        = torch::tensor({0, 7, 11, -1}, torch::kInt32);
+    inputs.kv_cache_kernel_block_id = torch::tensor({0, 14, 15, 22, 23, -1}, torch::kInt32);
+    inputs.kv_cache_block_id_device =
+        torch::full(inputs.kv_cache_block_id.sizes(), 99, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    inputs.kv_cache_kernel_block_id_device = torch::full(
+        inputs.kv_cache_kernel_block_id.sizes(), 99, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+
+    refreshKVCacheBlockTableDeviceReplicas(inputs);
+
+    EXPECT_TRUE(torch::equal(inputs.kv_cache_block_id_device.cpu(), inputs.kv_cache_block_id));
+    EXPECT_TRUE(torch::equal(inputs.kv_cache_kernel_block_id_device.cpu(), inputs.kv_cache_kernel_block_id));
+}
+
 TEST_F(ModelDataTest, testPackedCacheMetadataCarriesCompleteRootIdentity) {
     GptModelInputs inputs;
     inputs.kv_cache_block_table_plan = CacheBlockTablePackingPlan::fromRegions({

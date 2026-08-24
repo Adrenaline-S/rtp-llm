@@ -120,6 +120,11 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
 torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
 std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 
+// Restore the direct CUDA replicas from the authoritative packed host tables.
+// Call this after TP synchronization on every rank: rank 0's host tables may
+// have advanced since its device replicas were last published.
+void refreshKVCacheBlockTableDeviceReplicas(GptModelInputs& inputs);
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
 struct MicroBatchInfo {
