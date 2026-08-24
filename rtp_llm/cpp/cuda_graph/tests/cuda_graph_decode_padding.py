@@ -150,8 +150,6 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         attention_inputs.kernel_valid_lengths = torch.full(
             (batch_size,), kernel_block_num, dtype=torch.int32
         )
-        inputs.cache_group_attn_inputs = {"default": attention_inputs}
-
         # padding_offset
         attention_inputs.padding_offset = torch.zeros(
             max_seq_len, dtype=torch.int32, device="cuda"
@@ -171,6 +169,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         attention_inputs.context_total_kv_length = batch_size * num_tokens_per_bs
         attention_inputs.total_tokens = batch_size * num_tokens_per_bs
         inputs.attention_inputs = attention_inputs
+        inputs.cache_group_attn_inputs = {"default": attention_inputs}
         return inputs
 
     def _test_single(self, batch_size: int):

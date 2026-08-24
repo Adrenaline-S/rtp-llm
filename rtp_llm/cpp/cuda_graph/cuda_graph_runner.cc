@@ -66,6 +66,20 @@ bool streamAsyncReplayPrepEnabled() {
     return enabled;
 }
 
+void inheritCacheGroupCommonAttentionInputs(PyModelInputs& inputs) {
+    for (auto& [tag, group_inputs] : inputs.cache_group_attn_inputs) {
+        (void)tag;
+        const auto group_tables                      = group_inputs;
+        group_inputs                                 = inputs.attention_inputs;
+        group_inputs.kv_cache_block_id               = group_tables.kv_cache_block_id;
+        group_inputs.kv_cache_block_id_device        = group_tables.kv_cache_block_id_device;
+        group_inputs.kv_cache_kernel_block_id        = group_tables.kv_cache_kernel_block_id;
+        group_inputs.kv_cache_kernel_block_id_device = group_tables.kv_cache_kernel_block_id_device;
+        group_inputs.pool_valid_lengths              = group_tables.pool_valid_lengths;
+        group_inputs.kernel_valid_lengths            = group_tables.kernel_valid_lengths;
+    }
+}
+
 void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
         return;
@@ -1294,33 +1308,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.kv_cache_block_id_device = torch::zeros({packed_pool_numel}, options_cuda_int32_);
         inputs.attention_inputs.kv_cache_block_id = torch::zeros({packed_pool_numel}, options_cpu_int32_).pin_memory();
 
-        inputs.cache_group_attn_inputs.clear();
-        int64_t pool_offset   = 0;
-        int64_t kernel_offset = 0;
-        for (size_t ordinal = 0; ordinal < kv_cache_block_table_groups_.size(); ++ordinal) {
-            const auto&                  group        = kv_cache_block_table_groups_[ordinal];
-            const int64_t                pool_width   = static_cast<int64_t>(group.pool_row_width);
-            const int64_t                kernel_width = static_cast<int64_t>(group.kernel_row_width);
-            const int64_t                pool_numel   = static_cast<int64_t>(max_bs_) * pool_width;
-            const int64_t                kernel_numel = static_cast<int64_t>(max_bs_) * kernel_width;
-            torch_ext::PyAttentionInputs view;
-            view.kv_cache_block_id = inputs.attention_inputs.kv_cache_block_id.narrow(0, pool_offset, pool_numel)
-                                         .view({int(max_bs_), pool_width});
-            view.kv_cache_block_id_device =
-                inputs.attention_inputs.kv_cache_block_id_device.narrow(0, pool_offset, pool_numel)
-                    .view({int(max_bs_), pool_width});
-            view.kv_cache_kernel_block_id =
-                inputs.attention_inputs.kv_cache_kernel_block_id.narrow(0, kernel_offset, kernel_numel)
-                    .view({int(max_bs_), kernel_width});
-            view.kv_cache_kernel_block_id_device =
-                inputs.attention_inputs.kv_cache_kernel_block_id_device.narrow(0, kernel_offset, kernel_numel)
-                    .view({int(max_bs_), kernel_width});
-            view.pool_valid_lengths   = torch::full({int(max_bs_)}, pool_width, options_cpu_int32_).pin_memory();
-            view.kernel_valid_lengths = torch::full({int(max_bs_)}, kernel_width, options_cpu_int32_).pin_memory();
-            inputs.cache_group_attn_inputs.emplace(group.tag, std::move(view));
-            pool_offset += pool_numel;
-            kernel_offset += kernel_numel;
-        }
     } else {
         // Empty topology still has one representation: four defined,
         // address-stable rank-2 tables with the captured batch capacity and a
@@ -1366,6 +1353,36 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.decode_cu_seqlens_device =
         torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
     inputs.attention_inputs.decode_cu_seqlens = torch::arange(0, max_bs_ + 1, 1, options_cpu_int32_).pin_memory();
+
+    if (!kv_cache_block_table_groups_.empty()) {
+        inputs.cache_group_attn_inputs.clear();
+        int64_t pool_offset   = 0;
+        int64_t kernel_offset = 0;
+        for (size_t ordinal = 0; ordinal < kv_cache_block_table_groups_.size(); ++ordinal) {
+            const auto&                  group        = kv_cache_block_table_groups_[ordinal];
+            const int64_t                pool_width   = static_cast<int64_t>(group.pool_row_width);
+            const int64_t                kernel_width = static_cast<int64_t>(group.kernel_row_width);
+            const int64_t                pool_numel   = static_cast<int64_t>(max_bs_) * pool_width;
+            const int64_t                kernel_numel = static_cast<int64_t>(max_bs_) * kernel_width;
+            torch_ext::PyAttentionInputs view         = inputs.attention_inputs;
+            view.kv_cache_block_id = inputs.attention_inputs.kv_cache_block_id.narrow(0, pool_offset, pool_numel)
+                                         .view({int(max_bs_), pool_width});
+            view.kv_cache_block_id_device =
+                inputs.attention_inputs.kv_cache_block_id_device.narrow(0, pool_offset, pool_numel)
+                    .view({int(max_bs_), pool_width});
+            view.kv_cache_kernel_block_id =
+                inputs.attention_inputs.kv_cache_kernel_block_id.narrow(0, kernel_offset, kernel_numel)
+                    .view({int(max_bs_), kernel_width});
+            view.kv_cache_kernel_block_id_device =
+                inputs.attention_inputs.kv_cache_kernel_block_id_device.narrow(0, kernel_offset, kernel_numel)
+                    .view({int(max_bs_), kernel_width});
+            view.pool_valid_lengths   = torch::full({int(max_bs_)}, pool_width, options_cpu_int32_).pin_memory();
+            view.kernel_valid_lengths = torch::full({int(max_bs_)}, kernel_width, options_cpu_int32_).pin_memory();
+            inputs.cache_group_attn_inputs.emplace(group.tag, std::move(view));
+            pool_offset += pool_numel;
+            kernel_offset += kernel_numel;
+        }
+    }
 }
 
 void CudaGraphRunner::initBlockTableRefreshRegions(GraphInstance& instance) {
@@ -1497,6 +1514,7 @@ void CudaGraphRunner::initCapture() {
         torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
         initKernelInternalMemory();
+        inheritCacheGroupCommonAttentionInputs(capture_mem_hold_.py_model_inputs_);
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
         py::object attn_pyobj;
@@ -1683,7 +1701,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     for (const auto& captured_entry : capture_mem_hold_.py_model_inputs_.cache_group_attn_inputs) {
         const auto&                  tag           = captured_entry.first;
         const auto&                  captured_view = captured_entry.second;
-        torch_ext::PyAttentionInputs view;
+        torch_ext::PyAttentionInputs view          = inputs.attention_inputs;
         view.kv_cache_kernel_block_id_device = captured_view.kv_cache_kernel_block_id_device.narrow(0, 0, batch_size);
         view.kv_cache_kernel_block_id        = captured_view.kv_cache_kernel_block_id.narrow(0, 0, batch_size);
         view.kv_cache_block_id_device        = captured_view.kv_cache_block_id_device.narrow(0, 0, batch_size);
@@ -1697,6 +1715,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.dtype       = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
+    inheritCacheGroupCommonAttentionInputs(inputs);
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {

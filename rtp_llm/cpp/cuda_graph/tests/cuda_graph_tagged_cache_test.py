@@ -19,6 +19,24 @@ class TaggedBlockTableModel:
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        common = inputs.attention_inputs
+        for group_inputs in inputs.cache_group_attn_inputs.values():
+            for field in (
+                "prefix_lengths",
+                "sequence_lengths",
+                "input_lengths",
+                "cu_seqlens",
+                "cu_seqlens_device",
+                "cu_kv_seqlens_device",
+                "padding_offset",
+                "input_lengths_device",
+                "sequence_lengths_plus_1_device",
+                "decode_cu_seqlens_device",
+            ):
+                common_tensor = getattr(common, field)
+                group_tensor = getattr(group_inputs, field)
+                assert group_tensor is not None, field
+                assert group_tensor.data_ptr() == common_tensor.data_ptr()
         return None
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
