@@ -71,7 +71,7 @@ class GptModelBase(nn.Module):
                 f"layer0_scale_groups={layer0_scale_count}, "
             )
             fmha_group_tags = self._get_fmha_group_tags()
-            if fmha_group_tags:
+            if fmha_group_tags is not None:
                 self._fmha_cache_tags = tuple(fmha_group_tags)
             else:
                 seen: dict[str, None] = {}

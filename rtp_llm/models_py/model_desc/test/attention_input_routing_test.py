@@ -131,6 +131,8 @@ class AttentionInputRoutingTest(unittest.TestCase):
         common.sequence_lengths = torch.tensor([5], dtype=torch.int32)
         common.is_prefill = True
         view = _make_group_view(1)
+        common.kv_cache_kernel_block_id = view.kv_cache_kernel_block_id
+        common.kv_cache_kernel_block_id_device = view.kv_cache_kernel_block_id_device
         impl = object.__new__(SparseMlaImpl)
         impl.fmha_params = Mock()
         impl.fmha_impl = Mock()
@@ -150,7 +152,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         )
         impl.fmha_impl.plan.assert_called_once_with(
             impl.fmha_params,
-            view.kv_cache_kernel_block_id_device,
+            common.kv_cache_kernel_block_id_device,
             attn_inputs=common,
         )
 
@@ -227,6 +229,15 @@ class AttentionInputRoutingTest(unittest.TestCase):
         # _fmha_cache_tags iterates ("group1", "group0"), so group1 binds first.
         self.assertIs(result["group1"], factory_impls[0])
         self.assertIs(result["group0"], factory_impls[1])
+
+    def test_initialize_preserves_explicit_empty_fmha_tag_set(self):
+        model = RoutingModel([])
+
+        GptModelBase.initialize(
+            model, SimpleNamespace(kv_cache=FakeKVCache([["linear"]]))
+        )
+
+        self.assertEqual(model._fmha_cache_tags, ())
 
     def test_dsv4_backend_dict_selects_requested_tags(self):
         views = make_group_attn_inputs(["extra", "indexer_kv", "swa_kv"])
@@ -344,15 +355,14 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
-            side_effect=lambda _config, _parallelism_config, _weight, group_inputs, group_view, _fmha_config, _is_cuda_graph: (
-                SimpleNamespace(common=group_inputs, view=group_view)
+            side_effect=lambda _config, _parallelism_config, _weight, group_inputs, _fmha_config, _is_cuda_graph: (
+                SimpleNamespace(common=group_inputs)
             ),
         ) as factory:
             fmha_impl = model.prepare_fmha_impl(inputs, is_cuda_graph=True)
 
         self.assertEqual(set(fmha_impl), {"full"})
         self.assertIs(fmha_impl["full"].common, views["full"])
-        self.assertIsNone(fmha_impl["full"].view)
         factory.assert_called_once()
 
     def test_default_model_prepares_every_tag(self):
@@ -364,8 +374,8 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
-            side_effect=lambda _config, _parallelism_config, _weight, group_inputs, group_view, _fmha_config, _is_cuda_graph: (
-                SimpleNamespace(common=group_inputs, view=group_view)
+            side_effect=lambda _config, _parallelism_config, _weight, group_inputs, _fmha_config, _is_cuda_graph: (
+                SimpleNamespace(common=group_inputs)
             ),
         ) as factory:
             fmha_impl = model.prepare_fmha_impl(inputs)

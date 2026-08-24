@@ -11,6 +11,7 @@ from rtp_llm.ops.compute_ops import (
 )
 
 GROUP_TAGS = ["aux", "full"]
+MIXED_ATTENTION_TAGS = ["full", "linear"]
 HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
 
@@ -50,6 +51,21 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class _FullCudaGraphImpl:
+    def __init__(self, common: PyAttentionInputs, full: PyAttentionInputs) -> None:
+        self.common_input_lengths_ptr = common.input_lengths.data_ptr()
+        self.full_table_ptr = full.kv_cache_kernel_block_id_device.data_ptr()
+
+    def prepare_cuda_graph(self, attention_inputs: PyAttentionInputs) -> None:
+        assert (
+            attention_inputs.input_lengths.data_ptr() == self.common_input_lengths_ptr
+        )
+        assert (
+            attention_inputs.kv_cache_kernel_block_id_device.data_ptr()
+            == self.full_table_ptr
+        )
+
+
 class TaggedSequenceLengthModel:
     """Expose the cumulative lengths used by a tagged captured graph."""
 
@@ -66,6 +82,27 @@ class TaggedSequenceLengthModel:
                 common.prefix_lengths_device.sum(),
             )
         ).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class MixedFullLinearModel:
+    """Hybrid model where only the full cache group owns an FMHA impl."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return {
+            "full": _FullCudaGraphImpl(
+                inputs.attention_inputs, inputs.cache_group_attn_inputs["full"]
+            )
+        }
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        full_id = inputs.cache_group_attn_inputs[
+            "full"
+        ].kv_cache_kernel_block_id_device[0, 0]
+        linear_id = inputs.cache_group_attn_inputs[
+            "linear"
+        ].kv_cache_kernel_block_id_device[0, 0]
+        signature = (full_id + 16 * linear_id).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
@@ -530,6 +567,24 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             oversized.cache_group_attn_inputs["aux"].kv_cache_kernel_block_id.cuda()
         )
         self.assertFalse(runner.canRun(oversized))
+
+    def test_mixed_full_linear_only_prepares_full_fmha_tag(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            MixedFullLinearModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            MIXED_ATTENTION_TAGS,
+        )
+
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(MIXED_ATTENTION_TAGS, {"full": 5, "linear": 3}),
+            53,
+        )
 
     def test_focused_kernel_update_refreshes_heterogeneous_valid_tails(self) -> None:
         runner = CudaGraphRunner()

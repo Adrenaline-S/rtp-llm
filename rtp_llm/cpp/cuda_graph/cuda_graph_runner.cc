@@ -96,19 +96,20 @@ void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     // with this runner's OWN captured per-group attn_inputs by matching tag.
     if (py::isinstance<py::dict>(attn_pyobj)) {
         auto impls = attn_pyobj.cast<py::dict>();
-        for (auto& entry : inputs.cache_group_attn_inputs) {
-            const auto& tag = entry.first;
-            py::str     key(tag);
-            RTP_LLM_CHECK_WITH_INFO(
-                impls.contains(key), "CUDA graph FMHA impl dict has no entry for cache tag=%s", tag.c_str());
-            py::object impl = impls[key];
+        for (auto item : impls) {
+            const auto tag      = py::cast<std::string>(item.first);
+            const auto group_it = inputs.cache_group_attn_inputs.find(tag);
+            RTP_LLM_CHECK_WITH_INFO(group_it != inputs.cache_group_attn_inputs.end(),
+                                    "CUDA graph has no captured attention inputs for FMHA cache tag=%s",
+                                    tag.c_str());
+            py::object impl = py::reinterpret_borrow<py::object>(item.second);
             if (impl.is_none()) {
                 continue;
             }
             RTP_LLM_CHECK_WITH_INFO(py::hasattr(impl, "prepare_cuda_graph"),
                                     "attention implementation for cache tag=%s has no prepare_cuda_graph",
                                     tag.c_str());
-            impl.attr("prepare_cuda_graph")(entry.second);
+            impl.attr("prepare_cuda_graph")(group_it->second);
         }
         return;
     }
