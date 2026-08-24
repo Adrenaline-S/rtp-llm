@@ -74,6 +74,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
     env = {},
+    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(
@@ -109,6 +110,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     env = {},
+    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(
@@ -147,6 +149,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
     env = {},
+    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(

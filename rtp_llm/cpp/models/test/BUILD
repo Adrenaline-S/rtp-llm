@@ -41,6 +41,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
+    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(
@@ -122,4 +123,5 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
+    exec_properties = {"gpu": "H20"},
 )
