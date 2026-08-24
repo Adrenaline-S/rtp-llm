@@ -729,11 +729,7 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         return inputs
 
     def _call_update(self, stub, attn_inputs):
-        stub._refresh_prefill_fmha_params_for_cuda_graph(
-            stub.fmha_params,
-            attn_inputs,
-            attn_inputs.kv_cache_kernel_block_id_device,
-        )
+        stub._refresh_prefill_fmha_params_for_cuda_graph(stub.fmha_params, attn_inputs)
 
     def test_rebuild_from_input_lengths_no_prefix(self):
         """Rebuild cu_seqlens from input_lengths, no prefix."""
@@ -865,7 +861,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         rope_impl = MagicMock()
         observed_pad_query = []
 
-        def prepare_rope(_attn_inputs, _kv_cache_kernel_block_id_device):
+        def prepare_rope(_attn_inputs):
             observed_pad_query.append(rope_impl.pad_query)
             return object()
 
@@ -925,16 +921,12 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
 
                 self.assertEqual(impl.backend, expected_backend)
                 if expected_backend == "triton":
-                    triton_impl.prepare.assert_called_once_with(
-                        impl.attn_inputs, impl.kv_cache_kernel_block_id_device
-                    )
+                    triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
                     batch_impl.prepare.assert_not_called()
                     self.assertIs(impl.triton_fmha_params, triton_params)
                     self.assertIsNone(impl.fmha_params)
                 else:
-                    batch_impl.prepare.assert_called_once_with(
-                        impl.attn_inputs, impl.kv_cache_kernel_block_id_device
-                    )
+                    batch_impl.prepare.assert_called_once_with(impl.attn_inputs)
                     triton_impl.prepare.assert_not_called()
                     self.assertIs(impl.fmha_params, batch_params)
                     self.assertIsNone(impl.triton_fmha_params)
@@ -945,9 +937,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         )
 
         batch_impl.prepare.assert_not_called()
-        triton_impl.prepare.assert_called_once_with(
-            impl.attn_inputs, impl.kv_cache_kernel_block_id_device
-        )
+        triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
         self.assertIs(impl.triton_fmha_params, triton_params)
         self.assertIsNone(impl.fmha_params)
 
@@ -1050,16 +1040,16 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             kv_cache_kernel_block_id_device=block_ids,
         )
 
-        def prepare_batch(params, inputs, _kv_cache_kernel_block_id_device):
+        def prepare_batch(params, inputs):
             calls.append(("prepare_batch", params, inputs))
 
         def prepare_triton(params, inputs):
             calls.append(("prepare_triton", params, inputs))
 
-        def prepare_rope(inputs, _kv_cache_kernel_block_id_device):
+        def prepare_rope(inputs):
             calls.append(("prepare_rope", inputs))
 
-        def refresh(params, inputs, _kv_cache_kernel_block_id_device):
+        def refresh(params, inputs):
             calls.append(("refresh", params, inputs))
 
         stub = AiterPrefillImplPaged.__new__(AiterPrefillImplPaged)
@@ -1247,14 +1237,8 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         # Replay refreshes metadata at the owning implementation layer before
         # the Triton operator derives its compact output indices.
         impl = AiterPrefillImplPaged.__new__(AiterPrefillImplPaged)
-        impl._refresh_prefill_fmha_params_for_cuda_graph(
-            fmha_params, attn_inputs, attn_inputs.kv_cache_kernel_block_id_device
-        )
-        op.prepare_cuda_graph(
-            fmha_params,
-            attn_inputs,
-            attn_inputs.kv_cache_kernel_block_id_device,
-        )
+        impl._refresh_prefill_fmha_params_for_cuda_graph(fmha_params, attn_inputs)
+        op.prepare_cuda_graph(fmha_params, attn_inputs)
 
         self.assertEqual(fmha_params.prefill_seqlen_k_int32.data_ptr(), prefill_ptr)
         self.assertEqual(fmha_params.cu_seqlens_q.cpu().tolist(), [0, 2, 3, 3])
