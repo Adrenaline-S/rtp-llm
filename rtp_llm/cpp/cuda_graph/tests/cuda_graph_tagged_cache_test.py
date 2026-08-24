@@ -504,13 +504,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         self.assertEqual(runner.packed_cache_pointers(), pointers_before)
         captured = [table.cpu() for table in runner.captured_kernel_tables()]
         self.assertEqual(captured[0][0].tolist(), [7, 7, -1, -1, -1, -1])
-        self.assertTrue(
-            torch.equal(captured[0][1:], torch.full_like(captured[0][1:], -1))
-        )
+        self.assertTrue(torch.equal(captured[0][1:], torch.zeros_like(captured[0][1:])))
         self.assertEqual(captured[1][0].tolist(), [11, 11])
-        self.assertTrue(
-            torch.equal(captured[1][1:], torch.full_like(captured[1][1:], -1))
-        )
+        self.assertTrue(torch.equal(captured[1][1:], torch.zeros_like(captured[1][1:])))
 
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int

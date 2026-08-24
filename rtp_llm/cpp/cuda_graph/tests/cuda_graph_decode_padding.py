@@ -146,6 +146,10 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             .view(batch_size, kernel_block_num)
             .pin_memory()
         )
+        assert int(kernel_block_ids.max()) < self.block_nums, (
+            f"projected kernel block id {int(kernel_block_ids.max())} exceeds "
+            f"the allocated range [0, {self.block_nums})"
+        )
 
         # The base attention inputs own packed storage. The tag entry below is
         # the group-local rank-2 alias consumed by attention implementations.

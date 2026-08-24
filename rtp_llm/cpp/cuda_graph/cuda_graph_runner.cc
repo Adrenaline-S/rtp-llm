@@ -350,6 +350,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
 
     // Clear stale device ranges in one launch before copying the live portions.
+    // Reserved block zero keeps graph-padding rows safe for kernels that still
+    // issue a page-table load for a zero-length padded request. Actual-row
+    // column tails are restored to kInvalidBlockId after the live copy below.
 #if USING_CUDA
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
@@ -367,12 +370,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                               dst_inputs.kv_cache_block_id_device,
                                               0,
                                               dst_inputs.kv_cache_block_id_device.numel(),
-                                              kInvalidBlockId);
+                                              0);
                 addCudaGraphPrepareFillRegion(fill_params,
                                               dst_inputs.kv_cache_kernel_block_id_device,
                                               0,
                                               dst_inputs.kv_cache_kernel_block_id_device.numel(),
-                                              kInvalidBlockId);
+                                              0);
             }
         }
         if (is_prefill_cuda_graph_mode_) {
@@ -409,8 +412,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     } else {
         for (auto& entry : py_model_inputs_.cache_group_attn_inputs) {
             auto& dst_inputs = entry.second;
-            dst_inputs.kv_cache_block_id_device.fill_(kInvalidBlockId);
-            dst_inputs.kv_cache_kernel_block_id_device.fill_(kInvalidBlockId);
+            dst_inputs.kv_cache_block_id_device.fill_(0);
+            dst_inputs.kv_cache_kernel_block_id_device.fill_(0);
         }
     }
 #endif
@@ -491,8 +494,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
             if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
-                dst_inputs.kv_cache_block_id.fill_(kInvalidBlockId);
-                dst_inputs.kv_cache_kernel_block_id.fill_(kInvalidBlockId);
+                // Match the device replica: graph-padding rows use reserved
+                // block zero, while clear_host_tails below invalidates only
+                // the unused columns of actual rows.
+                dst_inputs.kv_cache_block_id.fill_(0);
+                dst_inputs.kv_cache_kernel_block_id.fill_(0);
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_block_id_device, dst_inputs.kv_cache_block_id_device);
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
@@ -793,6 +799,11 @@ void CudaGraphRunner::updateKVCacheKernelBlockTableValues(const PyModelInputs& i
                 src_inputs.kv_cache_kernel_block_id_device.defined()
                     && src_inputs.kv_cache_kernel_block_id_device.dim() == 2
                     && src_inputs.kv_cache_kernel_block_id_device.is_contiguous()
+                    && src_inputs.kv_cache_kernel_block_id.defined() && src_inputs.kv_cache_kernel_block_id.dim() == 2
+                    && src_inputs.kv_cache_block_id.defined() && src_inputs.kv_cache_block_id.dim() == 2
+                    && src_inputs.kv_cache_block_id_device.defined() && src_inputs.kv_cache_block_id_device.dim() == 2
+                    && src_inputs.kv_cache_block_id.size(0) == src_inputs.kv_cache_kernel_block_id.size(0)
+                    && src_inputs.kv_cache_block_id_device.size(0) == src_inputs.kv_cache_kernel_block_id_device.size(0)
                     && src_inputs.kv_cache_kernel_block_id_device.size(0)
                            <= dst_inputs.kv_cache_kernel_block_id_device.size(0)
                     && src_inputs.kv_cache_kernel_block_id_device.size(1)
@@ -803,7 +814,10 @@ void CudaGraphRunner::updateKVCacheKernelBlockTableValues(const PyModelInputs& i
                 "invalid kernel valid lengths while refreshing CUDA graph tag=%s",
                 tag.c_str());
 
-            dst_inputs.kv_cache_kernel_block_id.fill_(kInvalidBlockId);
+            // Focused refresh preserves the actual pool rows. Padding rows in
+            // both host tables use reserved block zero; actual kernel-row
+            // tails are changed back to kInvalidBlockId in the loop below.
+            dst_inputs.kv_cache_kernel_block_id.fill_(0);
             dst_inputs.kernel_valid_lengths.zero_();
             const auto  row_count             = static_cast<size_t>(src_inputs.kv_cache_kernel_block_id.size(0));
             const auto  row_width             = static_cast<size_t>(src_inputs.kv_cache_kernel_block_id.size(1));
@@ -812,6 +826,15 @@ void CudaGraphRunner::updateKVCacheKernelBlockTableValues(const PyModelInputs& i
             const auto* src_host              = src_inputs.kv_cache_kernel_block_id.data_ptr<int32_t>();
             auto*       dst_host              = dst_inputs.kv_cache_kernel_block_id.data_ptr<int32_t>();
             auto*       dst_valid             = dst_inputs.kernel_valid_lengths.data_ptr<int32_t>();
+            RTP_LLM_CHECK_WITH_INFO(row_count <= static_cast<size_t>(dst_inputs.kv_cache_block_id.size(0))
+                                        && row_count
+                                               <= static_cast<size_t>(dst_inputs.kv_cache_block_id_device.size(0)),
+                                    "CUDA graph pool padding row count exceeds captured tag=%s capacity",
+                                    tag.c_str());
+            auto* pool_host = dst_inputs.kv_cache_block_id.data_ptr<int32_t>();
+            std::fill(pool_host + row_count * dst_inputs.kv_cache_block_id.size(1),
+                      pool_host + dst_inputs.kv_cache_block_id.numel(),
+                      0);
             for (size_t row = 0; row < row_count; ++row) {
                 const int32_t valid = valid_lengths[row];
                 RTP_LLM_CHECK_WITH_INFO(valid >= 0 && static_cast<size_t>(valid) <= row_width,
@@ -836,10 +859,10 @@ void CudaGraphRunner::updateKVCacheKernelBlockTableValues(const PyModelInputs& i
                                     tag.c_str());
             region.row_bytes = row_width * sizeof(int32_t);
 
-            // Clear the fixed-capacity replica first. The strided copy below
-            // refreshes actual rows; the tail pass then restores NULL beyond
-            // every per-row valid length even if the source carried stale data.
-            dst_inputs.kv_cache_kernel_block_id_device.fill_(kInvalidBlockId);
+            // Start with reserved block zero so graph-padding rows remain safe.
+            // The strided copy refreshes actual rows, and the tail pass below
+            // restores NULL beyond each actual row's published valid length.
+            dst_inputs.kv_cache_kernel_block_id_device.fill_(0);
             if (region.row_count != 0) {
                 strided_d2d_copies.add(region.source,
                                        region.destination,
@@ -876,6 +899,33 @@ void CudaGraphRunner::updateKVCacheKernelBlockTableValues(const PyModelInputs& i
             const int64_t source_width = src_inputs.kv_cache_kernel_block_id_device.size(1);
             const int64_t width        = dst_inputs.kv_cache_kernel_block_id_device.size(1);
             auto*         base         = dst_inputs.kv_cache_kernel_block_id_device.data_ptr<int32_t>();
+#if USING_CUDA
+            if (rows < dst_inputs.kv_cache_block_id_device.size(0)) {
+                if (tail_fills.region_count == kMaxCudaGraphPrepareFillRegions) {
+                    flush_tail_fills();
+                }
+                auto& fill = tail_fills.regions[tail_fills.region_count++];
+                fill.ptr   = dst_inputs.kv_cache_block_id_device.data_ptr<int32_t>()
+                           + rows * dst_inputs.kv_cache_block_id_device.size(1);
+                fill.count =
+                    (dst_inputs.kv_cache_block_id_device.size(0) - rows) * dst_inputs.kv_cache_block_id_device.size(1);
+                fill.value = 0;
+            }
+#else
+            if (rows < dst_inputs.kv_cache_block_id_device.size(0)) {
+                auto* pool_padding = dst_inputs.kv_cache_block_id_device.data_ptr<int32_t>()
+                                     + rows * dst_inputs.kv_cache_block_id_device.size(1);
+                const auto pool_padding_count =
+                    (dst_inputs.kv_cache_block_id_device.size(0) - rows) * dst_inputs.kv_cache_block_id_device.size(1);
+                auto result = hipMemsetAsync(pool_padding,
+                                             0,
+                                             static_cast<size_t>(pool_padding_count) * sizeof(int32_t),
+                                             cuda_graph::graphGetCurrentStream().stream());
+                RTP_LLM_CHECK_WITH_INFO(result == hipSuccess,
+                                        "hipMemsetAsync failed while clearing CUDA graph pool padding rows: %s",
+                                        hipGetErrorString(result));
+            }
+#endif
             for (int64_t row = 0; row < rows; ++row) {
                 const int64_t valid = lengths[row];
                 RTP_LLM_CHECK_WITH_INFO(valid <= source_width, "kernel valid length exceeds source width");
