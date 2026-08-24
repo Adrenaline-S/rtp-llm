@@ -116,15 +116,11 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
         kLayerNum, kBlockNum, seq_size_per_block, seq_size_per_block, dtype);
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    auto cache_config = builder
-                            .setSharedPoolStorage(k_block_stride_bytes + v_block_stride_bytes,
-                                                  k_scale_stride_bytes + v_scale_stride_bytes,
-                                                  0)
-                            .setGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"})
+    auto cache_config = builder.setGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"})
                             .setGroupLocalKVHeadNums({test_spec->local_kv_head_num})
                             .build();
 
-    return BlockPoolConfigHelper::createConfig(cache_config);
+    return BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
 }
 
 inline void createDevice() {

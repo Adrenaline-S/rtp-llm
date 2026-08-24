@@ -88,7 +88,6 @@ class CacheStoreAsyncWriterTest: public ::testing::Test {};
 static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride) {
     auto builder = test::TestCacheConfigBuilder::makeBase(
         /*layer_count=*/1, /*block_count=*/1, /*cache_key_tokens=*/1, /*kernel_tokens=*/1, DataType::TYPE_UINT8);
-    builder.setSharedPoolStorage(kv_stride, 0, kv_stride);
 
     auto spec = test::makeResolvedOpaqueSpec(false, tag, DataType::TYPE_UINT8, kv_stride, 1);
 
@@ -101,7 +100,7 @@ static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_s
     group.seq_size_per_block        = 1;
     group.kernel_seq_size_per_block = 1;
 
-    return std::move(builder).setTopology({std::move(group)}, {{tag}}).build();
+    return std::move(builder).setTopology({std::move(group)}, {{tag}}).finalizeGroupGeometryFromSpecs().build();
 }
 
 TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {

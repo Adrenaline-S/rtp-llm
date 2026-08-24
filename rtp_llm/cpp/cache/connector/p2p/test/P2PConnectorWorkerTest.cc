@@ -65,19 +65,18 @@ public:
 
 CacheConfig makeRealDsv4P2PCacheConfig() {
     ModelConfig model_config;
-    model_config.num_layers                                                = 43;
-    model_config.hidden_size                                               = 4096;
-    model_config.attn_config.head_num                                      = 64;
-    model_config.attn_config.kv_head_num                                   = 1;
-    model_config.attn_config.size_per_head                                 = 512;
-    model_config.attn_config.rope_head_dim                                 = 64;
-    model_config.attn_config.indexer_head_dim                              = 128;
-    model_config.attn_config.indexer_head_num                              = 64;
-    model_config.attn_config.indexer_topk                                  = 512;
-    model_config.attn_config.tokens_per_block                              = 128;
-    model_config.hybrid_attention_config.enable_hybrid_attention           = true;
-    model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    std::vector<int> ratios                                                = {0, 0};
+    model_config.num_layers                                      = 43;
+    model_config.hidden_size                                     = 4096;
+    model_config.attn_config.head_num                            = 64;
+    model_config.attn_config.kv_head_num                         = 1;
+    model_config.attn_config.size_per_head                       = 512;
+    model_config.attn_config.rope_head_dim                       = 64;
+    model_config.attn_config.indexer_head_dim                    = 128;
+    model_config.attn_config.indexer_head_num                    = 64;
+    model_config.attn_config.indexer_topk                        = 512;
+    model_config.attn_config.tokens_per_block                    = 128;
+    model_config.hybrid_attention_config.enable_hybrid_attention = true;
+    std::vector<int> ratios                                      = {0, 0};
     for (int layer_id = 2; layer_id < model_config.num_layers; ++layer_id) {
         ratios.push_back(layer_id % 2 == 0 ? 4 : 128);
     }
@@ -569,8 +568,9 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayerUsesTaggedFullAndCompactSwaPoliciesFo
     full.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
 
     CacheGroup swa;
-    swa.tag                       = "group1";
-    swa.spec                      = std::make_shared<MHAKVCacheSpec>();
+    swa.tag  = "group1";
+    swa.spec = makeResolvedOpaqueSpec(
+        /*state_cache=*/true, "group1", DataType::TYPE_FP16, /*block_bytes=*/64, /*seq_size_per_block=*/32);
     swa.layer_ids                 = {0, 1};
     swa.seq_size_per_block        = 32;
     swa.kernel_seq_size_per_block = 8;
@@ -1534,8 +1534,9 @@ TEST_F(LayerCacheBufferUtilTest, FullRoundRobinUsesGlobalKeyOrdinalsWithDifferen
 TEST_F(LayerCacheBufferUtilTest, CompactSwaUsesConfigurableTailAndTransientPhysicalOrdinal) {
     auto       builder = TestCacheConfigBuilder::makeBase(1, 0, 8, 8, DataType::TYPE_FP16);
     CacheGroup swa;
-    swa.tag                       = "swa";
-    swa.spec                      = std::make_shared<MHAKVCacheSpec>();
+    swa.tag  = "swa";
+    swa.spec = makeResolvedOpaqueSpec(
+        /*state_cache=*/true, "swa", DataType::TYPE_FP16, /*block_bytes=*/64, /*seq_size_per_block=*/32);
     swa.layer_ids                 = {0};
     swa.seq_size_per_block        = 32;
     swa.kernel_seq_size_per_block = 8;

@@ -28,10 +28,10 @@ bool operator==(const GroupPolicy::SpecInfo& lhs, const GroupPolicy::SpecInfo& r
 namespace test {
 namespace {
 
-KVCacheSpecPtr makeTestMhaSpec(const std::string& tag, uint32_t seq_size_per_block) {
+KVCacheSpecPtr makeTestMhaSpec(const std::string& tag, uint32_t seq_size_per_block, uint32_t size_per_head = 128) {
     AttentionConfigs attn_config;
     attn_config.kv_head_num      = 8;
-    attn_config.size_per_head    = 128;
+    attn_config.size_per_head    = size_per_head;
     attn_config.tokens_per_block = seq_size_per_block;
 
     ParallelismConfig parallelism_config;
@@ -88,8 +88,14 @@ CacheConfig makeRemoteValidationConfig(const std::vector<CacheGroupType>& group_
                             group_types.size());
     for (size_t declared = 0; declared < group_types.size(); ++declared) {
         const auto tag = group_tags.empty() ? "group" + std::to_string(declared) : group_tags[declared];
-        specs.push_back(group_types[declared] == CacheGroupType::LINEAR ? makeTestLinearSpec(tag, 8) :
-                                                                          makeTestMhaSpec(tag, 8));
+        if (group_types[declared] == CacheGroupType::LINEAR) {
+            specs.push_back(makeTestLinearSpec(tag, 8));
+        } else if (group_types[declared] == CacheGroupType::SWA) {
+            specs.push_back(makeResolvedOpaqueSpec(
+                /*state_cache=*/true, tag, DataType::TYPE_FP16, /*block_bytes=*/16, /*seq_size_per_block=*/8));
+        } else {
+            specs.push_back(makeTestMhaSpec(tag, 8));
+        }
         layers_by_group.push_back({static_cast<int>(declared)});
         tags.push_back(tag);
     }
@@ -244,7 +250,6 @@ public:
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
         cache_config_ = std::move(builder)
-                            .setSharedPoolStorage(mha_spec->block_size_bytes(), 0, byte_size_per_block_)
                             .setGroupedSpecs({mha_spec}, {layers}, {CacheGroupType::FULL}, {"0"})
                             .setGroupBlockLayout({8}, {mha_spec->block_size_bytes()}, {0})
                             .build();
@@ -311,6 +316,33 @@ TEST_F(RemoteConnectorInternalTest, PublishesFullGroupBlockSizeFromTopology) {
     EXPECT_EQ(spec_groups->at("F0"), (std::vector<std::string>{"tp0_F0"}));
 }
 
+TEST_F(RemoteConnectorInternalTest, PublishesComposedMtpBlockSizeUsingEachModuleStride) {
+    auto main_spec = makeTestMhaSpec("0", /*seq_size_per_block=*/8, /*size_per_head=*/128);
+    auto main      = TestCacheConfigBuilder::makeBase(/*layer_num=*/1, /*block_num=*/8, 8, 8, DataType::TYPE_FP16)
+                    .setMainLayerCount(1)
+                    .setGroupedSpecs({main_spec}, {{0}}, {CacheGroupType::FULL}, {"0"})
+                    .finalizeGroupGeometryFromSpecs()
+                    .build();
+    auto draft_spec = makeTestMhaSpec("0", /*seq_size_per_block=*/8, /*size_per_head=*/64);
+    auto draft      = TestCacheConfigBuilder::makeBase(/*layer_num=*/1, /*block_num=*/8, 8, 8, DataType::TYPE_FP16)
+                     .setMainLayerCount(1)
+                     .setGroupedSpecs({draft_spec}, {{0}}, {CacheGroupType::FULL}, {"0"})
+                     .finalizeGroupGeometryFromSpecs()
+                     .build();
+    main = TestCacheConfigBuilder::rebuildForTest(std::move(main))
+               .addComposedMTPModule(draft, /*module_index=*/0, /*main_layer_num=*/1)
+               .build();
+
+    ASSERT_NE(main_spec->block_size_bytes(), draft_spec->block_size_bytes());
+    auto allocator = std::make_shared<FakeCoordinatorCacheManager>(main);
+    auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(
+        main, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
+    ASSERT_TRUE(connector->group_policy_->init());
+    auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(/*tp_size=*/1);
+    EXPECT_EQ(spec_info_map->at("tp0_F0"), main.blockSizeBytes("0"));
+    EXPECT_EQ(spec_groups->at("F0"), (std::vector<std::string>{"tp0_F0"}));
+}
+
 TEST_F(RemoteConnectorInternalTest, FullLinearPolicyInitializationScalesLinearlyWithoutProductionConnector) {
     constexpr size_t linear_group_count = 19;
     constexpr size_t group_count        = linear_group_count + 1;
@@ -340,7 +372,6 @@ TEST_F(RemoteConnectorInternalTest, FullLinearPolicyInitializationScalesLinearly
         scale_strides.push_back(spec->scale_block_size_bytes());
     }
     auto config = std::move(builder)
-                      .setSharedPoolStorage(full_spec->block_size_bytes(), 0, full_spec->block_size_bytes())
                       .setGroupedSpecs(specs, layer_ids, group_types, group_tags)
                       .setGroupBlockLayout(std::vector<uint32_t>(group_count, 8), kv_strides, scale_strides)
                       .build();

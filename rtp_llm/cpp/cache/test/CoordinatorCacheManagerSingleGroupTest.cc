@@ -70,13 +70,13 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    return rtp_llm::CacheConfigCreator::createRankLocalSpeculativeConfig(score_model_config,
-                                                                         propose_model_config,
-                                                                         parallelism_config,
-                                                                         runtime_config,
-                                                                         kv_cache_config,
-                                                                         sp_config,
-                                                                         /*warm_up_result=*/std::nullopt);
+    return rtp_llm::test::createTestSpeculativeCacheConfig(score_model_config,
+                                                           propose_model_config,
+                                                           parallelism_config,
+                                                           runtime_config,
+                                                           kv_cache_config,
+                                                           sp_config,
+                                                           /*warm_up_result=*/std::nullopt);
 }
 
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
@@ -635,12 +635,11 @@ TEST_F(CoordinatorCacheManagerSingleGroupTest, SingleLayerMtpConfigSlicesDescrip
 }
 
 TEST_F(CoordinatorCacheManagerSingleGroupTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
-    auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    config.hybrid_attention_config.hybrid_attention_types            = {};
-    auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
-    second_desc.tag                                                  = "layer1_state";
+    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {};
+    auto second_desc                                       = config.kv_cache_spec_descs[1][0];
+    second_desc.tag                                        = "layer1_state";
     config.kv_cache_spec_descs[1].push_back(second_desc);
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
@@ -652,12 +651,17 @@ TEST_F(CoordinatorCacheManagerSingleGroupTest, SingleLayerMtpConfigSupportsDescr
     EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
 }
 
-TEST_F(CoordinatorCacheManagerSingleGroupTest, SingleLayerMtpConfigRejectsLegacyHybridWithoutAttentionTypes) {
+TEST_F(CoordinatorCacheManagerSingleGroupTest, SingleLayerMtpConfigUsesDescriptorWithoutAttentionTypes) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {};
 
-    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/0), std::runtime_error);
+    const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/0);
+    ASSERT_EQ(single_layer.kv_cache_spec_descs.size(), 1u);
+    ASSERT_EQ(single_layer.kv_cache_spec_descs[0].size(), 1u);
+    EXPECT_EQ(single_layer.kv_cache_spec_descs[0][0].tag, config.kv_cache_spec_descs[0][0].tag);
+    EXPECT_EQ(single_layer.kv_cache_spec_descs[0][0].cache_type, config.kv_cache_spec_descs[0][0].cache_type);
+    EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
 }
 
 TEST_F(CoordinatorCacheManagerSingleGroupTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
@@ -923,13 +927,12 @@ TEST_F(CoordinatorCacheManagerSingleGroupTest, BlockBatchCopyCopiesCompleteSpars
     config      = TestCacheConfigBuilder::rebuildForTest(std::move(config)).setProjectedBlockCountBasis(4).build();
 
     ASSERT_TRUE(config.isSparse());
-    ASSERT_GT(config.sharedPoolKvScaleStrideBytes(), 0u);
-    ASSERT_EQ(config.sharedPoolKvScaleStrideBytes(), config.group("default").kv_scale_stride_bytes);
+    ASSERT_GT(config.group("default").kv_scale_stride_bytes, 0u);
 
     coordinator_cache_manager_ = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(coordinator_cache_manager_->init());
 
-    const auto stride   = config.sharedPoolKvScaleStrideBytes();
+    const auto stride   = config.group("default").kv_scale_stride_bytes;
     auto       snapshot = [&]() {
         std::vector<std::vector<uint8_t>> blocks(config.blockCountBasis(), std::vector<uint8_t>(stride));
         for (uint32_t block = 0; block < config.blockCountBasis(); ++block) {

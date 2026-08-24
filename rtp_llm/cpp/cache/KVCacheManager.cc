@@ -49,28 +49,42 @@ void validateRemoteCacheConfigBeforeAllocation(const CacheConfig& cache_config) 
                             static_cast<size_t>(full_group_num));
 }
 
-void validateSharedPoolTopologyBeforeAllocation(const CacheConfig& cache_config) {
-    if (cache_config.usesIndependentBlockPools()) {
-        return;
+void validateCacheGroupTopologyBeforeAllocation(const CacheConfig& cache_config) {
+    std::unordered_set<std::string> group_tags;
+    for (const auto& group : cache_config.groups()) {
+        RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "cache group tag must not be empty");
+        RTP_LLM_CHECK_WITH_INFO(
+            group_tags.emplace(group.tag).second, "duplicate cache group tag=%s", group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache group tag=%s has null spec", group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(!group.layer_ids.empty(), "cache group tag=%s has no layers", group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache group tag=%s has no executable blocks", group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::FULL
+                                    || group.policy.group_type == CacheGroupType::SWA
+                                    || group.policy.group_type == CacheGroupType::LINEAR,
+                                "cache group tag=%s has unsupported policy type=%d",
+                                group.tag.c_str(),
+                                static_cast<int>(group.policy.group_type));
+        for (const auto layer_id : group.layer_ids) {
+            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < cache_config.layerCount(),
+                                    "cache group tag=%s references invalid layer=%d",
+                                    group.tag.c_str(),
+                                    layer_id);
+            const auto& tags = cache_config.groupTagsForLayer(layer_id);
+            RTP_LLM_CHECK_WITH_INFO(std::find(tags.begin(), tags.end(), group.tag) != tags.end(),
+                                    "cache group tag=%s layer=%d is missing the reverse binding",
+                                    group.tag.c_str(),
+                                    layer_id);
+        }
     }
 
-    const auto is_full_attention = [](const CacheGroup& group) {
-        return group.policy.group_type == CacheGroupType::FULL && group.spec
-               && (group.spec->type == KVCacheSpecType::MultiHeadAttention
-                   || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
-    };
-    if (cache_config.groupNums() == 1) {
-        const auto& group = cache_config.groups().front();
-        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "sole cache group tag=%s has null spec", group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(is_full_attention(group),
-                                "CoordinatorCacheManager requires one FULL MHA/MLA cache group");
-        return;
+    for (size_t layer_id = 0; layer_id < cache_config.layerCount(); ++layer_id) {
+        const auto& tags = cache_config.groupTagsForLayer(static_cast<int>(layer_id));
+        RTP_LLM_CHECK_WITH_INFO(!tags.empty(), "cache layer=%zu has no group binding", layer_id);
+        for (const auto& tag : tags) {
+            RTP_LLM_CHECK_WITH_INFO(
+                group_tags.count(tag) != 0, "cache layer=%zu references unknown group tag=%s", layer_id, tag.c_str());
+        }
     }
-
-    const bool has_full_attention =
-        std::any_of(cache_config.groups().begin(), cache_config.groups().end(), is_full_attention);
-    RTP_LLM_CHECK_WITH_INFO(has_full_attention,
-                            "CoordinatorCacheManager requires at least one FULL MHA/MLA cache group");
 }
 
 GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const CoordinatorCacheManagerPtr& coordinator_cache_manager) {
@@ -164,6 +178,9 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
+    RTP_LLM_CHECK_WITH_INFO(config_.blockCountBasis() > 0,
+                            "KVCacheManager requires a capacity-resolved config, got basis=%u",
+                            config_.blockCountBasis());
     if (warmup) {
         RTP_LLM_CHECK_WITH_INFO(config_.blockCountBasis() == 1,
                                 "warmup KVCacheManager requires a sealed one-block config, got basis=%u",
@@ -239,7 +256,7 @@ bool KVCacheManager::init() {
 
     coordinator_cache_manager_->setCPSlotMapper(cp_slot_mapper_);
     coordinator_cache_manager_->setSharedBlockCache(shared_cache);
-    validateSharedPoolTopologyBeforeAllocation(config_);
+    validateCacheGroupTopologyBeforeAllocation(config_);
     RTP_LLM_CHECK_WITH_INFO(coordinator_cache_manager_->init(), "CoordinatorCacheManager init failed");
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
                                               coordinator_cache_manager_->independentEvictionGroupTags());
@@ -645,7 +662,7 @@ void KVCacheManager::allocateAndSync() {
             global_block_count = *std::min_element(block_num_ptr, block_num_ptr + world_size);
         }
     }
-    config_ = CacheConfigCreator::withRankSynchronizedBlockCountBasis(config_, global_block_count);
+    config_ = CacheConfigCreator::withRankSyncBlockCount(config_, global_block_count);
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.blockCountBasis());
 }
 

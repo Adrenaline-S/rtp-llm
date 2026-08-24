@@ -205,12 +205,10 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     RTP_LLM_CHECK_WITH_INFO(!group_policy_->groups().empty(), "remote connector requires at least one cache group");
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     for (const auto& entry : group_policy_->groups()) {
-        const auto& cache_tag    = entry.first;
-        const auto& config_group = init_params_->cache_config.group(cache_tag);
-        const auto  group_block_size =
-            config_group.layer_ids.size() * (config_group.kv_block_stride_bytes + config_group.kv_scale_stride_bytes);
-        const auto& group    = entry.second;
-        auto [iter, success] = location_spec_groups_ptr->insert({group.group_name, {}});
+        const auto& cache_tag        = entry.first;
+        const auto  group_block_size = init_params_->cache_config.blockSizeBytes(cache_tag);
+        const auto& group            = entry.second;
+        auto [iter, success]         = location_spec_groups_ptr->insert({group.group_name, {}});
         assert(success);
         group_policy_->addLocationSpecGroup(group.group_name_bithash, group.group_name);
         for (int r = 0; r < tp_size; ++r) {

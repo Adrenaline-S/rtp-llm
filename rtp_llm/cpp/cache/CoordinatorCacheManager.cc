@@ -25,6 +25,14 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool usesSingleFullAttentionContract(const CacheConfig& config, const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+    return !(cp_mapper && cp_mapper->isSharded()) && config.usesSingleFullAttentionContract();
+}
+
+}  // namespace
+
 bool CoordinatorCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
@@ -1330,16 +1338,9 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     std::map<std::string, size_t>              original_sizes;
     std::map<std::string, std::vector<size_t>> backfilled_positions;
 
-    const CacheGroup* sole_full_group =
-        (config_.groupNums() == 1 && full_group_tags_.size() == 1) ? &config_.group(full_group_tags_.front()) : nullptr;
-    const auto sole_spec                   = sole_full_group != nullptr ? sole_full_group->spec : nullptr;
-    const bool ordinary_single_full_compat = !config_.usesIndependentBlockPools()
-                                             && !(cp_mapper && cp_mapper->isSharded()) && sole_full_group != nullptr
-                                             && sole_full_group->policy.group_type == CacheGroupType::FULL && sole_spec
-                                             && (sole_spec->type == KVCacheSpecType::MultiHeadAttention
-                                                 || sole_spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+    const bool single_full_attention_contract = usesSingleFullAttentionContract(config_, cp_mapper);
     const bool match_device_cache =
-        malloc_info.enable_device_cache && (!ordinary_single_full_compat || reuse_group->prefixReuseEnabled());
+        malloc_info.enable_device_cache && (!single_full_attention_contract || reuse_group->prefixReuseEnabled());
     if (match_device_cache) {
         // CP-sharded: subsample to last-rank canonical key namespace before matching.
         CacheKeysType cp_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
@@ -1515,15 +1516,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     const bool  cp_active  = cp_mapper && cp_mapper->isSharded();
     const int   batch_size = kv_cache_resource->batchSize();
 
-    const CacheGroup* sole_full_group =
-        (config_.groupNums() == 1 && full_group_tags_.size() == 1) ? &config_.group(full_group_tags_.front()) : nullptr;
-    const auto sole_spec                   = sole_full_group != nullptr ? sole_full_group->spec : nullptr;
-    const bool legacy_ordinary_single_full = !config_.usesIndependentBlockPools() && !cp_active
-                                             && sole_full_group != nullptr
-                                             && sole_full_group->policy.group_type == CacheGroupType::FULL && sole_spec
-                                             && (sole_spec->type == KVCacheSpecType::MultiHeadAttention
-                                                 || sole_spec->type == KVCacheSpecType::MultiHeadLatentAttention);
-    if (legacy_ordinary_single_full) {
+    if (usesSingleFullAttentionContract(config_, cp_mapper)) {
         if (!single_type_cache_managers_[0]->prefixReuseEnabled() || batch_size == 0) {
             return;
         }

@@ -54,6 +54,7 @@ cc_library(
     ],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:model_config",
@@ -348,6 +349,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

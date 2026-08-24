@@ -81,18 +81,21 @@ CacheConfig makeCpFullPlusSwaCacheConfig(bool cp_compact_swa_group, size_t cp_si
     auto builder = TestCacheConfigBuilder::makeBase(
         /*layer_count=*/2, /*block_count=*/10, full_tokens_per_block, full_tokens_per_block, rtp_llm::TYPE_FP16);
 
-    // The projection under test keys off the group policy, not off the spec type,
-    // so a plain MHA spec is enough for both groups.
-    auto full_spec = makeMhaSpec(/*tag=*/"full_kv",
+    auto full_spec  = makeMhaSpec(/*tag=*/"full_kv",
                                  full_tokens_per_block,
                                  rtp_llm::TYPE_FP16,
                                  /*local_head_num_kv=*/1,
                                  /*size_per_head=*/128);
-    auto swa_spec  = makeMhaSpec(/*tag=*/"swa_kv",
-                                swa_tokens_per_block,
-                                rtp_llm::TYPE_FP16,
-                                /*local_head_num_kv=*/1,
-                                /*size_per_head=*/128);
+    auto swa_layout = makeMhaSpec(/*tag=*/"swa_layout",
+                                  swa_tokens_per_block,
+                                  rtp_llm::TYPE_FP16,
+                                  /*local_head_num_kv=*/1,
+                                  /*size_per_head=*/128);
+    auto swa_spec   = makeResolvedOpaqueSpec(/*state_cache=*/true,
+                                           "swa_kv",
+                                           rtp_llm::TYPE_FP16,
+                                           swa_layout->block_size_bytes(),
+                                           static_cast<uint32_t>(swa_tokens_per_block));
 
     auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
     auto swa_policy  = defaultCacheGroupPolicy(CacheGroupType::SWA);
@@ -106,10 +109,7 @@ CacheConfig makeCpFullPlusSwaCacheConfig(bool cp_compact_swa_group, size_t cp_si
                          {CacheGroupType::FULL, CacheGroupType::SWA},
                          /*tags=*/{"full_kv", "swa_kv"},
                          /*policies=*/{full_policy, swa_policy})
-        .setSharedPoolStorage(full_spec->block_size_bytes(),
-                              full_spec->scale_block_size_bytes(),
-                              /*budget=*/2 * (full_spec->block_size_bytes() + full_spec->scale_block_size_bytes()))
-        .setSharedPoolLayoutLayerCount(2)
+        .finalizeGroupGeometryFromSpecs()
         .build();
 }
 

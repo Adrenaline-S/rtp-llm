@@ -480,8 +480,6 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         model_input.mm_features_locs = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
     }
 
-    model_input.kv_block_stride_bytes     = config_.block_stride_bytes;
-    model_input.kv_scale_stride_bytes     = config_.scale_stride_bytes;
     model_input.seq_size_per_block        = config_.seq_size_per_block;
     model_input.kernel_seq_size_per_block = config_.kernel_seq_size_per_block;
     model_input.pd_separation             = config_.role_type == RoleType::PREFILL;

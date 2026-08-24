@@ -83,8 +83,7 @@ struct GroupSpec {
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     auto builder = TestCacheConfigBuilder::makeBase(
         1, kPhysicalBlocks, groups.front().tokens_per_block, groups.front().tokens_per_block, DataType::TYPE_INT8);
-    builder.setUsesIndependentBlockPools(true).setUsesOpaqueKVCacheStore(true).setSharedPoolStorage(
-        groups.front().stride_bytes, 0, groups.front().stride_bytes);
+    builder.setUsesOpaqueKVCacheStore(true);
 
     std::vector<CacheGroup>  topology_groups;
     std::vector<std::string> layer_tags;
@@ -318,8 +317,7 @@ GptModelInputs makeInputs(const CacheConfig&          cache_config,
                           const std::vector<int32_t>& block_ids,
                           size_t                      group_count,
                           size_t                      block_table_width,
-                          size_t                      global_tokens_per_block,
-                          size_t                      global_stride_bytes) {
+                          size_t                      global_tokens_per_block) {
     const size_t batch_size = input_lengths.size();
     const size_t token_count =
         static_cast<size_t>(std::accumulate(input_lengths.begin(), input_lengths.end(), int32_t{0}));
@@ -410,8 +408,6 @@ GptModelInputs makeInputs(const CacheConfig&          cache_config,
         pinnedLongTensor(cache_keys, {static_cast<int64_t>(batch_size), static_cast<int64_t>(cache_keys_width)});
     inputs.seq_size_per_block        = global_tokens_per_block;
     inputs.kernel_seq_size_per_block = global_tokens_per_block;
-    inputs.kv_block_stride_bytes     = global_stride_bytes;
-    inputs.kv_scale_stride_bytes     = 0;
     inputs.pd_separation             = true;
     inputs.use_opaque_kv_cache_store = true;
     return inputs;
@@ -493,8 +489,7 @@ Scenario makeMultiTagScenario(bool declare_in_sorted_order) {
                              /*block_ids=*/{1, 2, -1, -1, 3, 4, 5, 6},
                              /*group_count=*/2,
                              /*block_table_width=*/4,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/24);
+                             /*global_tokens_per_block=*/2);
     inputs.kv_cache_group_types =
         pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::LINEAR)}, {2});
     return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
@@ -513,8 +508,7 @@ Scenario makeKernelUpdateScenario() {
                    /*block_ids=*/{1, 2, -1, -1, 3, -1, -1, -1, 4, 5, -1, -1, 1, 2, 3, 4, 5, 6, -1, -1, 7, -1, -1, -1},
                    /*group_count=*/2,
                    /*block_table_width=*/4,
-                   /*global_tokens_per_block=*/2,
-                   /*global_stride_bytes=*/24);
+                   /*global_tokens_per_block=*/2);
     inputs.kv_cache_group_types =
         pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::LINEAR)}, {2});
     return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
@@ -531,8 +525,7 @@ Scenario makeMicroBatchScenario() {
                              /*block_ids=*/{1, -1, 2, 3, 4, -1},
                              /*group_count=*/1,
                              /*block_table_width=*/2,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/16);
+                             /*global_tokens_per_block=*/2);
     inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
@@ -550,8 +543,7 @@ Scenario makeContextParallelScenario() {
                              /*block_ids=*/{1, 2, 3},
                              /*group_count=*/1,
                              /*block_table_width=*/3,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/16);
+                             /*global_tokens_per_block=*/2);
     inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.parallelism.tp_size                            = 2;
@@ -573,8 +565,7 @@ Scenario makeTpNonRootSingleTagScenario() {
                              /*block_ids=*/{1, 2},
                              /*group_count=*/1,
                              /*block_table_width=*/2,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/16);
+                             /*global_tokens_per_block=*/2);
     // This is the documented post-tpSyncModelInputs non-root state: the packed
     // plan carries tag identity together with tensor geometry.
     inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
@@ -606,8 +597,7 @@ Scenario makeMtpScenario() {
                              /*block_ids=*/{1, 2},
                              /*group_count=*/1,
                              /*block_table_width=*/2,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/32);
+                             /*global_tokens_per_block=*/2);
     main_config       = test::TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
                       .setMTPModules({std::move(draft_config)})
                       .build();
@@ -1028,8 +1018,7 @@ py::dict runLargeTailUpdateLifecycle(py::object py_model) {
                              block_ids,
                              /*group_count=*/1,
                              /*block_table_width=*/2,
-                             /*global_tokens_per_block=*/1,
-                             /*global_stride_bytes=*/16);
+                             /*global_tokens_per_block=*/1);
     inputs.pd_separation = false;
 
     Weights weights;

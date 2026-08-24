@@ -85,9 +85,6 @@ class HybridKVCacheSpecTest(TestCase):
 
         BaseModel._post_build_model_config(config)
 
-        self.assertTrue(
-            config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
         self.assertEqual(len(config.kv_cache_spec_descs), 2)
         for layer_descs in config.kv_cache_spec_descs:
             self.assertEqual(
@@ -119,9 +116,6 @@ class HybridKVCacheSpecTest(TestCase):
 
         BaseModel._post_build_model_config(config)
 
-        self.assertTrue(
-            config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
         for layer_descs in config.kv_cache_spec_descs:
             self.assertEqual(
                 [desc.tag for desc in layer_descs], ["default", "indexer_kv"]
@@ -159,12 +153,6 @@ class HybridKVCacheSpecTest(TestCase):
         BaseModel._post_build_model_config(target)
         DeepSeekV3Mtp._post_build_model_config(propose)
 
-        self.assertTrue(
-            target.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
-        self.assertTrue(
-            propose.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
         self.assertEqual(
             [desc.tag for desc in target.kv_cache_spec_descs[0]],
             ["default", "indexer_kv"],
@@ -199,9 +187,6 @@ class HybridKVCacheSpecTest(TestCase):
         DeepSeekV3Mtp._post_build_model_config(propose)
 
         for config in (target, propose):
-            self.assertTrue(
-                config.hybrid_attention_config.enable_independent_kv_cache_pools
-            )
             self.assertEqual(
                 [desc.tag for desc in config.kv_cache_spec_descs[0]],
                 ["default", "indexer_kv"],

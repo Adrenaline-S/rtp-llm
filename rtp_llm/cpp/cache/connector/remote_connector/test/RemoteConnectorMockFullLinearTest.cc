@@ -138,15 +138,10 @@ private:
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
         ASSERT_GE(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
-        cache_config_ =
-            std::move(base)
-                .setSharedPoolLayoutLayerCount(layer_num)
-                .setGroupedSpecs(specs, layers_by_group, group_types, tags)
-                .setSharedPoolStorage(full_kv_block_stride_bytes,
-                                      full_spec->scale_block_size_bytes(),
-                                      static_cast<size_t>(layer_num)
-                                          * (full_kv_block_stride_bytes + full_spec->scale_block_size_bytes()))
-                .build();
+        cache_config_ = std::move(base)
+                            .setGroupedSpecs(specs, layers_by_group, group_types, tags)
+                            .finalizeGroupGeometryFromSpecs()
+                            .build();
     }
 };
 

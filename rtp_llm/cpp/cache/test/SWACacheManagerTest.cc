@@ -22,6 +22,14 @@ std::shared_ptr<FixedStateCacheSpec> makeDsv4StateSpec(const std::string& tag, i
         makeResolvedOpaqueSpec(true, tag, DataType::TYPE_FP32, 1024u * 128u * sizeof(float), seq_size_per_block));
 }
 
+KVCacheSpecPtr makeStateSpec(const std::string& tag, int seq_size_per_block) {
+    return makeResolvedOpaqueSpec(/*state_cache=*/true,
+                                  tag,
+                                  DataType::TYPE_FP16,
+                                  static_cast<size_t>(std::max(seq_size_per_block, 1)) * sizeof(uint16_t),
+                                  static_cast<uint32_t>(seq_size_per_block));
+}
+
 CacheGroupPolicy makePolicy(bool skip_prefix_reuse = false) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
     policy.enable_prefix_reuse = true;
@@ -46,10 +54,8 @@ CacheGroup makeSwaGroupConfig(std::string tag, KVCacheSpecPtr spec, CacheGroupPo
 }
 
 CacheGroup makeTaggedGroup(std::string tag, int layer_id) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 1;
-    auto group               = makeSwaGroupConfig(std::move(tag), std::move(spec), makePolicy());
-    group.layer_ids          = {layer_id};
+    auto group      = makeSwaGroupConfig(tag, makeStateSpec(tag, 1), makePolicy());
+    group.layer_ids = {layer_id};
     return group;
 }
 
@@ -83,17 +89,21 @@ protected:
     }
 
     SWACacheManager makeGroup(int seq_size_per_block) {
-        auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->seq_size_per_block = seq_size_per_block;
-        return makeSwaGroup(
-            "swa", spec, block_pool_, 0, shared_cache_.get(), defaultCacheGroupPolicy(CacheGroupType::SWA));
+        return makeSwaGroup("swa",
+                            makeStateSpec("swa", seq_size_per_block),
+                            block_pool_,
+                            0,
+                            shared_cache_.get(),
+                            defaultCacheGroupPolicy(CacheGroupType::SWA));
     }
 
     SWACacheManager makeGroupWithStep(int seq_size_per_block, int linear_step) {
-        auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->seq_size_per_block = seq_size_per_block;
-        return makeSwaGroup(
-            "swa", spec, block_pool_, linear_step, shared_cache_.get(), makePolicy(/*skip_prefix_reuse=*/false));
+        return makeSwaGroup("swa",
+                            makeStateSpec("swa", seq_size_per_block),
+                            block_pool_,
+                            linear_step,
+                            shared_cache_.get(),
+                            makePolicy(/*skip_prefix_reuse=*/false));
     }
 
     SWACacheManager makeSwaGroup(std::string       tag,
@@ -114,10 +124,12 @@ protected:
 };
 
 TEST_F(SWACacheManagerTest, DefaultPolicyDrivesBehaviorInterfaces) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
-    auto group =
-        makeSwaGroup("swa", spec, block_pool_, 0, shared_cache_.get(), defaultCacheGroupPolicy(CacheGroupType::SWA));
+    auto group = makeSwaGroup("swa",
+                              makeStateSpec("swa", 4),
+                              block_pool_,
+                              0,
+                              shared_cache_.get(),
+                              defaultCacheGroupPolicy(CacheGroupType::SWA));
 
     EXPECT_FALSE(group.prefixReusable());
     EXPECT_TRUE(group.hasSparseSlots());
@@ -307,9 +319,7 @@ TEST_F(SWACacheManagerTest, Malloc_NoOpWhenEnoughBlocks) {
 }
 
 TEST_F(SWACacheManagerTest, Malloc_SkipsNullTailCheckWhenPolicyDisablesValidation) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
-    auto group               = makeSwaGroup("swa", spec, block_pool_, 0, shared_cache_.get(), makePolicy(true));
+    auto group = makeSwaGroup("swa", makeStateSpec("swa", 4), block_pool_, 0, shared_cache_.get(), makePolicy(true));
     GroupBlockToPoolBlockBinding block_ids;
     block_ids.assign(poolBlockSnapshotForTest(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
 
@@ -347,9 +357,7 @@ TEST_F(SWACacheManagerTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) {
 }
 
 TEST_F(SWACacheManagerTest, Malloc_RejectsNullTailWhenValidationEnabled) {
-    auto spec                          = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block           = 4;
-    auto                         group = makeSwaGroup("swa", spec, block_pool_, 0, shared_cache_.get(), makePolicy());
+    auto group = makeSwaGroup("swa", makeStateSpec("swa", 4), block_pool_, 0, shared_cache_.get(), makePolicy());
     GroupBlockToPoolBlockBinding block_ids;
     block_ids.assign(poolBlockSnapshotForTest(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
 
@@ -357,9 +365,7 @@ TEST_F(SWACacheManagerTest, Malloc_RejectsNullTailWhenValidationEnabled) {
 }
 
 TEST_F(SWACacheManagerTest, Malloc_RejectsNullPenultimateBlockWhenTwoTailBlocksAreActive) {
-    auto spec                          = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block           = 4;
-    auto                         group = makeSwaGroup("swa", spec, block_pool_, 0, shared_cache_.get(), makePolicy());
+    auto group = makeSwaGroup("swa", makeStateSpec("swa", 4), block_pool_, 0, shared_cache_.get(), makePolicy());
     GroupBlockToPoolBlockBinding block_ids;
     block_ids.assign(poolBlockSnapshotForTest(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 1}));
 
@@ -477,9 +483,8 @@ TEST_F(SWACacheManagerTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlocks) {
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
-    auto group = makeSwaGroup("swa", spec, block_pool, 2, nullptr, makePolicy(/*skip_prefix_reuse=*/false));
+    auto group =
+        makeSwaGroup("swa", makeStateSpec("swa", 4), block_pool, 2, nullptr, makePolicy(/*skip_prefix_reuse=*/false));
 
     // Start with 6 allocated blocks (no NULLs).
     auto allocated = block_pool->malloc(6);
@@ -538,9 +543,8 @@ TEST_F(SWACacheManagerTest, RemoveSkippedBlocks_WithReserveStep) {
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
-    auto group = makeSwaGroup("swa", spec, block_pool, 2, nullptr, makePolicy(/*skip_prefix_reuse=*/false));
+    auto group =
+        makeSwaGroup("swa", makeStateSpec("swa", 4), block_pool, 2, nullptr, makePolicy(/*skip_prefix_reuse=*/false));
 
     auto allocated = block_pool->malloc(6);
     ASSERT_EQ(allocated.size(), 6u);

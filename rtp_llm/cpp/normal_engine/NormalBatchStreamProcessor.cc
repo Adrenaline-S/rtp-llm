@@ -18,8 +18,6 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.position_id_len_factor    = model_config.attn_config.rope_config.index_factor;
     model_input_gatherer_config_.role_type                 = pd_sep_config.role_type;
     model_input_gatherer_config_.decode_entrance           = pd_sep_config.decode_entrance;
-    model_input_gatherer_config_.block_stride_bytes        = cache_config.sharedPoolKvBlockStrideBytes();
-    model_input_gatherer_config_.scale_stride_bytes        = cache_config.sharedPoolKvScaleStrideBytes();
     model_input_gatherer_config_.seq_size_per_block        = cache_config.cacheKeyBlockTokens();
     model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.kernelBlockTokens();
     model_input_gatherer_config_.use_opaque_kv_cache_store = cache_config.usesOpaqueKVCacheStore();

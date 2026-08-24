@@ -785,23 +785,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla             = cache_config.usesMla();
-    const bool   use_hybrid          = cache_config.groupNums() > 1;
-    const bool   use_opaque_kv_store = cache_config.usesOpaqueKVCacheStore();
-    const auto&  spec                = cache_config.groups().front().spec;
-    const size_t k_total_bytes       = spec->k_block_size_bytes();
-    const size_t v_total_bytes       = spec->v_block_size_bytes();
-
-    if (!use_mla && !use_opaque_kv_store && peer_cnt > 1) {
-        RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "k_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                k_total_bytes,
-                                peer_cnt);
-        RTP_LLM_CHECK_WITH_INFO(v_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "v_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                v_total_bytes,
-                                peer_cnt);
-    }
+    const bool use_single_full_contract = cache_config.usesSingleFullAttentionContract();
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
@@ -822,32 +806,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         RTP_LLM_CHECK_WITH_INFO(it != blocks_by_tag.end(), "load cache has no blocks for cache tag=%s", tag.c_str());
         return it->second;
     };
-    // The single-group plan has exactly one cache group, so "the only group" is
-    // not a positional choice.
-    auto soleGroupTag = [](const CacheConfig& cfg) -> const std::string& {
-        const auto& groups = cfg.groups();
-        RTP_LLM_CHECK_WITH_INFO(
-            groups.size() == 1, "single-group cache load requires exactly one cache group, got %zu", groups.size());
-        return groups.front().tag;
-    };
-    auto layerGroupTags = [&soleGroupTag](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
-        std::vector<std::string> layer_tags;
-        if (use_hybrid) {
-            const auto& tags = cfg.groupTagsForLayer(static_cast<int>(layer_id));
-            RTP_LLM_CHECK_WITH_INFO(!tags.empty(), "hybrid cache layer %zu has no cache group tag", layer_id);
-            layer_tags = tags;
-        } else {
-            layer_tags.push_back(soleGroupTag(cfg));
-        }
-        return layer_tags;
-    };
-    auto groupType = [](const CacheConfig& cfg, bool use_hybrid, const std::string& tag) {
-        // A single-group plan keeps upstream's FULL transfer behavior regardless
-        // of the group's own strategy.
-        if (use_hybrid) {
-            return cfg.group(tag).policy.group_type;
-        }
-        return CacheGroupType::FULL;
+    auto layerGroupTags = [](const CacheConfig& cfg, size_t layer_id) {
+        const auto& tags = cfg.groupTagsForLayer(static_cast<int>(layer_id));
+        RTP_LLM_CHECK_WITH_INFO(!tags.empty(), "cache layer %zu has no cache group tag", layer_id);
+        return tags;
     };
     auto cpMapperForConfig = [&](const CacheConfig& cfg) {
         return CPSlotMapper(load_context.prefill_cp_size - 1,
@@ -894,48 +856,46 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return group_tokens > 0
                && group_tokens == cfg.cacheKeyBlockTokens() * static_cast<size_t>(load_context.prefill_cp_size);
     };
-    auto blockPositionsForLoad = [&](size_t             block_num,
-                                     const CacheConfig& cfg,
-                                     bool               cfg_use_hybrid,
-                                     CacheGroupType     group_type,
-                                     const std::string& tag) {
-        const auto&  group  = cfg.group(tag);
-        const auto&  policy = group.policy;
-        const size_t tail_block_count =
-            policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
-        if (!is_page_level_rr || !groupUsesCpSlice(cfg, tag) || load_context.prefill_cp_size <= 1) {
-            return blockPositionsForCacheTransfer(block_num,
-                                                  load_context.reuse_block_size,
-                                                  cfg_use_hybrid,
-                                                  tail_block_count > 0,
-                                                  tail_block_count,
-                                                  /*hybrid_full_from_begin=*/true);
-        }
-        if (isCompactFixedBlockTable(cfg, tag)) {
-            return blockPositionsForCacheTransfer(block_num,
-                                                  load_context.reuse_block_size,
-                                                  cfg_use_hybrid,
-                                                  tail_block_count > 0,
-                                                  tail_block_count,
-                                                  /*hybrid_full_from_begin=*/true);
-        }
+    auto blockPositionsForLoad =
+        [&](size_t block_num, const CacheConfig& cfg, bool use_group_transfer_contract, const std::string& tag) {
+            const auto&  group  = cfg.group(tag);
+            const auto&  policy = group.policy;
+            const size_t tail_block_count =
+                policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
+            if (!is_page_level_rr || !groupUsesCpSlice(cfg, tag) || load_context.prefill_cp_size <= 1) {
+                return blockPositionsForCacheTransfer(block_num,
+                                                      load_context.reuse_block_size,
+                                                      use_group_transfer_contract,
+                                                      tail_block_count > 0,
+                                                      tail_block_count,
+                                                      /*hybrid_full_from_begin=*/true);
+            }
+            if (isCompactFixedBlockTable(cfg, tag)) {
+                return blockPositionsForCacheTransfer(block_num,
+                                                      load_context.reuse_block_size,
+                                                      use_group_transfer_contract,
+                                                      tail_block_count > 0,
+                                                      tail_block_count,
+                                                      /*hybrid_full_from_begin=*/true);
+            }
 
-        std::vector<size_t> block_positions;
-        if (block_num == 0) {
+            std::vector<size_t> block_positions;
+            if (block_num == 0) {
+                return block_positions;
+            }
+            const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
+            const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
+            const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
+            const size_t tail_count     = std::max<size_t>(1, tail_block_count);
+            const size_t start          = use_group_transfer_contract ?
+                                              (compact_blocks > tail_count ? compact_blocks - tail_count : 0) :
+                                              std::min(reuse_blocks, compact_blocks);
+            block_positions.reserve(compact_blocks - start);
+            for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
+                block_positions.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
+            }
             return block_positions;
-        }
-        const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
-        const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
-        const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
-        const size_t tail_count     = std::max<size_t>(1, tail_block_count);
-        const size_t start          = cfg_use_hybrid ? (compact_blocks > tail_count ? compact_blocks - tail_count : 0) :
-                                                       std::min(reuse_blocks, compact_blocks);
-        block_positions.reserve(compact_blocks - start);
-        for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
-            block_positions.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
-        }
-        return block_positions;
-    };
+        };
     auto cacheKeyIndexForBlock = [&](const CacheConfig& cfg,
                                      const std::string& tag,
                                      size_t             block_pos,
@@ -960,7 +920,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             // Some typed-region cache layouts let one logical layer own
             // multiple groups. Iterate every group the layer owns; other
             // layouts reduce to the legacy single-group-per-layer behaviour.
-            const std::vector<std::string> layer_tags = layerGroupTags(cache_config, use_hybrid, layer_id);
+            const std::vector<std::string> layer_tags = layerGroupTags(cache_config, layer_id);
 
             for (const auto& tag : layer_tags) {
                 auto request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
@@ -971,8 +931,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto       block_num = block_ids.size();
                 size_t     model_id  = maga_init_params_.model_id;
 
-                CacheGroupType group_type = groupType(cache_config, use_hybrid, tag);
-                auto block_positions      = blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, tag);
+                const auto&    group      = cache_config.groupForLayer(static_cast<int>(layer_id), tag);
+                CacheGroupType group_type = group.policy.group_type;
+                const bool     use_group_transfer_contract = !use_single_full_contract;
+                auto block_positions = blockPositionsForLoad(block_num, cache_config, use_group_transfer_contract, tag);
 
                 if (!shouldLoadGroupFromPeer(cache_config, group_type, tag, i)) {
                     continue;
@@ -994,10 +956,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     auto cache_key =
                         makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
 
-                    const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
-                    const bool             use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
+                    const bool use_kv_key_prefix  = use_group_transfer_contract || group.requiresWholeBlockTransfer();
+                    const bool use_whole_kv_block = is_page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
-                    if (use_whole_kv_block) {
+                    if (is_page_level_rr && !use_kv_key_prefix) {
+                        // CP assigns each FULL block to one owner peer. That peer
+                        // transfers the complete K and V parts under the ordinary
+                        // single-FULL key schema; it is not a head partition.
+                        parts = cache_manager->convertIndexToBufferByTag(
+                            block_id, layer_id, tag, /*partition_count=*/1, /*partition_id=*/0);
+                    } else if (use_whole_kv_block) {
                         parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag);
                     } else {
                         parts = cache_manager->convertIndexToBufferByTag(block_id, layer_id, tag, peer_cnt, i);
@@ -1070,12 +1038,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-                        const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
-                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.usesOpaqueKVCacheStore();
+                        const bool mtp_use_single_full_contract = mtp_cache_cfg.usesSingleFullAttentionContract();
 
                         // Same multi-group iteration as the main path.
-                        const std::vector<std::string> mtp_layer_tags =
-                            layerGroupTags(mtp_cache_cfg, mtp_use_hybrid, layer_id);
+                        const std::vector<std::string> mtp_layer_tags = layerGroupTags(mtp_cache_cfg, layer_id);
 
                         const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
                             static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
@@ -1099,9 +1065,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto       block_num = block_ids.size();
                             size_t     model_id  = module_plan.cache_model_id;
 
-                            CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, tag);
+                            const auto&    group      = mtp_cache_cfg.groupForLayer(static_cast<int>(layer_id), tag);
+                            CacheGroupType group_type = group.policy.group_type;
+                            const bool     mtp_use_group_transfer_contract = !mtp_use_single_full_contract;
                             auto           block_positions =
-                                blockPositionsForLoad(block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, tag);
+                                blockPositionsForLoad(block_num, mtp_cache_cfg, mtp_use_group_transfer_contract, tag);
 
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, tag, i)) {
                                 continue;
@@ -1125,12 +1093,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 }
                                 auto cache_key = makeCacheKey(
                                     model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
-                                const bool mtp_use_mla = mtp_cache_cfg.usesMla();
                                 const bool mtp_use_kv_key_prefix =
-                                    mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
+                                    mtp_use_group_transfer_contract || group.requiresWholeBlockTransfer();
                                 const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
-                                if (mtp_use_whole_kv_block) {
+                                if (is_page_level_rr && !mtp_use_kv_key_prefix) {
+                                    parts = cache_manager->convertIndexToBufferByTag(block_id,
+                                                                                     global_layer_id,
+                                                                                     tag,
+                                                                                     /*partition_count=*/1,
+                                                                                     /*partition_id=*/0);
+                                } else if (mtp_use_whole_kv_block) {
                                     parts = cache_manager->convertIndexToBufferByTag(block_id, global_layer_id, tag);
                                 } else {
                                     parts = cache_manager->convertIndexToBufferByTag(

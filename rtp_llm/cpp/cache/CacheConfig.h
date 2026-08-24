@@ -32,6 +32,7 @@ struct CacheGroup {
     size_t                             kv_scale_stride_bytes     = 0;
 
     size_t kernelBlocksPerPoolBlock() const;
+    bool   requiresWholeBlockTransfer() const;
 };
 
 using CacheLayer = std::vector<std::string>;
@@ -70,23 +71,11 @@ public:
     size_t pagedBlockBudgetBytes() const noexcept {
         return paged_block_budget_bytes_;
     }
-    size_t sharedPoolKvBlockStrideBytes() const noexcept {
-        return shared_pool_kv_block_stride_bytes_;
-    }
-    size_t sharedPoolKvScaleStrideBytes() const noexcept {
-        return shared_pool_kv_scale_stride_bytes_;
-    }
     int linearStep() const noexcept {
         return linear_step_;
     }
-    int sharedPoolLayoutLayerCount() const noexcept {
-        return shared_pool_layout_layer_count_;
-    }
     size_t explicitPoolReserveBytes() const noexcept {
         return explicit_pool_reserve_bytes_;
-    }
-    bool usesIndependentBlockPools() const noexcept {
-        return uses_independent_block_pools_;
     }
     bool usesTypedCacheRegions() const noexcept {
         return uses_typed_cache_regions_;
@@ -126,17 +115,15 @@ public:
     const CacheGroup&               group(std::string_view tag) const;
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
     const CacheGroup&               groupForLayer(int layer_id, std::string_view tag) const;
+    const CacheGroup&               physicalGroupForGlobalLayer(int layer_id, std::string_view tag) const;
     const CacheGroup&               soleGroupForLayer(int layer_id) const;
     bool                            hasSingleGlobalGroup() const noexcept;
     bool                            hasOneGroupPerLayer() const noexcept;
+    bool                            usesSingleFullAttentionContract() const noexcept;
     size_t                          mtpModuleCount() const noexcept;
     const CacheConfig&              mtpModule(size_t module_index) const;
 
-    size_t blockSizeBytes(std::string_view tag) const {
-        const auto& group_config = group(tag);
-        return group_config.layer_ids.size()
-               * (group_config.kv_block_stride_bytes + group_config.kv_scale_stride_bytes);
-    }
+    size_t blockSizeBytes(std::string_view tag) const;
 
     uint32_t localKvHeadNum(std::string_view tag) const {
         const auto& group_config = group(tag);
@@ -179,7 +166,6 @@ private:
     std::vector<std::shared_ptr<const CacheConfig>> mtp_sub_configs_;
 
     bool              group_block_layout_initialized_            = false;
-    bool              uses_independent_block_pools_              = false;
     bool              uses_typed_cache_regions_                  = false;
     bool              uses_opaque_kv_cache_store_                = false;
     bool              disables_decode_first_malloc_device_reuse_ = false;
@@ -191,10 +177,7 @@ private:
     size_t            cache_key_block_tokens_                    = 1;
     size_t            kernel_block_tokens_                       = 0;
     size_t            paged_block_budget_bytes_                  = 0;
-    size_t            shared_pool_kv_block_stride_bytes_         = 0;
-    size_t            shared_pool_kv_scale_stride_bytes_         = 0;
     int               linear_step_                               = 1;
-    int               shared_pool_layout_layer_count_            = 1;
     size_t            explicit_pool_reserve_bytes_               = 0;
 };
 

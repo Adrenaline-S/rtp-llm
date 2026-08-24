@@ -27,19 +27,32 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
 
 class CacheConfigCreator {
 public:
-    static CacheConfig createRankLocalConfig(const ModelConfig&                 model_config,
-                                             const ParallelismConfig&           parallelism_config,
-                                             const RuntimeConfig&               runtime_config,
-                                             const KVCacheConfig&               kv_cache_config,
-                                             const std::optional<WarmUpResult>& warm_up_result          = std::nullopt,
-                                             const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
-    static CacheConfig createRankLocalSpeculativeConfig(const ModelConfig&                 score_model_config,
-                                                        const ModelConfig&                 propose_model_config,
-                                                        const ParallelismConfig&           parallelism_config,
-                                                        const RuntimeConfig&               runtime_config,
-                                                        const KVCacheConfig&               kv_cache_config,
-                                                        const SpeculativeExecutionConfig&  sp_config,
-                                                        const std::optional<WarmUpResult>& warm_up_result);
+    // Builds rank-local topology, geometry, and budget components without capacity.
+    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
+                                         const ParallelismConfig& parallelism_config,
+                                         const KVCacheConfig&     kv_cache_config,
+                                         int                      gen_num_per_cycle);
+
+    static CacheConfig createConfig(const ModelConfig&                               model_config,
+                                    const ParallelismConfig&                         parallelism_config,
+                                    const RuntimeConfig&                             runtime_config,
+                                    const KVCacheConfig&                             kv_cache_config,
+                                    const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
+                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt);
+    static CacheConfig createSpConfig(const ModelConfig&                 draft_model_config,
+                                      const ParallelismConfig&           parallelism_config,
+                                      const RuntimeConfig&               runtime_config,
+                                      const KVCacheConfig&               kv_cache_config,
+                                      const SpeculativeExecutionConfig&  sp_config,
+                                      const std::optional<WarmUpResult>& warm_up_result = std::nullopt);
+    static CacheConfig mergeSpConfig(const CacheConfig&                 main_config,
+                                     const CacheConfig&                 draft_config,
+                                     const ModelConfig&                 main_model_config,
+                                     const ParallelismConfig&           parallelism_config,
+                                     const RuntimeConfig&               runtime_config,
+                                     const KVCacheConfig&               kv_cache_config,
+                                     const SpeculativeExecutionConfig&  sp_config,
+                                     const std::optional<WarmUpResult>& warm_up_result = std::nullopt);
     static CacheConfig createDecodeWarmupConfig(const ModelConfig&       model_config,
                                                 const ParallelismConfig& parallelism_config,
                                                 const KVCacheConfig&     kv_cache_config,
@@ -47,7 +60,7 @@ public:
 
     // Reconciles only capacity. Descriptor lowering, group topology, geometry,
     // and MTP composition remain exactly as published by the rank-local creator.
-    static CacheConfig withRankSynchronizedBlockCountBasis(const CacheConfig& config, uint32_t block_count_basis);
+    static CacheConfig withRankSyncBlockCount(const CacheConfig& config, uint32_t block_count);
 
 private:
     static void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name);
@@ -63,10 +76,6 @@ private:
                                                     const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config);
     static void        finalizeGroupStorage(CacheConfig& config);
-    static CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
-                                             const ParallelismConfig& parallelism_config,
-                                             const KVCacheConfig&     kv_cache_config,
-                                             int                      gen_num_per_cycle);
     static CacheConfig projectBlockCounts(const CacheConfig& config, uint32_t block_count_basis, bool validate_basis);
 
     // Removed functions moved to MemoryEvaluationHelper:

@@ -13,8 +13,18 @@ namespace rtp_llm {
 
 namespace {
 
-CacheGroupType groupTypeForSpec(const KVCacheSpec& spec) {
-    return spec.type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
+std::optional<CacheGroupType> requiredGroupTypeForSpec(const KVCacheSpec& spec) {
+    switch (spec.type) {
+        case KVCacheSpecType::LinearAttention:
+            return CacheGroupType::LINEAR;
+        case KVCacheSpecType::MultiHeadAttention:
+        case KVCacheSpecType::MultiHeadLatentAttention:
+            return CacheGroupType::FULL;
+        case KVCacheSpecType::OpaqueKV:
+        case KVCacheSpecType::OpaqueState:
+            return std::nullopt;
+    }
+    RTP_LLM_FAIL("unsupported KV cache spec type=%d", static_cast<int>(spec.type));
 }
 
 bool isFullAttentionSpec(KVCacheSpecType type) {
@@ -57,6 +67,22 @@ std::string targetGroupSummary(const CacheConfig& target_config) {
     }
     os << ']';
     return os.str();
+}
+
+size_t layoutBytesForLayers(const CacheGroup& group, size_t layer_count) {
+    RTP_LLM_CHECK_WITH_INFO(group.kv_block_stride_bytes
+                                <= std::numeric_limits<size_t>::max() - group.kv_scale_stride_bytes,
+                            "CacheConfig tag=%s block stride overflow: kv=%zu scale=%zu",
+                            group.tag.c_str(),
+                            group.kv_block_stride_bytes,
+                            group.kv_scale_stride_bytes);
+    const auto stride = group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
+    RTP_LLM_CHECK_WITH_INFO(layer_count == 0 || stride <= std::numeric_limits<size_t>::max() / layer_count,
+                            "CacheConfig tag=%s layout bytes overflow: layers=%zu stride=%zu",
+                            group.tag.c_str(),
+                            layer_count,
+                            stride);
+    return layer_count * stride;
 }
 
 std::optional<std::string> resolveDefaultMTPGroupAlias(const CacheConfig& target_config,
@@ -137,6 +163,11 @@ size_t CacheGroup::kernelBlocksPerPoolBlock() const {
     return PoolBlockToKernelBlockProjection(seq_size_per_block, kernel_seq_size_per_block).projectedSize(1);
 }
 
+bool CacheGroup::requiresWholeBlockTransfer() const {
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheGroup tag=%s requires a cache spec", tag.c_str());
+    return policy.group_type != CacheGroupType::FULL || spec->type != KVCacheSpecType::MultiHeadAttention;
+}
+
 void CacheConfig::replaceAssemblyTopology(std::vector<CacheGroup> groups, std::vector<CacheLayer> layers) {
     groups_ = std::move(groups);
     layers_ = std::move(layers);
@@ -162,9 +193,9 @@ void CacheConfig::validateAndBuildIndex() {
         RTP_LLM_CHECK_WITH_INFO(
             tag_to_idx_.emplace(group.tag, idx).second, "CacheConfig has duplicate tag=%s", group.tag.c_str());
 
-        const auto expected_group_type = groupTypeForSpec(*group.spec);
-        RTP_LLM_CHECK_WITH_INFO(expected_group_type != CacheGroupType::LINEAR
-                                    || group.policy.group_type == CacheGroupType::LINEAR,
+        const auto required_group_type = requiredGroupTypeForSpec(*group.spec);
+        RTP_LLM_CHECK_WITH_INFO(!required_group_type.has_value()
+                                    || group.policy.group_type == required_group_type.value(),
                                 "CacheConfig group %zu tag=%s policy type %s does not match spec type %d",
                                 idx,
                                 group.tag.c_str(),
@@ -251,6 +282,27 @@ const CacheGroup& CacheConfig::group(std::string_view tag) const {
     return groups_[it->second];
 }
 
+size_t CacheConfig::blockSizeBytes(std::string_view tag) const {
+    const auto& root_group  = group(tag);
+    const auto  main_layers = static_cast<size_t>(
+        std::count_if(root_group.layer_ids.begin(), root_group.layer_ids.end(), [this](int layer_id) {
+            return layer_id >= 0 && static_cast<uint32_t>(layer_id) < main_layer_count_;
+        }));
+    size_t total = layoutBytesForLayers(root_group, main_layers);
+    for (const auto& sub_config : mtp_sub_configs_) {
+        RTP_LLM_CHECK_WITH_INFO(sub_config != nullptr, "CacheConfig cannot size a null MTP module");
+        const auto& sub_group = sub_config->group(tag);
+        const auto  sub_bytes = layoutBytesForLayers(sub_group, sub_group.layer_ids.size());
+        RTP_LLM_CHECK_WITH_INFO(sub_bytes <= std::numeric_limits<size_t>::max() - total,
+                                "CacheConfig tag=%s composed block bytes overflow: total=%zu addition=%zu",
+                                root_group.tag.c_str(),
+                                total,
+                                sub_bytes);
+        total += sub_bytes;
+    }
+    return total;
+}
+
 const std::vector<std::string>& CacheConfig::groupTagsForLayer(int layer_id) const {
     RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers_.size(),
                             "CacheConfig invalid layer_id=%d size=%zu",
@@ -269,6 +321,25 @@ const CacheGroup& CacheConfig::groupForLayer(int layer_id, std::string_view tag)
     return group(tag);
 }
 
+const CacheGroup& CacheConfig::physicalGroupForGlobalLayer(int layer_id, std::string_view tag) const {
+    (void)groupForLayer(layer_id, tag);
+    if (layer_id < static_cast<int>(main_layer_count_)) {
+        return group(tag);
+    }
+
+    size_t module_layer_begin = main_layer_count_;
+    for (const auto& sub_config : mtp_sub_configs_) {
+        RTP_LLM_CHECK_WITH_INFO(sub_config != nullptr, "CacheConfig cannot resolve a null MTP module");
+        const auto module_layer_end = module_layer_begin + sub_config->layerCount();
+        if (static_cast<size_t>(layer_id) < module_layer_end) {
+            return sub_config->groupForLayer(static_cast<int>(static_cast<size_t>(layer_id) - module_layer_begin), tag);
+        }
+        module_layer_begin = module_layer_end;
+    }
+    RTP_LLM_FAIL(
+        "CacheConfig global layer=%d has no physical module layout for tag=%s", layer_id, std::string(tag).c_str());
+}
+
 const CacheGroup& CacheConfig::soleGroupForLayer(int layer_id) const {
     const auto& tags = groupTagsForLayer(layer_id);
     RTP_LLM_CHECK_WITH_INFO(
@@ -282,6 +353,16 @@ bool CacheConfig::hasSingleGlobalGroup() const noexcept {
 
 bool CacheConfig::hasOneGroupPerLayer() const noexcept {
     return std::all_of(layers_.begin(), layers_.end(), [](const CacheLayer& layer) { return layer.size() == 1; });
+}
+
+bool CacheConfig::usesSingleFullAttentionContract() const noexcept {
+    if (!hasSingleGlobalGroup()) {
+        return false;
+    }
+    const auto& group = groups_.front();
+    return group.policy.group_type == CacheGroupType::FULL && group.spec
+           && (group.spec->type == KVCacheSpecType::MultiHeadAttention
+               || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
 }
 
 size_t CacheConfig::mtpModuleCount() const noexcept {
@@ -340,7 +421,6 @@ CacheConfig::composeAssemblyMTPModule(const CacheConfig& propose_config, int mod
     auto target_layers = layers_;
     target_layers.resize(total_layers);
 
-    const auto target_group_num = target_groups.size();
     // Tag is the only identity used to pair a propose group with a target group.
     std::unordered_map<std::string, const CacheGroup*> propose_group_by_tag;
     for (const auto& propose_group : propose_config.groups()) {
@@ -348,12 +428,28 @@ CacheConfig::composeAssemblyMTPModule(const CacheConfig& propose_config, int mod
     }
     const auto default_alias_target_tag = resolveDefaultMTPGroupAlias(*this, propose_config);
 
+    std::unordered_set<std::string> newly_added_tags;
+    for (const auto& propose_group : propose_config.groups()) {
+        const bool has_target = std::any_of(target_groups.begin(), target_groups.end(), [&](const CacheGroup& group) {
+            return group.tag == propose_group.tag;
+        });
+        const bool consumed_by_default_alias = propose_group.tag == "default" && default_alias_target_tag.has_value();
+        if (has_target || consumed_by_default_alias) {
+            continue;
+        }
+        CacheGroup target_group = propose_group;
+        target_group.layer_ids.clear();
+        target_groups.push_back(std::move(target_group));
+        newly_added_tags.insert(propose_group.tag);
+    }
+
     std::vector<CacheGroup> sub_groups;
     std::vector<CacheLayer> sub_layers(static_cast<size_t>(mtp_layer_num));
+    const auto              target_group_num = target_groups.size();
     sub_groups.reserve(target_group_num);
 
-    // target_idx only walks the local target_groups copy being mutated here; the
-    // tag read from it is the identity everything else is keyed by.
+    // target_idx only walks the main+draft tag union in the local target_groups
+    // copy; the tag read from it is the identity everything else is keyed by.
     for (size_t target_idx = 0; target_idx < target_group_num; ++target_idx) {
         const std::string tag             = target_groups[target_idx].tag;
         const auto        propose_it      = propose_group_by_tag.find(tag);
@@ -361,7 +457,7 @@ CacheConfig::composeAssemblyMTPModule(const CacheConfig& propose_config, int mod
         const bool        uses_default_alias =
             !has_exact_group && default_alias_target_tag.has_value() && tag == *default_alias_target_tag;
 
-        const CacheGroup* source_group_ptr = &group(tag);
+        const CacheGroup* source_group_ptr = &target_groups[target_idx];
         if (has_exact_group) {
             source_group_ptr = propose_it->second;
         } else if (uses_default_alias) {
@@ -372,39 +468,63 @@ CacheConfig::composeAssemblyMTPModule(const CacheConfig& propose_config, int mod
         const auto& source_group      = *source_group_ptr;
 
         if (has_propose_group) {
-            RTP_LLM_CHECK_WITH_INFO(
-                source_group.layer_ids.size() == static_cast<size_t>(mtp_layer_num),
-                "CacheConfig::composeMTPModule source_tag=%s target_tag=%s must cover every module layer, "
-                "got=%zu expected=%u",
-                source_group.tag.c_str(),
-                tag.c_str(),
-                source_group.layer_ids.size(),
-                mtp_layer_num);
-            for (size_t local_layer_id = 0; local_layer_id < source_group.layer_ids.size(); ++local_layer_id) {
+            if (has_exact_group && newly_added_tags.count(tag) == 0) {
+                const auto& target_group = target_groups[target_idx];
+                RTP_LLM_CHECK_WITH_INFO(samePolicy(target_group.policy, source_group.policy),
+                                        "CacheConfig::composeMTPModule tag=%s has incompatible main/draft policies: "
+                                        "main=%s draft=%s",
+                                        tag.c_str(),
+                                        cacheGroupPolicySummary(target_group.policy).c_str(),
+                                        cacheGroupPolicySummary(source_group.policy).c_str());
                 RTP_LLM_CHECK_WITH_INFO(
-                    source_group.layer_ids[local_layer_id] == static_cast<int>(local_layer_id),
-                    "CacheConfig::composeMTPModule source_tag=%s target_tag=%s source layers must be ordered 0..%u, "
-                    "index=%zu value=%d",
+                    target_group.seq_size_per_block == source_group.seq_size_per_block,
+                    "CacheConfig::composeMTPModule tag=%s has incompatible main/draft pool granularity: "
+                    "main_seq_size_per_block=%zu draft_seq_size_per_block=%zu",
+                    tag.c_str(),
+                    target_group.seq_size_per_block,
+                    source_group.seq_size_per_block);
+            }
+            RTP_LLM_CHECK_WITH_INFO(!source_group.layer_ids.empty(),
+                                    "CacheConfig::composeMTPModule source_tag=%s target_tag=%s has no module layers",
+                                    source_group.tag.c_str(),
+                                    tag.c_str());
+            int previous_local_layer_id = -1;
+            for (size_t local_layer_id = 0; local_layer_id < source_group.layer_ids.size(); ++local_layer_id) {
+                const int source_layer_id = source_group.layer_ids[local_layer_id];
+                RTP_LLM_CHECK_WITH_INFO(
+                    source_layer_id >= 0 && source_layer_id < static_cast<int>(mtp_layer_num)
+                        && source_layer_id > previous_local_layer_id,
+                    "CacheConfig::composeMTPModule source_tag=%s target_tag=%s source layers must be unique, ordered, "
+                    "and within [0,%u): index=%zu value=%d previous=%d",
                     source_group.tag.c_str(),
                     tag.c_str(),
-                    mtp_layer_num - 1,
+                    mtp_layer_num,
                     local_layer_id,
-                    source_group.layer_ids[local_layer_id]);
+                    source_layer_id,
+                    previous_local_layer_id);
+                previous_local_layer_id = source_layer_id;
             }
 
-            const size_t expected_existing_layers = static_cast<size_t>(shared_pool_layout_layer_count_)
-                                                    + static_cast<size_t>(module_index) * mtp_layer_num;
+            const auto main_group_layers = static_cast<size_t>(
+                std::count_if(target_groups[target_idx].layer_ids.begin(),
+                              target_groups[target_idx].layer_ids.end(),
+                              [main_layer_num](int layer_id) {
+                                  return layer_id >= 0 && static_cast<uint32_t>(layer_id) < main_layer_num;
+                              }));
+            const size_t expected_existing_layers =
+                main_group_layers + static_cast<size_t>(module_index) * source_group.layer_ids.size();
             RTP_LLM_CHECK_WITH_INFO(target_groups[target_idx].layer_ids.size() == expected_existing_layers,
                                     "CacheConfig::composeMTPModule source_tag=%s target_tag=%s "
                                     "physical group alignment mismatch: "
-                                    "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
+                                    "existing_layers=%zu expected=%zu module=%d main_group_layers=%zu "
+                                    "tag_module_layers=%zu",
                                     source_group.tag.c_str(),
                                     tag.c_str(),
                                     target_groups[target_idx].layer_ids.size(),
                                     expected_existing_layers,
                                     module_index,
-                                    shared_pool_layout_layer_count_,
-                                    mtp_layer_num);
+                                    main_group_layers,
+                                    source_group.layer_ids.size());
         }
 
         CacheGroup sub_group = source_group;
@@ -475,15 +595,7 @@ void CacheConfig::projectAssemblyBlockCounts(uint32_t block_count_basis) {
         block_count_basis_ = block_count_basis;
     }
 
-    if (!uses_independent_block_pools_ || !group_block_layout_initialized_ || groupNums() == 0) {
-        explicit_pool_reserve_bytes_ = 0;
-        if (groupNums() > 0) {
-            auto groups = groups_;
-            for (auto& group : groups) {
-                group.block_num = block_count_basis;
-            }
-            replaceAssemblyTopology(std::move(groups), layers_);
-        }
+    if (!group_block_layout_initialized_ || groupNums() == 0) {
         return;
     }
 
@@ -534,8 +646,6 @@ std::string CacheConfig::debugString(size_t indent) const {
 
     os << indent1 << "# Block Sizing Information:\n";
     OUTPUT_FIELD_EXPR("block_size_bytes", paged_block_budget_bytes_);
-    OUTPUT_FIELD_EXPR("kv_block_stride_bytes", shared_pool_kv_block_stride_bytes_);
-    OUTPUT_FIELD_EXPR("kv_scale_stride_bytes", shared_pool_kv_scale_stride_bytes_);
     os << "\n";
 
     // Debug rendering walks the tagged group records directly; the printed order
@@ -565,7 +675,6 @@ std::string CacheConfig::debugString(size_t indent) const {
 
     os << indent1 << "# Attention Configuration:\n";
     OUTPUT_FIELD_EXPR("linear_step", linear_step_);
-    OUTPUT_FIELD_EXPR("group_layer_num", shared_pool_layout_layer_count_);
     OUTPUT_FIELD_EXPR("full_group_num",
                       std::count_if(group_policies.begin(), group_policies.end(), [](const CacheGroupPolicy& p) {
                           return p.group_type == CacheGroupType::FULL;

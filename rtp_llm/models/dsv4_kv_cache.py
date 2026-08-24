@@ -15,9 +15,8 @@ of independent pools selected by its ``compress_ratios`` entry:
 C++ lowers the resulting per-layer desc lists through the sealed
 ``CacheConfigCreator`` lifecycle.  Rank-local creation publishes complete
 topology, geometry, and capacity together; decode warmup uses the same lowering
-through ``createDecodeWarmupConfig`` and publishes a one-block basis.  This path
-is selected when ``hybrid_attention_config.enable_independent_kv_cache_pools``
-is set.
+through ``createDecodeWarmupConfig`` and publishes a one-block basis.  Every tag
+is lowered into its own independent block pool.
 
 This module is the production twin of
 ``rtp_llm/cpp/cache/test/CacheConfigTestUtils.h`` (``makeDsv4Desc`` /

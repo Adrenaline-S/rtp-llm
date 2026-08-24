@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <tuple>
 
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -80,6 +82,32 @@ CacheConfig makeRpcCacheConfig() {
         .build();
 }
 
+CacheConfig makeSinglePolicyRpcConfig(CacheGroupType group_type) {
+    KVCacheSpecPtr spec;
+    std::string    tag;
+    if (group_type == CacheGroupType::LINEAR) {
+        tag  = "linear";
+        spec = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
+                                            1,
+                                            1,
+                                            1,
+                                            1,
+                                            /*conv_kernel_dim=*/2,
+                                            /*seq_size_per_block=*/2,
+                                            DataType::TYPE_FP16,
+                                            DataType::TYPE_FP16,
+                                            tag);
+    } else if (group_type == CacheGroupType::SWA) {
+        tag  = "swa";
+        spec = test::makeResolvedOpaqueSpec(
+            /*state_cache=*/true, tag, DataType::TYPE_FP16, /*block_bytes=*/32, /*seq_size_per_block=*/2);
+    } else {
+        tag  = "default";
+        spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, /*seq_size_per_block=*/2, tag);
+    }
+    return test::makeSingleGroupCacheConfig(std::move(spec), group_type, /*layer_num=*/1, /*block_num=*/8, tag);
+}
+
 // DeepSeek-V4 shaped identity fixture: one layer owning every semantic group.
 // Only tag identity matters at the RPC boundary, so the physical layout is the
 // simple shared MHA layout used by the other RPC fixtures.
@@ -106,7 +134,9 @@ CacheConfig makeDsv4RpcConfig(bool reversed) {
 class DecodeBoundaryTestEngine final: public EngineBase {
 public:
     explicit DecodeBoundaryTestEngine(const CacheConfig& config): EngineBase(EngineInitParams()) {
-        resource_context_.cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+        const auto warmup_config =
+            test::TestCacheConfigBuilder::rebuildForTest(config).setProjectedBlockCountBasis(1).build();
+        resource_context_.cache_manager = std::make_shared<KVCacheManager>(warmup_config, /*warmup=*/true);
     }
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
@@ -282,6 +312,38 @@ TEST(DecodeRpcServerTest, LoadRequestRowsCarryMapTags) {
     const auto expected = std::map<std::string, BlockIndicesType>{{"full", {10, 11}}, {"linear", {20, 21}}};
     EXPECT_EQ(taggedRowsOf(server.constructRemoteLoadRequest(context, /*index=*/0, peer_addrs)), expected);
     EXPECT_EQ(taggedRowsOf(server.constructRemoteLoadRequestForMla(context, /*index=*/0, peer_addrs)), expected);
+}
+
+TEST(DecodeRpcServerTest, SingleGroupDecodeTransferDerivesFromPolicyNotCardinality) {
+    const auto full = makeSinglePolicyRpcConfig(CacheGroupType::FULL);
+    EXPECT_TRUE(full.usesSingleFullAttentionContract());
+    EXPECT_FALSE(full.group("default").requiresWholeBlockTransfer());
+    EXPECT_EQ(blockPositionsForCacheTransfer(
+                  /*block_num=*/5,
+                  /*reuse_block_size=*/2,
+                  /*use_hybrid=*/!full.usesSingleFullAttentionContract(),
+                  /*transfer_tail_blocks=*/false,
+                  /*tail_block_count=*/0,
+                  /*hybrid_full_from_begin=*/true),
+              (std::vector<size_t>{2, 3, 4}));
+
+    for (const auto& [group_type, tag, expected_positions] :
+         std::vector<std::tuple<CacheGroupType, std::string, std::vector<size_t>>>{
+             {CacheGroupType::LINEAR, "linear", {4}}, {CacheGroupType::SWA, "swa", {3, 4}}}) {
+        const auto  config = makeSinglePolicyRpcConfig(group_type);
+        const auto& group  = config.group(tag);
+        EXPECT_FALSE(config.usesSingleFullAttentionContract()) << "tag=" << tag;
+        EXPECT_TRUE(group.requiresWholeBlockTransfer()) << "tag=" << tag;
+        EXPECT_EQ(blockPositionsForCacheTransfer(
+                      /*block_num=*/5,
+                      /*reuse_block_size=*/2,
+                      /*use_hybrid=*/!config.usesSingleFullAttentionContract(),
+                      /*transfer_tail_blocks=*/group.policy.active_tail_blocks > 0,
+                      /*tail_block_count=*/group.policy.active_tail_blocks,
+                      /*hybrid_full_from_begin=*/true),
+                  expected_positions)
+            << "tag=" << tag;
+    }
 }
 
 TEST(DecodeRpcServerTest, Dsv4MultiTagRowsRoundTripThroughReversedLocalTopology) {

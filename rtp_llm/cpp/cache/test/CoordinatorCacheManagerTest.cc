@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -48,7 +49,7 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
     auto builder =
         TestCacheConfigBuilder::makeBase(4, std::max(linear_block_num, full_block_num), 4, 4, DataType::TYPE_FP16);
 
-    auto linear_spec = makeResolvedLinearSpec(builder.dtype(),
+    auto              linear_spec = makeResolvedLinearSpec(builder.dtype(),
                                               1,
                                               1,
                                               1,
@@ -58,19 +59,26 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                               builder.dtype(),
                                               builder.dtype(),
                                               "linear");
-    auto full_spec =
-        makeResolvedMhaSpec(builder.dtype(), 1, 1, static_cast<uint32_t>(builder.cacheKeyBlockTokens()), "full");
+    const std::string second_tag  = second_type == CacheGroupType::SWA ? "swa" : "full";
+    KVCacheSpecPtr    second_spec;
+    if (second_type == CacheGroupType::SWA) {
+        const auto full_layout =
+            makeResolvedMhaSpec(builder.dtype(), 1, 1, static_cast<uint32_t>(builder.cacheKeyBlockTokens()), "full");
+        second_spec = makeResolvedOpaqueSpec(/*state_cache=*/true,
+                                             second_tag,
+                                             builder.dtype(),
+                                             full_layout->block_size_bytes(),
+                                             static_cast<uint32_t>(builder.cacheKeyBlockTokens()));
+    } else {
+        second_spec =
+            makeResolvedMhaSpec(builder.dtype(), 1, 1, static_cast<uint32_t>(builder.cacheKeyBlockTokens()), "full");
+    }
 
     return builder.setLinearStep(2)
-        .setSharedPoolLayoutLayerCount(2)
-        .setUsesIndependentBlockPools(true)
-        .setGroupedSpecs({linear_spec, full_spec},
-                         {{0, 1}, {2, 3}},
-                         {CacheGroupType::LINEAR, second_type},
-                         {"linear", second_type == CacheGroupType::SWA ? "swa" : "full"})
-        .setSharedPoolStorage(std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes()), 0, 0)
+        .setGroupedSpecs(
+            {linear_spec, second_spec}, {{0, 1}, {2, 3}}, {CacheGroupType::LINEAR, second_type}, {"linear", second_tag})
         .setGroupBlockLayout({linear_block_num, full_block_num},
-                             {linear_spec->block_size_bytes(), full_spec->block_size_bytes()},
+                             {linear_spec->block_size_bytes(), second_spec->block_size_bytes()},
                              {0, 0})
         .build();
 }
@@ -79,41 +87,49 @@ static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 
     return makeTinyMultiPoolHybridConfig(linear_block_num, swa_block_num, CacheGroupType::SWA);
 }
 
-static CacheConfig makeTinySingleMhaConfig(CacheGroupType group_type, const std::string& tag, uint32_t block_num = 8) {
+static CacheConfig
+makeTinySingleCacheConfig(CacheGroupType group_type, const std::string& tag, uint32_t block_num = 8) {
     auto builder = TestCacheConfigBuilder::makeBase(2, block_num, 4, 4, DataType::TYPE_FP16);
 
-    auto full_spec =
-        makeResolvedMhaSpec(builder.dtype(), 1, 1, static_cast<uint32_t>(builder.cacheKeyBlockTokens()), tag);
+    KVCacheSpecPtr spec;
+    if (group_type == CacheGroupType::SWA) {
+        const auto full_layout =
+            makeResolvedMhaSpec(builder.dtype(), 1, 1, static_cast<uint32_t>(builder.cacheKeyBlockTokens()), tag);
+        spec = makeResolvedOpaqueSpec(/*state_cache=*/true,
+                                      tag,
+                                      builder.dtype(),
+                                      full_layout->block_size_bytes(),
+                                      static_cast<uint32_t>(builder.cacheKeyBlockTokens()));
+    } else {
+        spec = makeResolvedMhaSpec(builder.dtype(), 1, 1, static_cast<uint32_t>(builder.cacheKeyBlockTokens()), tag);
+    }
     return builder.setLinearStep(2)
-        .setSharedPoolLayoutLayerCount(2)
-        .setGroupedSpecs({full_spec}, {{0, 1}}, {group_type}, {tag})
-        .setSharedPoolStorage(full_spec->block_size_bytes(), 0, 0)
-        .setGroupBlockLayout({block_num}, {full_spec->block_size_bytes()}, {0})
+        .setGroupedSpecs({spec}, {{0, 1}}, {group_type}, {tag})
+        .setGroupBlockLayout({block_num}, {spec->block_size_bytes()}, {0})
         .build();
 }
 
 static CacheConfig makeTinySingleFullConfig(uint32_t block_num = 8) {
-    return makeTinySingleMhaConfig(CacheGroupType::FULL, "full", block_num);
+    return makeTinySingleCacheConfig(CacheGroupType::FULL, "full", block_num);
 }
 
 static CacheConfig makeTinySingleSwaConfig(uint32_t block_num = 8) {
-    return makeTinySingleMhaConfig(CacheGroupType::SWA, "swa", block_num);
+    return makeTinySingleCacheConfig(CacheGroupType::SWA, "swa", block_num);
 }
 
 static ModelConfig makeTinyDSV4ModelConfig() {
     ModelConfig mc;
-    mc.num_layers                                                = 5;
-    mc.hidden_size                                               = 32;
-    mc.attn_config.head_num                                      = 4;
-    mc.attn_config.kv_head_num                                   = 1;
-    mc.attn_config.size_per_head                                 = 8;
-    mc.attn_config.rope_head_dim                                 = 4;
-    mc.attn_config.indexer_head_dim                              = 8;
-    mc.attn_config.indexer_head_num                              = 2;
-    mc.attn_config.indexer_topk                                  = 16;
-    mc.attn_config.tokens_per_block                              = 128;
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    mc.num_layers                                      = 5;
+    mc.hidden_size                                     = 32;
+    mc.attn_config.head_num                            = 4;
+    mc.attn_config.kv_head_num                         = 1;
+    mc.attn_config.size_per_head                       = 8;
+    mc.attn_config.rope_head_dim                       = 4;
+    mc.attn_config.indexer_head_dim                    = 8;
+    mc.attn_config.indexer_head_num                    = 2;
+    mc.attn_config.indexer_topk                        = 16;
+    mc.attn_config.tokens_per_block                    = 128;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(mc, {4, 128, 4, 128, 0});
     return mc;
 }
@@ -161,11 +177,10 @@ static ModelConfig makeProModelConfig() {
     return mc;
 }
 
-// Build a DSV4 7-pool CacheConfig (uses use_independent_block_pools=true).
+// Build a DSV4 seven-pool CacheConfig.
 static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
-    auto mc                                                      = makeProModelConfig();
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto mc                                            = makeProModelConfig();
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createDecodeWarmupConfig(mc, pc, KVCacheConfig{}, 0);
     config = TestCacheConfigBuilder::rebuildForTest(std::move(config)).setProjectedBlockCountBasis(block_num).build();
@@ -505,6 +520,20 @@ TEST_F(CoordinatorCacheManagerTest, InitCreatesIndependentBlockPoolPerGroup) {
     EXPECT_EQ(allocator->blockPool("full")->totalBlocksNum(), 8u - 1u);
 }
 
+TEST_F(CoordinatorCacheManagerTest, AsymmetricConverterKeepsNonFullGroupBlocksWhole) {
+    auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/6, /*swa_block_num=*/8);
+    auto allocator = makeCoordinatorCacheManager(config);
+    ASSERT_TRUE(allocator->init());
+    auto converter = std::make_shared<LayerBlockConverterImpl>(allocator);
+
+    for (const auto& [layer_id, tag] : std::vector<std::pair<int, std::string>>{{0, "linear"}, {2, "swa"}}) {
+        const auto buffers = converter->convertIndexToBufferByTag(
+            layer_id, tag, /*block_id=*/1, /*partition_count=*/2, /*partition_id=*/0);
+        ASSERT_EQ(buffers.size(), 1u) << "tag=" << tag;
+        EXPECT_EQ(buffers.front().size_bytes, config.group(tag).kv_block_stride_bytes) << "tag=" << tag;
+    }
+}
+
 TEST_F(CoordinatorCacheManagerTest, OrdinarySingleMtpUsesExactMainAndProposeMemoryLayouts) {
     auto score_config = makeOrdinaryMtpModelConfig(
         /*num_layers=*/2, /*kv_head_num=*/1, /*size_per_head=*/8, KvCacheDataType::BASE);
@@ -516,40 +545,39 @@ TEST_F(CoordinatorCacheManagerTest, OrdinarySingleMtpUsesExactMainAndProposeMemo
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = 2;
-    auto config                 = CacheConfigCreator::createRankLocalSpeculativeConfig(score_config,
-                                                                       propose_config,
-                                                                       ParallelismConfig{},
-                                                                       RuntimeConfig{},
-                                                                       kv_cache_config,
-                                                                       sp_config,
-                                                                       /*warm_up_result=*/std::nullopt);
+    auto config                 = createTestSpeculativeCacheConfig(score_config,
+                                                   propose_config,
+                                                   ParallelismConfig{},
+                                                   RuntimeConfig{},
+                                                   kv_cache_config,
+                                                   sp_config,
+                                                   /*warm_up_result=*/std::nullopt);
 
-    ASSERT_FALSE(config.usesIndependentBlockPools());
     ASSERT_EQ(config.groupNums(), 1);
     ASSERT_EQ(config.mtpModuleCount(), 2u);
     ASSERT_EQ(config.mainLayerCount(), 2u);
     ASSERT_EQ(config.layerCount(), 4u);
 
-    const auto legacy_contract = BlockPoolConfigHelper::createConfig(config);
-    ASSERT_EQ(legacy_contract.memory_layouts.size(), 3u);
-    EXPECT_EQ(legacy_contract.memory_layouts[0].layer_num, 2u);
-    EXPECT_EQ(legacy_contract.memory_layouts[1].layer_num, 1u);
-    EXPECT_EQ(legacy_contract.memory_layouts[2].layer_num, 1u);
-    EXPECT_EQ(legacy_contract.memory_layouts[0].kv_scale_stride_bytes, 0u);
-    EXPECT_GT(legacy_contract.memory_layouts[1].kv_scale_stride_bytes, 0u);
-    EXPECT_EQ(legacy_contract.memory_layouts[1].kv_block_stride_bytes,
+    const auto pool_contract = BlockPoolConfigHelper::createConfigForGroup(config, "default");
+    ASSERT_EQ(pool_contract.memory_layouts.size(), 3u);
+    EXPECT_EQ(pool_contract.memory_layouts[0].layer_num, 2u);
+    EXPECT_EQ(pool_contract.memory_layouts[1].layer_num, 1u);
+    EXPECT_EQ(pool_contract.memory_layouts[2].layer_num, 1u);
+    EXPECT_EQ(pool_contract.memory_layouts[0].kv_scale_stride_bytes, 0u);
+    EXPECT_GT(pool_contract.memory_layouts[1].kv_scale_stride_bytes, 0u);
+    EXPECT_EQ(pool_contract.memory_layouts[1].kv_block_stride_bytes,
               config.mtpModule(0).soleGroupForLayer(0).spec->block_size_bytes());
-    EXPECT_NE(legacy_contract.memory_layouts[0].kv_block_stride_bytes,
-              legacy_contract.memory_layouts[1].kv_block_stride_bytes);
+    EXPECT_NE(pool_contract.memory_layouts[0].kv_block_stride_bytes,
+              pool_contract.memory_layouts[1].kv_block_stride_bytes);
 
     size_t expected_offset = 0;
-    for (const auto& memory_layout : legacy_contract.memory_layouts) {
+    for (const auto& memory_layout : pool_contract.memory_layouts) {
         EXPECT_EQ(memory_layout.kv_cache_offset_bytes, expected_offset);
         expected_offset += memory_layout.kv_block_pool_size_bytes;
         EXPECT_EQ(memory_layout.kv_scale_offset_bytes, expected_offset);
         expected_offset += memory_layout.kv_scale_pool_size_bytes;
     }
-    EXPECT_EQ(legacy_contract.total_size_bytes, expected_offset);
+    EXPECT_EQ(pool_contract.total_size_bytes, expected_offset);
 
     auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
@@ -559,9 +587,9 @@ TEST_F(CoordinatorCacheManagerTest, OrdinarySingleMtpUsesExactMainAndProposeMemo
     ASSERT_NE(pool, nullptr);
 
     const auto& actual_contract = pool->config_;
-    ASSERT_EQ(actual_contract.memory_layouts.size(), legacy_contract.memory_layouts.size());
-    EXPECT_EQ(actual_contract.total_size_bytes, legacy_contract.total_size_bytes);
-    EXPECT_EQ(pool->getTotalSizeBytes(), legacy_contract.total_size_bytes);
+    ASSERT_EQ(actual_contract.memory_layouts.size(), pool_contract.memory_layouts.size());
+    EXPECT_EQ(actual_contract.total_size_bytes, pool_contract.total_size_bytes);
+    EXPECT_EQ(pool->getTotalSizeBytes(), pool_contract.total_size_bytes);
 
     const auto  all_layout = manager->allLayerCacheBase();
     const auto& group      = all_layout.group("default");
@@ -571,7 +599,7 @@ TEST_F(CoordinatorCacheManagerTest, OrdinarySingleMtpUsesExactMainAndProposeMemo
     for (size_t global_layer = 0; global_layer < 4; ++global_layer) {
         const size_t layout_id   = global_layer < 2 ? 0 : global_layer - 1;
         const size_t local_layer = global_layer < 2 ? global_layer : 0;
-        const auto&  expected    = legacy_contract.memory_layouts[layout_id];
+        const auto&  expected    = pool_contract.memory_layouts[layout_id];
         const auto&  actual      = actual_contract.memory_layouts[layout_id];
         EXPECT_EQ(actual.layer_num, expected.layer_num);
         EXPECT_EQ(actual.block_num, expected.block_num);
@@ -1610,9 +1638,8 @@ TEST_F(CoordinatorCacheManagerTest, DSV4GpuHcaStatePoolIncludesFixedReserve) {
 }
 
 TEST_F(CoordinatorCacheManagerTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
-    auto mc                                                      = makeProModelConfig();
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto mc                                            = makeProModelConfig();
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config = CacheConfigCreator::createDecodeWarmupConfig(mc, pc, KVCacheConfig{}, 0);

@@ -136,23 +136,19 @@ private:
             layer_ids[i] = i;
         }
         cache_config_ = std::move(builder)
-                            .setSharedPoolStorage(mha_spec->block_size_bytes(),
-                                                  0,
-                                                  static_cast<size_t>(layer_num) * mha_spec->block_size_bytes())
                             .setGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"})
+                            .finalizeGroupGeometryFromSpecs()
                             .build();
     }
 };
 
 #ifdef USE_REMOTE_KV_CACHE
 TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAndBuildsFullPolicy) {
-    CacheConfig hybrid_config = cache_config_;
-    hybrid_config =
-        TestCacheConfigBuilder::rebuildForTest(std::move(hybrid_config)).setUsesIndependentBlockPools(true).build();
-    const auto hybrid_block_num    = hybrid_config.blockCountBasis();
-    const auto hybrid_kv_stride    = hybrid_config.group("default").spec->block_size_bytes();
-    const auto hybrid_scale_stride = hybrid_config.group("default").spec->scale_block_size_bytes();
-    hybrid_config                  = TestCacheConfigBuilder::rebuildForTest(std::move(hybrid_config))
+    CacheConfig hybrid_config       = cache_config_;
+    const auto  hybrid_block_num    = hybrid_config.blockCountBasis();
+    const auto  hybrid_kv_stride    = hybrid_config.group("default").spec->block_size_bytes();
+    const auto  hybrid_scale_stride = hybrid_config.group("default").spec->scale_block_size_bytes();
+    hybrid_config                   = TestCacheConfigBuilder::rebuildForTest(std::move(hybrid_config))
                         .setGroupBlockLayout({hybrid_block_num}, {hybrid_kv_stride}, {hybrid_scale_stride})
                         .build();
 
@@ -187,7 +183,6 @@ TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAnd
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, ManagerRegistersOrdinarySingleFullHybridPoolWithRemoteConnector) {
-    ASSERT_FALSE(cache_config_.usesIndependentBlockPools());
     ASSERT_EQ(cache_config_.groupNums(), 1);
 
     auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();

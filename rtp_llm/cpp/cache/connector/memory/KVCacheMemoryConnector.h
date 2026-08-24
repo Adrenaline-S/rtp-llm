@@ -71,12 +71,13 @@ public:
 
 private:
     struct LayerTagSlot {
-        int            layer_id{-1};
-        std::string    tag;
-        size_t         kv_block_stride_bytes{0};
-        size_t         kv_scale_stride_bytes{0};
-        size_t         stride_bytes{0};
-        CacheBlockKind block_kind{CacheBlockKind::COMPLETE};
+        int             layer_id{-1};
+        std::string     tag;
+        size_t          kv_block_stride_bytes{0};
+        size_t          kv_scale_stride_bytes{0};
+        size_t          stride_bytes{0};
+        KVCacheSpecType spec_type{KVCacheSpecType::MultiHeadAttention};
+        CacheBlockKind  block_kind{CacheBlockKind::COMPLETE};
         // Derived connector capability resolved once at the boundary: a FULL
         // group is copied as a whole block regardless of completeness.
         bool is_full_only{false};

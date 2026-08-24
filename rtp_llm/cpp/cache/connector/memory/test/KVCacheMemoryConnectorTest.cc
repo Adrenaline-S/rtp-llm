@@ -131,15 +131,14 @@ std::string joinPaths(const std::vector<std::string>& paths) {
 
 ModelConfig makeCreatorFullLinearSplitModel(bool linear_first) {
     ModelConfig config;
-    config.num_layers                                                = 4;
-    config.data_type                                                 = DataType::TYPE_FP16;
-    config.attn_config.head_num                                      = 4;
-    config.attn_config.kv_head_num                                   = 2;
-    config.attn_config.size_per_head                                 = 32;
-    config.attn_config.tokens_per_block                              = 8;
-    config.attn_config.kv_cache_dtype                                = KvCacheDataType::BASE;
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    config.num_layers                                      = 4;
+    config.data_type                                       = DataType::TYPE_FP16;
+    config.attn_config.head_num                            = 4;
+    config.attn_config.kv_head_num                         = 2;
+    config.attn_config.size_per_head                       = 32;
+    config.attn_config.tokens_per_block                    = 8;
+    config.attn_config.kv_cache_dtype                      = KvCacheDataType::BASE;
+    config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types =
         linear_first ? std::vector<HybridAttentionType>{HybridAttentionType::LINEAR,
                                                         HybridAttentionType::NONE,
@@ -162,7 +161,7 @@ CacheConfig createCreatorFullLinearSplitConfig(bool linear_first) {
     KVCacheConfig creator_config;
     creator_config.test_block_num = 8;
     creator_config.linear_step    = 4;
-    return CacheConfigCreator::createRankLocalConfig(
+    return CacheConfigCreator::createConfig(
         makeCreatorFullLinearSplitModel(linear_first), ParallelismConfig{}, RuntimeConfig{}, creator_config);
 }
 
@@ -250,7 +249,6 @@ CacheConfig createDsv4TypedConnectorConfig() {
     const auto block_count = builder.blockCountBasis();
     return std::move(builder)
         .setLinearStep(4)
-        .setUsesIndependentBlockPools(true)
         .setUsesTypedCacheRegions(true)
         .setUsesOpaqueKVCacheStore(true)
         .setIsSparse(true)
@@ -2050,7 +2048,7 @@ TEST_F(KVCacheMemoryConnectorTest, PoolBlockMemoryLayoutPreserveMtpGlobalLayerAn
                    .build();
 
     auto       propose_cfg  = main_cfg;
-    const auto propose_full = makeMhaSpec("full", propose_cfg.cacheKeyBlockTokens(), propose_cfg.dtype(), 1, 8);
+    const auto propose_full = makeMhaSpec("full", propose_cfg.cacheKeyBlockTokens(), propose_cfg.dtype(), 1, 16);
     propose_cfg             = TestCacheConfigBuilder::rebuildForTest(std::move(propose_cfg))
                       .setMainLayerCount(1)
                       .setGroupedSpecs({propose_full},
@@ -2078,6 +2076,7 @@ TEST_F(KVCacheMemoryConnectorTest, PoolBlockMemoryLayoutPreserveMtpGlobalLayerAn
     EXPECT_EQ(slots[0].stride_bytes, main_spec->block_size_bytes() + main_spec->scale_block_size_bytes());
     EXPECT_EQ(slots[1].layer_id, 1);
     EXPECT_EQ(slots[1].tag, "full");
+    EXPECT_NE(propose_spec->block_size_bytes(), main_spec->block_size_bytes());
     EXPECT_EQ(slots[1].stride_bytes, propose_spec->block_size_bytes() + propose_spec->scale_block_size_bytes());
 }
 
@@ -3344,9 +3343,6 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_ResolvedMlaLayout_No
             .setIsSparse(false)
             .setGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"})
             .setGroupBlockLayout({static_cast<uint32_t>(kBlockNum)}, {kv_stride_bytes}, {scale_stride_bytes})
-            .setSharedPoolStorage(
-                kv_stride_bytes, scale_stride_bytes, static_cast<size_t>(kLayerNum) * kPerLayerStrideBytes)
-            .setSharedPoolLayoutLayerCount(kLayerNum)
             .build();
     ASSERT_EQ(mla_spec->block_size_bytes(), kKvBytesPerTok * kSeqPerBlock);
 
@@ -3790,8 +3786,11 @@ protected:
 
         auto full_spec =
             makeMhaSpec("default", static_cast<size_t>(seq_size_per_block), rtp_llm::DataType::TYPE_FP16, 4, 64);
-        auto swa_spec =
-            makeMhaSpec("swa_kv", static_cast<size_t>(seq_size_per_block), rtp_llm::DataType::TYPE_FP16, 4, 64);
+        auto swa_spec = makeResolvedOpaqueSpec(/*state_cache=*/true,
+                                               "swa_kv",
+                                               rtp_llm::DataType::TYPE_FP16,
+                                               full_spec->block_size_bytes(),
+                                               static_cast<uint32_t>(seq_size_per_block));
 
         // Both groups must stay prefix-reusable so poolBlockMemoryLayout() emits one slot per (layer, tag).
         // defaultCacheGroupPolicy(SWA) opts out of prefix reuse, which would collapse the layout
@@ -3806,7 +3805,6 @@ protected:
         const size_t swa_stride  = swa_spec->block_size_bytes();
         return std::move(builder)
             .setLinearStep(linear_step)
-            .setUsesIndependentBlockPools(true)
             .setGroupedSpecs({full_spec, swa_spec},
                              {all_layer_ids, all_layer_ids},
                              {CacheGroupType::FULL, CacheGroupType::SWA},
@@ -3814,8 +3812,6 @@ protected:
                              {full_policy, swa_policy})
             .setGroupBlockLayout(
                 {static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_num)}, {full_stride, swa_stride}, {0, 0})
-            .setSharedPoolStorage(std::max(full_stride, swa_stride), 0, static_cast<size_t>(layer_num) * full_stride)
-            .setSharedPoolLayoutLayerCount(layer_num)
             .build();
     }
 

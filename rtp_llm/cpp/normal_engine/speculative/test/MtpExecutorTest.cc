@@ -547,13 +547,13 @@ public:
 
         auto cache_sp_config              = sp_config;
         cache_sp_config.gen_num_per_cycle = 1;
-        auto cache_config = CacheConfigCreator::createRankLocalSpeculativeConfig(score_cache_model_config,
-                                                                                 propose_cache_model_config,
-                                                                                 params.parallelism_config,
-                                                                                 params.runtime_config,
-                                                                                 test_kv_cache_config,
-                                                                                 cache_sp_config,
-                                                                                 /*warm_up_result=*/std::nullopt);
+        auto cache_config                 = test::createTestSpeculativeCacheConfig(score_cache_model_config,
+                                                                   propose_cache_model_config,
+                                                                   params.parallelism_config,
+                                                                   params.runtime_config,
+                                                                   test_kv_cache_config,
+                                                                   cache_sp_config,
+                                                                   /*warm_up_result=*/std::nullopt);
 
         // Create propose model engine init params
         auto mtp_model_params   = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();

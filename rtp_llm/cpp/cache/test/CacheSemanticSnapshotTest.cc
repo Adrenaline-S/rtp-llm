@@ -31,14 +31,13 @@ CacheConfig makeKimiHybridConfig() {
 
 CacheConfig makeDeepSeekV4HybridPoolConfig() {
     ModelConfig config;
-    config.num_layers                                                = 2;
-    config.attn_config.head_num                                      = 128;
-    config.attn_config.kv_head_num                                   = 1;
-    config.attn_config.size_per_head                                 = 512;
-    config.attn_config.indexer_head_dim                              = 128;
-    config.attn_config.tokens_per_block                              = 128;
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    config.num_layers                                      = 2;
+    config.attn_config.head_num                            = 128;
+    config.attn_config.kv_head_num                         = 1;
+    config.attn_config.size_per_head                       = 512;
+    config.attn_config.indexer_head_dim                    = 128;
+    config.attn_config.tokens_per_block                    = 128;
+    config.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(config, {128, 4});
 
     ParallelismConfig parallelism;
@@ -162,7 +161,6 @@ TEST(CacheSemanticSnapshotTest, KimiHybridMatchesGolden) {
                                                                               0)}};
 
     const auto config = makeKimiHybridConfig();
-    EXPECT_TRUE(config.usesIndependentBlockPools());
     EXPECT_EQ(snapshotCacheConfig(config), expected);
 }
 
@@ -457,9 +455,10 @@ TEST(CacheSemanticSnapshotTest, MlaFp8PreservesPhysicalStrideAcrossKernelSubdivi
 
 TEST(CacheSemanticSnapshotTest, ExplicitBlocksAndReversedDeclarationsAreValueEquivalent) {
     auto make_config = [](bool reversed) {
-        auto base                      = TestCacheConfigBuilder::makeBase(2, 11, 8, 4, DataType::TYPE_FP16);
-        auto full                      = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 8, "full");
-        auto swa                       = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 8, "swa");
+        auto base = TestCacheConfigBuilder::makeBase(2, 11, 8, 4, DataType::TYPE_FP16);
+        auto full = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 8, "full");
+        auto swa  = makeResolvedOpaqueSpec(
+            /*state_cache=*/true, "swa", DataType::TYPE_FP16, full->block_size_bytes(), /*seq_size_per_block=*/8);
         auto full_policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
         full_policy.explicit_block_num = 3;
         auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
@@ -504,7 +503,7 @@ TEST(CacheSemanticSnapshotTest, ExplicitBlocksAndReversedDeclarationsAreValueEqu
          makeExpectedSpecSemanticSnapshot(
              KVCacheSpecType::MultiHeadAttention, DataType::TYPE_FP16, 8, 32, 16, 16, 64, 32, 32, 64, 32, 32, 0, 0, 0)},
         {"swa",
-         KVCacheSpecType::MultiHeadAttention,
+         KVCacheSpecType::OpaqueState,
          CacheGroupType::SWA,
          false,
          CacheEvictPolicy::CHAIN,
@@ -522,21 +521,8 @@ TEST(CacheSemanticSnapshotTest, ExplicitBlocksAndReversedDeclarationsAreValueEqu
          64,
          0,
          1,
-         makeExpectedSpecSemanticSnapshot(KVCacheSpecType::MultiHeadAttention,
-                                          DataType::TYPE_FP16,
-                                          8,
-                                          32,
-                                          16,
-                                          16,
-                                          64,
-                                          32,
-                                          32,
-                                          64,
-                                          32,
-                                          32,
-                                          0,
-                                          0,
-                                          0)}};
+         makeExpectedSpecSemanticSnapshot(
+             KVCacheSpecType::OpaqueState, DataType::TYPE_FP16, 8, 32, 32, 0, 64, 64, 0, 64, 64, 0, 0, 0, 0)}};
     EXPECT_EQ(snapshotCacheConfig(declared), expected);
     EXPECT_EQ(snapshotCacheConfig(reversed), expected);
     EXPECT_EQ(declared.explicitIndependentBlocks("full"), 3u);
@@ -547,7 +533,6 @@ TEST(CacheSemanticSnapshotTest, ExplicitBlocksAndReversedDeclarationsAreValueEqu
 TEST(CacheSemanticSnapshotTest, MtpMergePreservesMainAndModuleRecords) {
     auto main = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/7, /*tokens_per_block=*/8, DataType::TYPE_FP16, 1, 2);
-    main         = TestCacheConfigBuilder::rebuildForTest(std::move(main)).setSharedPoolLayoutLayerCount(2).build();
     auto propose = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/7, /*tokens_per_block=*/8, DataType::TYPE_FP16, 1, 2);
     main = TestCacheConfigBuilder::rebuildForTest(std::move(main))

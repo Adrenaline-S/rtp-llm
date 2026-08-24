@@ -12,95 +12,6 @@ namespace rtp_llm {
 
 class BlockPoolConfigHelper {
 public:
-    /**
-     * Create block pool config from CacheConfig.
-     * Supports both single model and MTP (1+N models) configuration.
-     * Memory layout is [layout0_kv][layout0_scale][layout1_kv][layout1_scale]...[layoutN_kv][layoutN_scale]
-     * Generally Memory layout is [main_kv][main_scale][mtp1_kv][mtp1_scale]...[mtpN_kv][mtpN_scale]
-     *
-     * @param cache_config The CacheConfig containing main model and optional MTP modules
-     */
-    static BlockPoolConfig createConfig(const CacheConfig& cache_config) {
-        RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0, "cache groups must not be empty");
-        BlockPoolConfig config;
-        config.pool_name       = "default";
-        config.block_num       = cache_config.blockCountBasis();
-        const bool  is_hybrid  = cache_config.groupNums() > 1;
-        auto        layer_num  = is_hybrid ? cache_config.sharedPoolLayoutLayerCount() : cache_config.mainLayerCount();
-        const auto& main_group = cache_config.groups().front();
-        const auto& main_spec  = main_group.spec;
-        // linear block size is same with full block block size
-        MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
-                                                                  layer_num,
-                                                                  cache_config.sharedPoolKvBlockStrideBytes(),
-                                                                  cache_config.sharedPoolKvScaleStrideBytes(),
-                                                                  main_spec,
-                                                                  cache_config,
-                                                                  cache_config.blockCountBasis(),
-                                                                  main_group.local_kv_head_num,
-                                                                  main_group.seq_size_per_block,
-                                                                  main_group.kernelBlocksPerPoolBlock());
-
-        main_layout.kv_cache_offset_bytes = 0;
-        main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
-        size_t current_offset             = main_layout.kv_scale_offset_bytes + main_layout.kv_scale_pool_size_bytes;
-        RTP_LLM_LOG_INFO("main_layout.kv_scale_offset_bytes: %zu", main_layout.kv_scale_offset_bytes);
-        RTP_LLM_LOG_INFO("main_layout.kv_scale_pool_size_bytes: %zu", main_layout.kv_scale_pool_size_bytes);
-
-        config.memory_layouts.push_back(main_layout);
-
-        // Create MTP sub-model layouts
-        for (size_t i = 0; i < cache_config.mtpModuleCount(); ++i) {
-            const auto& mtp_sub_config = cache_config.mtpModule(i);
-            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config.groupNums() > 0, "MTP module %zu cache groups must not be empty", i);
-
-            const auto mtp_layer_num = mtp_sub_config.mainLayerCount();
-
-            const CacheGroup* real_mtp_group = &mtp_sub_config.groups().front();
-            for (const auto& group : mtp_sub_config.groups()) {
-                if (!group.layer_ids.empty()) {
-                    real_mtp_group = &group;
-                    break;
-                }
-            }
-            const auto& mtp_spec = real_mtp_group->spec;
-            // MTP block size may differ from the main model. Use the real
-            // MTP group that owns a layer; target-aligned placeholder groups
-            // must not affect the sub-model memory layout.
-            MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
-                                                                     mtp_layer_num,
-                                                                     mtp_spec->block_size_bytes(),
-                                                                     mtp_spec->scale_block_size_bytes(),
-                                                                     mtp_spec,
-                                                                     cache_config,
-                                                                     cache_config.blockCountBasis(),
-                                                                     real_mtp_group->local_kv_head_num,
-                                                                     real_mtp_group->seq_size_per_block,
-                                                                     real_mtp_group->kernelBlocksPerPoolBlock());
-
-            mtp_layout.kv_cache_offset_bytes = current_offset;
-            RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);
-            current_offset += mtp_layout.kv_block_pool_size_bytes;
-
-            if (mtp_layout.hasScale()) {
-                mtp_layout.kv_scale_offset_bytes = current_offset;
-                RTP_LLM_LOG_INFO("mtp_layout.kv_scale_pool_size_bytes = %ld", mtp_layout.kv_scale_pool_size_bytes);
-                current_offset += mtp_layout.kv_scale_pool_size_bytes;
-            } else {
-                mtp_layout.kv_scale_offset_bytes = current_offset;
-            }
-
-            config.memory_layouts.push_back(mtp_layout);
-        }
-
-        config.total_size_bytes = current_offset;
-
-        RTP_LLM_LOG_INFO("BlockPoolConfig(memory_layouts=%zu): total_size=%zu bytes",
-                         config.memory_layouts.size(),
-                         config.total_size_bytes);
-        return config;
-    }
-
     static BlockPoolConfig createConfigForGroup(const CacheConfig& cache_config, std::string_view tag) {
         const auto& group = cache_config.group(tag);
         const auto& spec  = group.spec;
@@ -121,29 +32,27 @@ public:
 
         size_t     total_layout_layers = 0;
         size_t     current_offset      = 0;
-        const auto append_layout =
-            [&](const CacheConfig& source_config, const CacheGroup& source_group, uint32_t layer_num) {
-                RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group tag=%s layout has no layers", group.tag.c_str());
-                const auto& layout_spec = source_group.spec;
-                RTP_LLM_CHECK_WITH_INFO(
-                    layout_spec != nullptr, "cache spec for group tag=%s is null", source_group.tag.c_str());
-                auto layout                  = createMemoryLayoutConfig(false,
-                                                       layer_num,
-                                                       source_group.kv_block_stride_bytes,
-                                                       source_group.kv_scale_stride_bytes,
-                                                       layout_spec,
-                                                       source_config,
-                                                       config.block_num,
-                                                       source_group.local_kv_head_num,
-                                                       source_group.seq_size_per_block,
-                                                       source_group.kernelBlocksPerPoolBlock());
-                layout.kv_cache_offset_bytes = current_offset;
-                current_offset += layout.kv_block_pool_size_bytes;
-                layout.kv_scale_offset_bytes = current_offset;
-                current_offset += layout.kv_scale_pool_size_bytes;
-                total_layout_layers += layer_num;
-                config.memory_layouts.push_back(std::move(layout));
-            };
+        const auto append_layout       = [&](const CacheGroup& source_group, uint32_t layer_num) {
+            RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group tag=%s layout has no layers", group.tag.c_str());
+            const auto& layout_spec = source_group.spec;
+            RTP_LLM_CHECK_WITH_INFO(
+                layout_spec != nullptr, "cache spec for group tag=%s is null", source_group.tag.c_str());
+            auto layout                  = createMemoryLayoutConfig(source_group.requiresWholeBlockTransfer(),
+                                                   layer_num,
+                                                   source_group.kv_block_stride_bytes,
+                                                   source_group.kv_scale_stride_bytes,
+                                                   layout_spec,
+                                                   config.block_num,
+                                                   source_group.local_kv_head_num,
+                                                   source_group.seq_size_per_block,
+                                                   source_group.kernelBlocksPerPoolBlock());
+            layout.kv_cache_offset_bytes = current_offset;
+            current_offset += layout.kv_block_pool_size_bytes;
+            layout.kv_scale_offset_bytes = current_offset;
+            current_offset += layout.kv_scale_pool_size_bytes;
+            total_layout_layers += layer_num;
+            config.memory_layouts.push_back(std::move(layout));
+        };
 
         const auto& group_layer_ids = group.layer_ids;
         const auto  main_layer_num  = static_cast<uint32_t>(
@@ -151,7 +60,7 @@ public:
                 return layer_id >= 0 && static_cast<uint32_t>(layer_id) < cache_config.mainLayerCount();
             }));
         if (main_layer_num > 0) {
-            append_layout(cache_config, group, main_layer_num);
+            append_layout(group, main_layer_num);
         }
 
         for (size_t module_index = 0; module_index < cache_config.mtpModuleCount(); ++module_index) {
@@ -159,7 +68,7 @@ public:
             const auto& mtp_group     = mtp_config.group(tag);
             const auto  mtp_layer_num = static_cast<uint32_t>(mtp_group.layer_ids.size());
             if (mtp_layer_num > 0) {
-                append_layout(mtp_config, mtp_group, mtp_layer_num);
+                append_layout(mtp_group, mtp_layer_num);
             }
         }
 
@@ -200,12 +109,11 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig createMemoryLayoutConfig(bool                               enable_hybrid_attention,
+    static MemoryLayoutConfig createMemoryLayoutConfig(bool                               use_whole_block_transfer,
                                                        uint32_t                           layer_num,
                                                        size_t                             kv_block_stride_bytes,
                                                        size_t                             kv_scale_stride_bytes,
                                                        std::shared_ptr<const KVCacheSpec> spec,
-                                                       const CacheConfig&                 cache_config,
                                                        uint32_t                           block_num,
                                                        uint32_t                           local_kv_head_num,
                                                        size_t                             seq_size_per_block,
@@ -220,13 +128,15 @@ private:
         cfg.k_scale_stride_bytes  = spec->k_scale_block_size_bytes();
         cfg.v_scale_stride_bytes  = spec->v_scale_block_size_bytes();
 
-        cfg.enable_kv_scale         = cfg.kv_scale_stride_bytes > 0;
-        cfg.dtype                   = spec->memoryLayoutDType();
-        cfg.local_head_num_kv       = local_kv_head_num;
-        cfg.enable_hybrid_attention = enable_hybrid_attention;
-        // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla                     = cache_config.usesMla() || cache_config.isSparse();
-        cfg.use_mla                    = cache_config.usesMla();
+        cfg.enable_kv_scale          = cfg.kv_scale_stride_bytes > 0;
+        cfg.dtype                    = spec->memoryLayoutDType();
+        cfg.local_head_num_kv        = local_kv_head_num;
+        cfg.use_whole_block_transfer = use_whole_block_transfer;
+        // Layout shape belongs to this source group. A composed root may carry
+        // joint main/draft capability flags that must not change another
+        // module's physical tensor view.
+        cfg.use_mla                    = spec->type == KVCacheSpecType::MultiHeadLatentAttention;
+        cfg.is_mla                     = cfg.use_mla || spec->type == KVCacheSpecType::OpaqueKV;
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
 

@@ -15,8 +15,13 @@ namespace test {
 namespace {
 
 CacheGroup makeResourceGroup(std::string tag, CacheGroupType type) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 8;
+    KVCacheSpecPtr spec;
+    if (type == CacheGroupType::LINEAR) {
+        spec = makeResolvedLinearSpec(
+            DataType::TYPE_FP16, 1, 1, 1, 1, 2, 8, DataType::TYPE_FP16, DataType::TYPE_FP16, tag);
+    } else {
+        spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 8, tag);
+    }
 
     CacheGroup group;
     group.tag                       = std::move(tag);

@@ -158,8 +158,9 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
 }
 
 static CacheConfig initTwoGroupCacheConfig(CacheConfig cache_config, bool declare_in_sorted_order) {
-    auto             full_spec   = std::make_shared<MHAKVCacheSpec>();
-    auto             linear_spec = std::make_shared<MHAKVCacheSpec>();
+    auto full_spec   = std::make_shared<MHAKVCacheSpec>();
+    auto linear_spec = test::makeResolvedLinearSpec(
+        TYPE_FP16, 1, 1, 1, 1, /*conv_kernel_dim=*/2, /*seq_size_per_block=*/1, TYPE_FP16, TYPE_FP16, "linear");
     std::vector<int> layer_ids{0};
     if (declare_in_sorted_order) {
         return test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_config))
@@ -254,11 +255,11 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     model_config.vocab_size  = 32;
     model_config.num_layers  = 1;
 
-    auto full_spec                  = std::make_shared<MHAKVCacheSpec>();
-    full_spec->seq_size_per_block   = 8;
-    auto linear_spec                = std::make_shared<MHAKVCacheSpec>();
-    linear_spec->seq_size_per_block = 2;
-    auto cache_config_builder       = rtp_llm::test::TestCacheConfigBuilder::makeBase(
+    auto full_spec                = std::make_shared<MHAKVCacheSpec>();
+    full_spec->seq_size_per_block = 8;
+    auto linear_spec              = test::makeResolvedLinearSpec(
+        TYPE_FP16, 1, 1, 1, 1, /*conv_kernel_dim=*/2, /*seq_size_per_block=*/2, TYPE_FP16, TYPE_FP16, "linear");
+    auto cache_config_builder = rtp_llm::test::TestCacheConfigBuilder::makeBase(
         /*layer_count=*/1, /*block_count=*/0, /*cache_key_tokens=*/2, /*kernel_tokens=*/2, TYPE_FP16);
     auto cache_config = std::move(cache_config_builder)
                             .setGroupedSpecs({linear_spec, full_spec},
@@ -296,11 +297,19 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
 
 TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMutateHostOrPublish) {
     const auto make_config = [](const std::string& second_tag, size_t second_b) {
-        auto first_spec                 = std::make_shared<MHAKVCacheSpec>();
-        first_spec->seq_size_per_block  = 2;
-        auto second_spec                = std::make_shared<MHAKVCacheSpec>();
-        second_spec->seq_size_per_block = second_b;
-        auto builder                    = rtp_llm::test::TestCacheConfigBuilder::makeBase(
+        auto first_spec                = std::make_shared<MHAKVCacheSpec>();
+        first_spec->seq_size_per_block = 2;
+        auto second_spec               = test::makeResolvedLinearSpec(TYPE_FP16,
+                                                        1,
+                                                        1,
+                                                        1,
+                                                        1,
+                                                        /*conv_kernel_dim=*/2,
+                                                        /*seq_size_per_block=*/second_b,
+                                                        TYPE_FP16,
+                                                        TYPE_FP16,
+                                                        second_tag);
+        auto builder                   = rtp_llm::test::TestCacheConfigBuilder::makeBase(
             /*layer_count=*/1, /*block_count=*/0, /*cache_key_tokens=*/2, /*kernel_tokens=*/2, TYPE_FP16);
         return std::move(builder)
             .setGroupedSpecs({first_spec, second_spec},
@@ -413,10 +422,6 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_config))
             .setGroupedSpecs({fp8_spec}, {{0, 1}}, {CacheGroupType::FULL}, {"default"})
             .setGroupBlockLayout({block_count}, {fp8_spec->block_size_bytes()}, {fp8_spec->scale_block_size_bytes()})
-            .setSharedPoolStorage(fp8_spec->block_size_bytes(),
-                                  fp8_spec->scale_block_size_bytes(),
-                                  2 * (fp8_spec->block_size_bytes() + fp8_spec->scale_block_size_bytes()))
-            .setSharedPoolLayoutLayerCount(2)
             .build();
 
     RuntimeConfig              runtime_config;
@@ -500,8 +505,6 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.group("default").kv_block_stride_bytes);
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.group("default").kv_scale_stride_bytes);
     }
     {
         MMModelConfig mm_model_config;

@@ -204,7 +204,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         specs.push_back(make_spec(declared));
     }
     return std::move(builder)
-        .setUsesIndependentBlockPools(true)
         .setUsesTypedCacheRegions(true)
         .setUsesOpaqueKVCacheStore(true)
         .setIsSparse(true)
@@ -260,19 +259,18 @@ void setGroupStridesForConfig(CacheConfig&               config,
 
 ModelConfig makeDsv4ProModelConfig() {
     ModelConfig mc;
-    mc.num_layers                                                = 61;
-    mc.hidden_size                                               = 7168;
-    mc.attn_config.head_num                                      = 128;
-    mc.attn_config.kv_head_num                                   = 1;
-    mc.attn_config.size_per_head                                 = 512;
-    mc.attn_config.rope_head_dim                                 = 64;
-    mc.attn_config.indexer_head_dim                              = 128;
-    mc.attn_config.indexer_head_num                              = 64;
-    mc.attn_config.indexer_topk                                  = 1024;
-    mc.attn_config.tokens_per_block                              = 128;
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    std::vector<int> ratios                                      = {128, 128};
+    mc.num_layers                                      = 61;
+    mc.hidden_size                                     = 7168;
+    mc.attn_config.head_num                            = 128;
+    mc.attn_config.kv_head_num                         = 1;
+    mc.attn_config.size_per_head                       = 512;
+    mc.attn_config.rope_head_dim                       = 64;
+    mc.attn_config.indexer_head_dim                    = 128;
+    mc.attn_config.indexer_head_num                    = 64;
+    mc.attn_config.indexer_topk                        = 1024;
+    mc.attn_config.tokens_per_block                    = 128;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
+    std::vector<int> ratios                            = {128, 128};
     for (int i = 2; i < 61; ++i) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
@@ -282,19 +280,18 @@ ModelConfig makeDsv4ProModelConfig() {
 
 ModelConfig makeDsv4FlashModelConfig() {
     ModelConfig mc;
-    mc.num_layers                                                = 43;
-    mc.hidden_size                                               = 4096;
-    mc.attn_config.head_num                                      = 64;
-    mc.attn_config.kv_head_num                                   = 1;
-    mc.attn_config.size_per_head                                 = 512;
-    mc.attn_config.rope_head_dim                                 = 64;
-    mc.attn_config.indexer_head_dim                              = 128;
-    mc.attn_config.indexer_head_num                              = 64;
-    mc.attn_config.indexer_topk                                  = 512;
-    mc.attn_config.tokens_per_block                              = 128;
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    std::vector<int> ratios                                      = {0, 0};
+    mc.num_layers                                      = 43;
+    mc.hidden_size                                     = 4096;
+    mc.attn_config.head_num                            = 64;
+    mc.attn_config.kv_head_num                         = 1;
+    mc.attn_config.size_per_head                       = 512;
+    mc.attn_config.rope_head_dim                       = 64;
+    mc.attn_config.indexer_head_dim                    = 128;
+    mc.attn_config.indexer_head_num                    = 64;
+    mc.attn_config.indexer_topk                        = 512;
+    mc.attn_config.tokens_per_block                    = 128;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
+    std::vector<int> ratios                            = {0, 0};
     for (int i = 2; i < 43; ++i) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
@@ -310,7 +307,7 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     kv_config.kernel_seq_size_per_block = 128;
     kv_config.dsv4_fixed_pool_blocks    = 512;
     kv_config.test_block_num            = 512;
-    auto config                         = CacheConfigCreator::createRankLocalConfig(mc, pc, RuntimeConfig{}, kv_config);
+    auto config                         = CacheConfigCreator::createConfig(mc, pc, RuntimeConfig{}, kv_config);
     return config;
 }
 
@@ -321,7 +318,6 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
     const auto swa_spec    = makeMhaSpec("swa_kv", builder.cacheKeyBlockTokens(), builder.dtype(), 1, 8);
     const auto block_count = builder.blockCountBasis();
     return std::move(builder)
-        .setUsesIndependentBlockPools(true)
         .setGroupedSpecs({csa_spec, swa_spec},
                          /*layers_by_group=*/{{0, 1}, {0, 1}},
                          {CacheGroupType::FULL, CacheGroupType::FULL},
@@ -339,7 +335,6 @@ CacheConfig makeKvOnlyTypedOpaqueConfig() {
     const auto dtype       = builder.dtype();
     const auto block_count = builder.blockCountBasis();
     return std::move(builder)
-        .setUsesIndependentBlockPools(true)
         .setUsesTypedCacheRegions(true)
         .setUsesOpaqueKVCacheStore(true)
         .setGroupedSpecs({makeResolvedOpaqueSpec(/*state_cache=*/false, "csa_kv", dtype, 64, seq_size),

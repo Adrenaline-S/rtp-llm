@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 namespace rtp_llm::test {
@@ -42,11 +43,10 @@ ModelConfig makeMlaModel() {
 }
 
 ModelConfig makeSparseMlaModel(int64_t layer_num = 2) {
-    auto config                                                      = makeMlaModel();
-    config.num_layers                                                = layer_num;
-    config.attn_config.is_sparse                                     = true;
-    config.attn_config.indexer_head_dim                              = 128;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config                         = makeMlaModel();
+    config.num_layers                   = layer_num;
+    config.attn_config.is_sparse        = true;
+    config.attn_config.indexer_head_dim = 128;
     config.kv_cache_spec_descs.assign(static_cast<size_t>(layer_num), {});
 
     KVCacheSpecDesc default_desc;
@@ -82,8 +82,7 @@ ModelConfig makeKimiModel() {
 }
 
 ModelConfig makeQwenHybridModel() {
-    auto config                                                      = makeKimiModel();
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config = makeKimiModel();
     // Qwen's retained hybrid descriptor shape is a FULL/LINEAR interleave;
     // tags are business identity and intentionally differ from Kimi's names.
     for (auto& layer_descs : config.kv_cache_spec_descs) {
@@ -96,15 +95,14 @@ ModelConfig makeQwenHybridModel() {
 
 ModelConfig makeDsv4Model() {
     ModelConfig config;
-    config.num_layers                                                = 2;
-    config.data_type                                                 = DataType::TYPE_FP16;
-    config.attn_config.head_num                                      = 128;
-    config.attn_config.kv_head_num                                   = 1;
-    config.attn_config.size_per_head                                 = 512;
-    config.attn_config.indexer_head_dim                              = 128;
-    config.attn_config.tokens_per_block                              = 128;
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    config.num_layers                                      = 2;
+    config.data_type                                       = DataType::TYPE_FP16;
+    config.attn_config.head_num                            = 128;
+    config.attn_config.kv_head_num                         = 1;
+    config.attn_config.size_per_head                       = 512;
+    config.attn_config.indexer_head_dim                    = 128;
+    config.attn_config.tokens_per_block                    = 128;
+    config.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(config, {128, 4});
     return config;
 }
@@ -116,8 +114,19 @@ KVCacheConfig fixedBlockConfig() {
 }
 
 CacheConfig createFinalConfig(const ModelConfig& model_config) {
-    return CacheConfigCreator::createRankLocalConfig(
-        model_config, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig());
+    return CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig());
+}
+
+CacheConfig createSpeculativeConfig(const ModelConfig&                main_model,
+                                    const ModelConfig&                draft_model,
+                                    const SpeculativeExecutionConfig& sp_config,
+                                    const KVCacheConfig&              kv_cache_config = fixedBlockConfig()) {
+    const auto main = CacheConfigCreator::createConfig(
+        main_model, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config, std::nullopt, sp_config);
+    const auto draft = CacheConfigCreator::createSpConfig(
+        draft_model, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config, sp_config);
+    return CacheConfigCreator::mergeSpConfig(
+        main, draft, main_model, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config, sp_config);
 }
 
 std::string runtimeErrorMessage(const std::function<void()>& operation) {
@@ -127,6 +136,52 @@ std::string runtimeErrorMessage(const std::function<void()>& operation) {
         return error.what();
     }
     return {};
+}
+
+TEST(CacheConfigCreatorTest, BasicConfigPublishesGeometryWithoutCapacity) {
+    const auto basic = CacheConfigCreator::createBasicConfig(
+        makeSparseMlaModel(), ParallelismConfig{}, fixedBlockConfig(), /*gen_num_per_cycle=*/0);
+
+    EXPECT_EQ(basic.blockCountBasis(), 0u);
+    ASSERT_EQ(groupTagSet(basic), (std::set<std::string>{"default", "indexer_kv"}));
+    EXPECT_EQ(basic.group("default").block_num, 0u);
+    EXPECT_EQ(basic.group("indexer_kv").block_num, 0u);
+    EXPECT_GT(basic.group("default").kv_block_stride_bytes, 0u);
+    EXPECT_GT(basic.group("indexer_kv").kv_block_stride_bytes, 0u);
+    EXPECT_GT(basic.pagedBlockBudgetBytes(), 0u);
+    EXPECT_THROW((void)CacheConfigCreator::withRankSyncBlockCount(basic, 1), std::runtime_error);
+    EXPECT_THROW((void)std::make_shared<KVCacheManager>(basic, /*warmup=*/false), std::runtime_error);
+}
+
+TEST(CacheConfigCreatorTest, MainAndDraftHaveIndependentProvisionalCapacityAndMergeRecomputesJointBasis) {
+    const auto                 main_model  = makeMhaModel(/*layer_num=*/2);
+    const auto                 draft_model = makeMhaModel(/*layer_num=*/1);
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+
+    KVCacheConfig main_kv;
+    main_kv.test_block_num = 11;
+    KVCacheConfig draft_kv;
+    draft_kv.test_block_num = 7;
+    const auto main         = CacheConfigCreator::createConfig(
+        main_model, ParallelismConfig{}, RuntimeConfig{}, main_kv, std::nullopt, sp_config);
+    const auto draft =
+        CacheConfigCreator::createSpConfig(draft_model, ParallelismConfig{}, RuntimeConfig{}, draft_kv, sp_config);
+    EXPECT_EQ(main.blockCountBasis(), 11u);
+    EXPECT_EQ(draft.blockCountBasis(), 7u);
+
+    KVCacheConfig joint_kv;
+    joint_kv.test_block_num = 3;
+    const auto merged       = CacheConfigCreator::mergeSpConfig(
+        main, draft, main_model, ParallelismConfig{}, RuntimeConfig{}, joint_kv, sp_config);
+    EXPECT_EQ(merged.blockCountBasis(), 3u);
+    EXPECT_EQ(merged.group("default").block_num, 3u);
+    ASSERT_EQ(merged.mtpModuleCount(), 2u);
+    EXPECT_EQ(merged.mtpModule(0).blockCountBasis(), 3u);
+    EXPECT_EQ(merged.mtpModule(0).group("default").block_num, 3u);
+    EXPECT_EQ(main.blockCountBasis(), 11u);
+    EXPECT_EQ(draft.blockCountBasis(), 7u);
 }
 
 TEST(CacheConfigCreatorTest, CreateConfigLowersOrdinaryMhaToFixedFinalRecord) {
@@ -166,7 +221,6 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersOrdinaryMhaToFixedFinalRecord) {
                                                                               0)}};
 
     const auto config = createFinalConfig(makeMhaModel());
-    EXPECT_FALSE(config.usesIndependentBlockPools());
     EXPECT_EQ(snapshotCacheConfig(config), expected);
 }
 
@@ -207,7 +261,6 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersOrdinaryMlaToFixedFinalRecord) {
                                                                               0)}};
 
     const auto config = createFinalConfig(makeMlaModel());
-    EXPECT_FALSE(config.usesIndependentBlockPools());
     EXPECT_EQ(snapshotCacheConfig(config), expected);
 }
 
@@ -238,7 +291,6 @@ TEST(CacheConfigCreatorTest, DescLoweringKeepsTagSeparateFromLayoutFingerprint) 
 TEST(CacheConfigCreatorTest, CreateConfigIsolatesSparseMlaIndexerPoolAndStride) {
     const auto config = createFinalConfig(makeSparseMlaModel());
 
-    ASSERT_TRUE(config.usesIndependentBlockPools());
     ASSERT_EQ(groupTagSet(config), (std::set<std::string>{"default", "indexer_kv"}));
     const std::string default_tag = "default";
     const std::string indexer_tag = "indexer_kv";
@@ -263,10 +315,8 @@ TEST(CacheConfigCreatorTest, SparseFlagWithoutIndexerDescriptorDoesNotProjectInd
     const auto        config                  = createFinalConfig(model_config);
     const std::string default_tag             = "mla";
 
-    EXPECT_FALSE(config.usesIndependentBlockPools());
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"mla"}));
     EXPECT_EQ(config.group(default_tag).kv_scale_stride_bytes, 0u);
-    EXPECT_EQ(config.sharedPoolKvScaleStrideBytes(), 0u);
 }
 
 TEST(CacheConfigCreatorTest, CreateSpConfigAlignsSparseMlaIndexerAcrossTargetAndMtpModules) {
@@ -276,13 +326,7 @@ TEST(CacheConfigCreatorTest, CreateSpConfigAlignsSparseMlaIndexerAcrossTargetAnd
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = 2;
-    const auto config           = CacheConfigCreator::createRankLocalSpeculativeConfig(score_config,
-                                                                             propose_config,
-                                                                             ParallelismConfig{},
-                                                                             RuntimeConfig{},
-                                                                             fixedBlockConfig(),
-                                                                             sp_config,
-                                                                             std::nullopt);
+    const auto config           = createSpeculativeConfig(score_config, propose_config, sp_config);
 
     ASSERT_EQ(groupTagSet(config), (std::set<std::string>{"default", "indexer_kv"}));
     ASSERT_EQ(config.mtpModuleCount(), 2u);
@@ -310,15 +354,9 @@ TEST(CacheConfigCreatorTest, RankSynchronizationReturnsNewConfigAndRecursivelyPr
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = 2;
-    const auto rank_local       = CacheConfigCreator::createRankLocalSpeculativeConfig(score_config,
-                                                                                 propose_config,
-                                                                                 ParallelismConfig{},
-                                                                                 RuntimeConfig{},
-                                                                                 fixedBlockConfig(),
-                                                                                 sp_config,
-                                                                                 std::nullopt);
+    const auto rank_local       = createSpeculativeConfig(score_config, propose_config, sp_config);
 
-    const auto synchronized = CacheConfigCreator::withRankSynchronizedBlockCountBasis(rank_local, 3);
+    const auto synchronized = CacheConfigCreator::withRankSyncBlockCount(rank_local, 3);
 
     EXPECT_EQ(rank_local.blockCountBasis(), kTestBlockNum);
     EXPECT_EQ(rank_local.group("default").block_num, kTestBlockNum);
@@ -335,12 +373,11 @@ TEST(CacheConfigCreatorTest, RankSynchronizationReturnsNewConfigAndRecursivelyPr
 }
 
 TEST(CacheConfigCreatorTest, RankSynchronizationRejectsZeroOrCapacityIncrease) {
-    const auto rank_local = CacheConfigCreator::createRankLocalConfig(
+    const auto rank_local = CacheConfigCreator::createConfig(
         makeSparseMlaModel(), ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig());
 
-    EXPECT_ANY_THROW(CacheConfigCreator::withRankSynchronizedBlockCountBasis(rank_local, 0));
-    EXPECT_ANY_THROW(
-        CacheConfigCreator::withRankSynchronizedBlockCountBasis(rank_local, rank_local.blockCountBasis() + 1));
+    EXPECT_ANY_THROW(CacheConfigCreator::withRankSyncBlockCount(rank_local, 0));
+    EXPECT_ANY_THROW(CacheConfigCreator::withRankSyncBlockCount(rank_local, rank_local.blockCountBasis() + 1));
 }
 
 TEST(CacheConfigCreatorTest, DecodeWarmupFactoryReturnsCompleteDsv4ConfigWithOneBlockBasis) {
@@ -432,12 +469,10 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersKimiHybridToFixedFinalRecords) {
                                                                               0)}};
 
     const auto config = createFinalConfig(makeKimiModel());
-    EXPECT_TRUE(config.usesIndependentBlockPools());
-    EXPECT_EQ(config.sharedPoolLayoutLayerCount(), 2);
     EXPECT_EQ(snapshotCacheConfig(config), expected);
 }
 
-TEST(CacheConfigCreatorTest, GenericGroupingPreservesLegacyHybridAndIndependentPublicationOrder) {
+TEST(CacheConfigCreatorTest, GenericGroupingPreservesDescriptorPublicationOrder) {
     auto hybrid = makeKimiModel();
     for (auto& layer_descs : hybrid.kv_cache_spec_descs) {
         for (auto& desc : layer_descs) {
@@ -447,9 +482,9 @@ TEST(CacheConfigCreatorTest, GenericGroupingPreservesLegacyHybridAndIndependentP
     const auto hybrid_config =
         CacheConfigCreator::createDecodeWarmupConfig(hybrid, ParallelismConfig{}, KVCacheConfig{}, 0);
     ASSERT_EQ(hybrid_config.groups().size(), 2u);
-    EXPECT_EQ(hybrid_config.groups()[0].tag, "z_full");
-    EXPECT_EQ(hybrid_config.groups()[0].policy.group_type, CacheGroupType::FULL);
-    EXPECT_EQ(hybrid_config.groups()[1].tag, "a_linear");
+    EXPECT_EQ(hybrid_config.groups()[0].tag, "a_linear");
+    EXPECT_EQ(hybrid_config.groups()[0].policy.group_type, CacheGroupType::LINEAR);
+    EXPECT_EQ(hybrid_config.groups()[1].tag, "z_full");
 
     auto independent                          = makeSparseMlaModel(/*layer_num=*/1);
     independent.kv_cache_spec_descs[0][0].tag = "z_first";
@@ -462,9 +497,8 @@ TEST(CacheConfigCreatorTest, GenericGroupingPreservesLegacyHybridAndIndependentP
 }
 
 TEST(CacheConfigCreatorTest, GroupRecordsOwnHeterogeneousPhysicalAndKernelGeometry) {
-    auto model                                                      = makeMhaModel(/*layer_num=*/1);
-    model.attn_config.tokens_per_block                              = 128;
-    model.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto model                         = makeMhaModel(/*layer_num=*/1);
+    model.attn_config.tokens_per_block = 128;
 
     KVCacheSpecDesc scaled;
     scaled.tag                  = "scaled";
@@ -484,7 +518,7 @@ TEST(CacheConfigCreatorTest, GroupRecordsOwnHeterogeneousPhysicalAndKernelGeomet
     kv_cache.kernel_seq_size_per_block = 64;
     kv_cache.test_block_num            = kTestBlockNum;
 
-    const auto config = CacheConfigCreator::createRankLocalConfig(model, parallelism, RuntimeConfig{}, kv_cache);
+    const auto config = CacheConfigCreator::createConfig(model, parallelism, RuntimeConfig{}, kv_cache);
     EXPECT_EQ(config.group("default").seq_size_per_block, 128u);
     EXPECT_EQ(config.group("default").kernel_seq_size_per_block, 64u);
     EXPECT_EQ(config.group("scaled").seq_size_per_block, 256u);
@@ -550,8 +584,7 @@ TEST(CacheConfigCreatorTest, PublicCreatorWrappersPreserveDescriptorTagsAcrossBa
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = 1;
-    const auto speculative      = CacheConfigCreator::createRankLocalSpeculativeConfig(
-        model, model, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig(), sp_config, std::nullopt);
+    const auto speculative      = createSpeculativeConfig(model, model, sp_config);
     // The target config appends one MTP layer; it must retain the same tagged
     // descriptor while lowering the expected target-layer span.
     expect_lowered_descriptor(speculative, {0, 1});
@@ -586,7 +619,7 @@ TEST(CacheConfigCreatorTest, CreateConfigLowersDsv4SevenGroupPoliciesAndExplicit
     EXPECT_EQ(snapshot[6].block_bytes, 262144u);
 }
 
-TEST(CacheConfigCreatorTest, CreateConfigPreservesLegacyHybridDefaultCpPolicy) {
+TEST(CacheConfigCreatorTest, CreateConfigPreservesDescriptorCpPolicy) {
     auto config = makeKimiModel();
     for (auto& layer_descs : config.kv_cache_spec_descs) {
         for (auto& desc : layer_descs) {
@@ -600,14 +633,13 @@ TEST(CacheConfigCreatorTest, CreateConfigPreservesLegacyHybridDefaultCpPolicy) {
 
     const auto        final_config = createFinalConfig(config);
     const std::string full_tag     = "full";
-    EXPECT_EQ(final_config.group(full_tag).policy.cp_mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-    EXPECT_EQ(final_config.group(full_tag).policy.cp_slice, CpBlockSliceMode::NONE);
+    EXPECT_EQ(final_config.group(full_tag).policy.cp_mapping, CpBlockMappingMode::COMPACT_LAST_RANK);
+    EXPECT_EQ(final_config.group(full_tag).policy.cp_slice, CpBlockSliceMode::EQUAL_BYTES);
 }
 
 TEST(CacheConfigCreatorTest, CreateConfigPreservesAllLinearExplicitTags) {
-    auto config                                                      = makeKimiModel();
-    config.num_layers                                                = 2;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config                                           = makeKimiModel();
+    config.num_layers                                     = 2;
     config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::LINEAR, HybridAttentionType::LINEAR};
     config.kv_cache_spec_descs.resize(2);
     config.kv_cache_spec_descs[0] = {KVCacheSpecDesc{"recurrent_state", KVCacheSpecType::LinearAttention}};
@@ -617,7 +649,6 @@ TEST(CacheConfigCreatorTest, CreateConfigPreservesAllLinearExplicitTags) {
     EXPECT_EQ(groupTagSet(final_config), (std::set<std::string>{"recurrent_state", "convolution_state"}));
     EXPECT_EQ(final_config.group("recurrent_state").policy.group_type, CacheGroupType::LINEAR);
     EXPECT_EQ(final_config.group("convolution_state").policy.group_type, CacheGroupType::LINEAR);
-    EXPECT_TRUE(final_config.usesIndependentBlockPools());
 }
 
 TEST(CacheConfigCreatorTest, CreateSpConfigPreservesExactAndDefaultMtpMappingsWithPlaceholders) {
@@ -629,16 +660,9 @@ TEST(CacheConfigCreatorTest, CreateSpConfigPreservesExactAndDefaultMtpMappingsWi
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = 2;
-    const auto config           = CacheConfigCreator::createRankLocalSpeculativeConfig(score_config,
-                                                                             propose_config,
-                                                                             ParallelismConfig{},
-                                                                             RuntimeConfig{},
-                                                                             fixedBlockConfig(),
-                                                                             sp_config,
-                                                                             std::nullopt);
+    const auto config           = createSpeculativeConfig(score_config, propose_config, sp_config);
 
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"full", "linear"}));
-    EXPECT_EQ(config.sharedPoolLayoutLayerCount(), 2);
     EXPECT_EQ(config.group("full").layer_ids, std::vector<int>({1, 3, 4, 5}));
     ASSERT_EQ(config.mtpModuleCount(), 2u);
     for (size_t module_index = 0; module_index < config.mtpModuleCount(); ++module_index) {
@@ -652,22 +676,168 @@ TEST(CacheConfigCreatorTest, CreateSpConfigPreservesExactAndDefaultMtpMappingsWi
     }
 }
 
-TEST(CacheConfigCreatorTest, InvalidInputsKeepDescriptorAndCategoryBoundaries) {
+TEST(CacheConfigCreatorTest, MergeSpConfigMapsEachDraftTagByItsOwnLayerMembership) {
+    auto main_model        = makeKimiModel();
+    auto draft_model       = makeKimiModel();
+    draft_model.num_layers = 2;
+    draft_model.hybrid_attention_config.hybrid_attention_types.resize(2);
+    draft_model.kv_cache_spec_descs.resize(2);
+
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+    const auto config           = createSpeculativeConfig(main_model, draft_model, sp_config);
+
+    ASSERT_EQ(config.mtpModuleCount(), 2u);
+    EXPECT_EQ(config.group("linear").layer_ids, std::vector<int>({0, 2, 4, 6}));
+    EXPECT_EQ(config.group("full").layer_ids, std::vector<int>({1, 3, 5, 7}));
+    for (size_t module_index = 0; module_index < config.mtpModuleCount(); ++module_index) {
+        const auto& module = config.mtpModule(module_index);
+        EXPECT_EQ(module.group("linear").layer_ids, std::vector<int>({0}));
+        EXPECT_EQ(module.group("full").layer_ids, std::vector<int>({1}));
+        EXPECT_EQ(module.layers()[0], std::vector<std::string>({"linear"}));
+        EXPECT_EQ(module.layers()[1], std::vector<std::string>({"full"}));
+    }
+}
+
+TEST(CacheConfigCreatorTest, MergeSpConfigAddsDraftOnlyTagToRootAndSubTopology) {
+    const auto                 main_model  = makeMhaModel(/*layer_num=*/2, /*tag=*/"main_only");
+    const auto                 draft_model = makeMhaModel(/*layer_num=*/1, /*tag=*/"draft_only");
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+    const auto config           = createSpeculativeConfig(main_model, draft_model, sp_config);
+
+    EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"draft_only", "main_only"}));
+    EXPECT_EQ(config.group("main_only").layer_ids, std::vector<int>({0, 1}));
+    EXPECT_EQ(config.group("draft_only").layer_ids, std::vector<int>({2, 3}));
+    ASSERT_EQ(config.mtpModuleCount(), 2u);
+    for (const auto module_index : {0u, 1u}) {
+        const auto& module = config.mtpModule(module_index);
+        EXPECT_TRUE(module.group("main_only").layer_ids.empty());
+        EXPECT_EQ(module.group("draft_only").layer_ids, std::vector<int>({0}));
+        EXPECT_EQ(module.layers()[0], std::vector<std::string>({"draft_only"}));
+    }
+}
+
+TEST(CacheConfigCreatorTest, MergeSpConfigRejectsSameTagWithDifferentPoolPolicy) {
+    const auto main_model                          = makeMhaModel(/*layer_num=*/1, /*tag=*/"same_pool");
+    auto       draft_model                         = makeMhaModel(/*layer_num=*/1, /*tag=*/"same_pool");
+    draft_model.kv_cache_spec_descs[0][0].capacity = CacheCapacityPolicyDesc{};
+    draft_model.kv_cache_spec_descs[0][0].capacity->explicit_block_num = 3;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 1;
+
+    const auto main = CacheConfigCreator::createConfig(
+        main_model, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig(), std::nullopt, sp_config);
+    const auto draft = CacheConfigCreator::createSpConfig(
+        draft_model, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig(), sp_config);
+    ASSERT_FALSE(CacheConfig::samePolicy(main.group("same_pool").policy, draft.group("same_pool").policy));
+    EXPECT_THROW((void)CacheConfigCreator::mergeSpConfig(
+                     main, draft, main_model, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig(), sp_config),
+                 std::runtime_error);
+}
+
+TEST(CacheConfigCreatorTest, AllExplicitNonOpaqueGroupsUseSentinelMarginalBudgetAndExplicitReserve) {
+    auto model = makeMhaModel(/*layer_num=*/2, /*tag=*/"explicit_full");
+    for (auto& layer_descs : model.kv_cache_spec_descs) {
+        layer_descs[0].capacity                     = CacheCapacityPolicyDesc{};
+        layer_descs[0].capacity->explicit_block_num = 5;
+    }
+
+    auto config =
+        CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, fixedBlockConfig(), /*gen_num_per_cycle=*/0);
+    EXPECT_EQ(config.pagedBlockBudgetBytes(), 1u);
+    config.projectAssemblyBlockCounts(/*block_count_basis=*/0);
+    EXPECT_EQ(config.group("explicit_full").block_num, 5u);
+    EXPECT_EQ(config.explicitPoolReserveBytes(),
+              5u * 2u
+                  * (config.group("explicit_full").kv_block_stride_bytes
+                     + config.group("explicit_full").kv_scale_stride_bytes));
+}
+
+TEST(CacheConfigCreatorTest, MergeSpConfigUsesGcdCanonicalGranularityAndKeepsDraftLocalGranularity) {
+    auto main_model                          = makeMhaModel(/*layer_num=*/1, /*tag=*/"main");
+    main_model.attn_config.tokens_per_block  = 6;
+    auto draft_model                         = makeMhaModel(/*layer_num=*/1, /*tag=*/"draft");
+    draft_model.attn_config.tokens_per_block = 4;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 1;
+
+    const auto merged = createSpeculativeConfig(main_model, draft_model, sp_config);
+    EXPECT_EQ(merged.cacheKeyBlockTokens(), 2u);
+    EXPECT_EQ(merged.kernelBlockTokens(), 2u);
+    ASSERT_EQ(merged.mtpModuleCount(), 1u);
+    EXPECT_EQ(merged.mtpModule(0).cacheKeyBlockTokens(), 4u);
+    EXPECT_EQ(merged.mtpModule(0).kernelBlockTokens(), 4u);
+    EXPECT_EQ(merged.group("main").seq_size_per_block % merged.cacheKeyBlockTokens(), 0u);
+    EXPECT_EQ(merged.mtpModule(0).group("draft").seq_size_per_block % merged.cacheKeyBlockTokens(), 0u);
+}
+
+TEST(CacheConfigCreatorTest, MergeSpConfigRootModelFlagsRemainMainLocal) {
+    const auto                 main_model  = makeMhaModel(/*layer_num=*/1, /*tag=*/"main");
+    auto                       draft_model = makeSparseMlaModel(/*layer_num=*/1);
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 1;
+
+    const auto merged = createSpeculativeConfig(main_model, draft_model, sp_config);
+    EXPECT_FALSE(merged.usesMla());
+    EXPECT_FALSE(merged.isSparse());
+    EXPECT_TRUE(merged.usesTypedCacheRegions());
+    ASSERT_EQ(merged.mtpModuleCount(), 1u);
+    EXPECT_TRUE(merged.mtpModule(0).usesMla());
+    EXPECT_TRUE(merged.mtpModule(0).isSparse());
+}
+
+TEST(CacheConfigCreatorTest, MergedBlockSizeBytesUsesEachModuleActualStride) {
+    const auto main_model                 = makeMhaModel(/*layer_num=*/2, /*tag=*/"same_pool");
+    auto       draft_model                = makeMhaModel(/*layer_num=*/1, /*tag=*/"same_pool");
+    draft_model.attn_config.size_per_head = 16;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+
+    const auto main = CacheConfigCreator::createConfig(
+        main_model, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig(), std::nullopt, sp_config);
+    const auto draft = CacheConfigCreator::createSpConfig(
+        draft_model, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig(), sp_config);
+    const auto merged = CacheConfigCreator::mergeSpConfig(
+        main, draft, main_model, ParallelismConfig{}, RuntimeConfig{}, fixedBlockConfig(), sp_config);
+
+    ASSERT_NE(main.group("same_pool").kv_block_stride_bytes, draft.group("same_pool").kv_block_stride_bytes);
+    const size_t expected_block_bytes = main.blockSizeBytes("same_pool") + 2 * draft.blockSizeBytes("same_pool");
+    EXPECT_EQ(merged.blockSizeBytes("same_pool"), expected_block_bytes);
+    EXPECT_NE(
+        merged.blockSizeBytes("same_pool"),
+        merged.group("same_pool").layer_ids.size()
+            * (merged.group("same_pool").kv_block_stride_bytes + merged.group("same_pool").kv_scale_stride_bytes));
+}
+
+TEST(CacheConfigCreatorTest, InvalidTagsFailButDescriptorsOwnCacheCategory) {
     auto empty_tag_config = makeMhaModel();
     empty_tag_config.kv_cache_spec_descs[0][0].tag.clear();
     empty_tag_config.kv_cache_spec_descs[1][0].tag.clear();
     const auto empty_tag_error = runtimeErrorMessage([&]() { (void)createFinalConfig(empty_tag_config); });
     EXPECT_NE(empty_tag_error.find("tag must not be empty"), std::string::npos);
 
-    auto category_config                                 = makeKimiModel();
-    category_config.kv_cache_spec_descs[0][0].cache_type = KVCacheSpecType::MultiHeadAttention;
-    const auto category_error = runtimeErrorMessage([&]() { (void)createFinalConfig(category_config); });
-    EXPECT_NE(category_error.find("does not match attention type"), std::string::npos);
+    auto category_config = makeKimiModel();
+    for (auto& layer_descs : category_config.kv_cache_spec_descs) {
+        for (auto& desc : layer_descs) {
+            if (desc.tag == "linear") {
+                desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+            }
+        }
+    }
+    const auto lowered = createFinalConfig(category_config);
+    EXPECT_EQ(lowered.group("linear").spec->type, KVCacheSpecType::MultiHeadAttention);
+    EXPECT_EQ(lowered.group("linear").policy.group_type, CacheGroupType::FULL);
 }
 
 TEST(CacheConfigCreatorTest, DuplicateDescTagsFailDuringIndependentGrouping) {
-    auto config                                                      = makeMhaModel(/*layer_num=*/1);
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config = makeMhaModel(/*layer_num=*/1);
     config.kv_cache_spec_descs[0].push_back(config.kv_cache_spec_descs[0][0]);
 
     const auto error = runtimeErrorMessage([&]() { (void)createFinalConfig(config); });
@@ -676,8 +846,7 @@ TEST(CacheConfigCreatorTest, DuplicateDescTagsFailDuringIndependentGrouping) {
 }
 
 TEST(CacheConfigCreatorTest, SameTagDifferentLayoutsFailDuringIndependentGrouping) {
-    auto config                                                      = makeSparseMlaModel();
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config = makeSparseMlaModel();
     config.kv_cache_spec_descs[1][1].entry_elems += 1;
 
     const auto error = runtimeErrorMessage([&]() { (void)createFinalConfig(config); });

@@ -108,10 +108,9 @@ GroupedCacheLayerLayout makeLayout(std::vector<CacheGroup>         groups,
 
 CacheConfig createSparseIndexerCacheConfig() {
     ModelConfig model_config;
-    model_config.num_layers                                                = 1;
-    model_config.data_type                                                 = DataType::TYPE_FP16;
-    model_config.attn_config.tokens_per_block                              = 512;
-    model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    model_config.num_layers                   = 1;
+    model_config.data_type                    = DataType::TYPE_FP16;
+    model_config.attn_config.tokens_per_block = 512;
 
     KVCacheSpecDesc indexer_desc;
     indexer_desc.tag                 = "indexer_kv";
@@ -126,8 +125,7 @@ CacheConfig createSparseIndexerCacheConfig() {
     kv_cache_config.seq_size_per_block        = 512;
     kv_cache_config.kernel_seq_size_per_block = 64;
     kv_cache_config.test_block_num            = 3;
-    return CacheConfigCreator::createRankLocalConfig(
-        model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+    return CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
 }
 
 GroupedCacheLayerLayout makeIndexerLayout(const CacheConfig& config, torch::Tensor physical_storage) {
@@ -144,14 +142,13 @@ GroupedCacheLayerLayout makeIndexerLayout(const CacheConfig& config, torch::Tens
 
 CacheConfig createFp8SparseMlaCacheConfig() {
     ModelConfig model_config;
-    model_config.num_layers                                                = 1;
-    model_config.data_type                                                 = DataType::TYPE_BF16;
-    model_config.attn_config.use_mla                                       = true;
-    model_config.attn_config.kv_lora_rank                                  = 512;
-    model_config.attn_config.rope_head_dim                                 = 64;
-    model_config.attn_config.tokens_per_block                              = 512;
-    model_config.attn_config.kv_cache_dtype                                = KvCacheDataType::FP8;
-    model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    model_config.num_layers                   = 1;
+    model_config.data_type                    = DataType::TYPE_BF16;
+    model_config.attn_config.use_mla          = true;
+    model_config.attn_config.kv_lora_rank     = 512;
+    model_config.attn_config.rope_head_dim    = 64;
+    model_config.attn_config.tokens_per_block = 512;
+    model_config.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
 
     KVCacheSpecDesc mla_desc;
     mla_desc.tag        = "default";
@@ -170,8 +167,7 @@ CacheConfig createFp8SparseMlaCacheConfig() {
     kv_cache_config.seq_size_per_block        = 512;
     kv_cache_config.kernel_seq_size_per_block = 64;
     kv_cache_config.test_block_num            = 2;
-    return CacheConfigCreator::createRankLocalConfig(
-        model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+    return CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
 }
 
 GroupedCacheLayerLayout
@@ -241,7 +237,7 @@ TEST(KVCacheLayoutViewTest, LinearSwaAndStateStayPhysical) {
     const auto physical = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kFloat16)).reshape({3, 64});
     for (const auto& [tag, spec_type, policy] : std::vector<std::tuple<std::string, KVCacheSpecType, CacheGroupType>>{
              {"linear", KVCacheSpecType::LinearAttention, CacheGroupType::LINEAR},
-             {"swa", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA},
+             {"swa", KVCacheSpecType::OpaqueState, CacheGroupType::SWA},
              {"state", KVCacheSpecType::OpaqueState, CacheGroupType::FULL}}) {
         auto               group = makeGroup(tag, spec_type, policy, 8, 2, 32, 32);
         torch_ext::KVCache cache(makeLayout({std::move(group)}, {tag}, {{physical, {}}}));
@@ -352,7 +348,7 @@ TEST(KVCacheLayoutViewTest, Fp8MhaSpecAndScaleStridesOwnPhysicalBlock) {
     kv_cache_config.kernel_seq_size_per_block = 64;
     kv_cache_config.test_block_num            = 2;
     const auto config =
-        CacheConfigCreator::createRankLocalConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
     const auto& group = config.group("default");
 
     constexpr size_t kPhysicalKvBytes    = 2 * 2 * 8 * 512;
@@ -377,11 +373,10 @@ TEST(KVCacheLayoutViewTest, Dsv4Fp8CompressedPhysicalBlocksPreserveAlignedKernel
     constexpr int64_t kHcaKernelStrideBytes   = 1152;
 
     ModelConfig model_config;
-    model_config.num_layers                                                = 1;
-    model_config.data_type                                                 = DataType::TYPE_BF16;
-    model_config.attn_config.tokens_per_block                              = kKernelTokensPerBlock;
-    model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    const auto make_desc = [](const std::string& tag, uint32_t compression_ratio) {
+    model_config.num_layers                   = 1;
+    model_config.data_type                    = DataType::TYPE_BF16;
+    model_config.attn_config.tokens_per_block = kKernelTokensPerBlock;
+    const auto make_desc                      = [](const std::string& tag, uint32_t compression_ratio) {
         KVCacheSpecDesc desc;
         desc.tag                               = tag;
         desc.cache_type                        = KVCacheSpecType::OpaqueKV;
@@ -401,7 +396,7 @@ TEST(KVCacheLayoutViewTest, Dsv4Fp8CompressedPhysicalBlocksPreserveAlignedKernel
     kv_cache_config.kernel_seq_size_per_block = kKernelTokensPerBlock;
     kv_cache_config.test_block_num            = 1;
     const auto config =
-        CacheConfigCreator::createRankLocalConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
     const auto& csa_group = config.group("csa_kv");
     const auto& hca_group = config.group("hca_kv");
 
@@ -486,7 +481,7 @@ TEST(KVCacheLayoutViewTest, ModelCacheTagsAreSortedAndBindingIgnoresDeclarationO
     const auto swa       = torch::ones({2, 64}, torch::TensorOptions().dtype(torch::kFloat16));
     const auto makeCache = [&](bool reversed) {
         auto csa_group   = makeGroup("csa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL, 8, 8, 32, 32);
-        auto swa_group   = makeGroup("swa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA, 8, 8, 32, 32);
+        auto swa_group   = makeGroup("swa_kv", KVCacheSpecType::OpaqueState, CacheGroupType::SWA, 8, 8, 32, 32);
         auto placeholder = makeGroup("indexer_kv", KVCacheSpecType::OpaqueState, CacheGroupType::FULL, 1, 1, 1, 0);
         if (reversed) {
             return torch_ext::KVCache(makeLayout({std::move(placeholder), std::move(swa_group), std::move(csa_group)},

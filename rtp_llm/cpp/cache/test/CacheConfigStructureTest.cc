@@ -72,7 +72,21 @@ TEST(CacheConfigStructureTest, PublishesFlatGroupsIndexedLayersAndReadOnlyGlobal
 }
 
 CacheGroup makeGroup(std::string tag, std::vector<int> layer_ids, CacheGroupType type = CacheGroupType::FULL) {
-    auto spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 8, tag);
+    KVCacheSpecPtr spec;
+    if (type == CacheGroupType::LINEAR) {
+        spec = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
+                                            /*local_num_k_heads=*/1,
+                                            /*local_num_v_heads=*/1,
+                                            /*head_k_dim=*/1,
+                                            /*head_v_dim=*/1,
+                                            /*conv_kernel_dim=*/2,
+                                            /*seq_size_per_block=*/8,
+                                            DataType::TYPE_FP16,
+                                            DataType::TYPE_FP16,
+                                            tag);
+    } else {
+        spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 8, tag);
+    }
 
     CacheGroup group;
     group.tag                       = std::move(tag);
@@ -217,7 +231,7 @@ TEST(CacheConfigStructureTest, TaggedGroupRecordsAreStableAndReadOnly) {
     }
     EXPECT_EQ(tags, (std::set<std::string>{"full", "linear"}));
     EXPECT_EQ(config.group("full").spec->type, KVCacheSpecType::MultiHeadAttention);
-    EXPECT_EQ(config.group("linear").spec->type, KVCacheSpecType::MultiHeadAttention);
+    EXPECT_EQ(config.group("linear").spec->type, KVCacheSpecType::LinearAttention);
     EXPECT_EQ(config.groupTagsForLayer(0), (std::vector<std::string>{"full", "linear"}));
     EXPECT_EQ(config.groupForLayer(0, "linear").tag, "linear");
 }

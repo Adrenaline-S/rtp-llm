@@ -515,7 +515,7 @@ KVCacheMemoryConnector::buildPoolBlockMemoryLayout(const CacheConfig& cache_conf
                                 "memory connector layer=%zu has duplicate cache group tags",
                                 layer);
         for (const auto& tag : sorted_tags) {
-            const auto& group = cache_config.groupForLayer(static_cast<int>(layer), tag);
+            const auto& group = cache_config.physicalGroupForGlobalLayer(static_cast<int>(layer), tag);
             if (!group.policy.enable_prefix_reuse) {
                 continue;
             }
@@ -536,6 +536,7 @@ KVCacheMemoryConnector::buildPoolBlockMemoryLayout(const CacheConfig& cache_conf
                                          group.kv_block_stride_bytes,
                                          group.kv_scale_stride_bytes,
                                          stride,
+                                         group.spec->type,
                                          kind,
                                          group.policy.group_type == CacheGroupType::FULL});
         }
@@ -570,27 +571,22 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
     if (slots.empty() || !hasTypedPoolBlockMemoryLayout(slots)) {
         return false;
     }
-    if (!cache_config_.usesTypedCacheRegions() || !cache_config_.usesOpaqueKVCacheStore()
-        || !cache_config_.usesIndependentBlockPools()) {
+    if (!cache_config_.usesTypedCacheRegions() || !cache_config_.usesOpaqueKVCacheStore()) {
         return false;
     }
-    const auto& groups = cache_config_.groups();
-    if (groups.empty() || cache_config_.layers().size() < cache_config_.layerCount()) {
+    if (cache_config_.groups().empty() || cache_config_.layers().size() < cache_config_.layerCount()) {
         return false;
     }
 
     bool has_compressed = false;
     bool has_state      = false;
-    for (const auto& group : groups) {
-        if (group.spec == nullptr) {
+    for (const auto& slot : slots) {
+        if (slot.stride_bytes == 0) {
             return false;
         }
-        if (group.kv_block_stride_bytes + group.kv_scale_stride_bytes == 0) {
-            return false;
-        }
-        if (group.spec->type == KVCacheSpecType::OpaqueKV) {
+        if (slot.spec_type == KVCacheSpecType::OpaqueKV) {
             has_compressed = true;
-        } else if (group.spec->type == KVCacheSpecType::OpaqueState) {
+        } else if (slot.spec_type == KVCacheSpecType::OpaqueState) {
             has_state = true;
         } else {
             return false;
@@ -609,7 +605,7 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
         if (slot.layer_id < 0 || static_cast<size_t>(slot.layer_id) >= cache_config_.layerCount()) {
             return false;
         }
-        const auto& group = cache_config_.groupForLayer(slot.layer_id, slot.tag);
+        const auto& group = cache_config_.physicalGroupForGlobalLayer(slot.layer_id, slot.tag);
         if (slot.stride_bytes != group.kv_block_stride_bytes + group.kv_scale_stride_bytes
             || slot.kv_block_stride_bytes != group.kv_block_stride_bytes
             || slot.kv_scale_stride_bytes != group.kv_scale_stride_bytes) {

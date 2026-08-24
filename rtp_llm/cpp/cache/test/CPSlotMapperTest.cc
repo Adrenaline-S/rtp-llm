@@ -161,10 +161,10 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     full_group.policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
 
-    auto       swa_spec = std::make_shared<MHAKVCacheSpec>();
     CacheGroup swa_group;
-    swa_group.tag             = "swa";
-    swa_group.spec            = swa_spec;
+    swa_group.tag  = "swa";
+    swa_group.spec = makeResolvedOpaqueSpec(
+        /*state_cache=*/true, "swa", DataType::TYPE_FP16, /*block_bytes=*/16, /*seq_size_per_block=*/8);
     swa_group.layer_ids       = {0};
     swa_group.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
@@ -189,8 +189,9 @@ TEST_F(CPSlotMapperTest, TaggedGroupsKeepGlobalKeySpanAndGroupPhysicalSpanDistin
     full_group.policy.cp_mapping  = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 
     CacheGroup swa_group;
-    swa_group.tag                = "swa";
-    swa_group.spec               = std::make_shared<MHAKVCacheSpec>();
+    swa_group.tag  = "swa";
+    swa_group.spec = makeResolvedOpaqueSpec(
+        /*state_cache=*/true, "swa", DataType::TYPE_FP16, /*block_bytes=*/64, /*seq_size_per_block=*/32);
     swa_group.layer_ids          = {0};
     swa_group.seq_size_per_block = 32;
     swa_group.policy             = defaultCacheGroupPolicy(CacheGroupType::SWA);
@@ -287,8 +288,9 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagMappedBlocks) {
     full.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 
     CacheGroup swa;
-    swa.tag               = "swa";
-    swa.spec              = std::make_shared<MHAKVCacheSpec>();
+    swa.tag  = "swa";
+    swa.spec = makeResolvedOpaqueSpec(
+        /*state_cache=*/true, "swa", DataType::TYPE_FP16, /*block_bytes=*/16, /*seq_size_per_block=*/8);
     swa.layer_ids         = {0};
     swa.policy            = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa.policy.cp_mapping = CpBlockMappingMode::COMPACT_LAST_RANK;

@@ -44,14 +44,16 @@ CacheConfig makeCPHybridConfig() {
     auto full_spec =
         makeResolvedMhaSpec(builder.dtype(), 1, 1, static_cast<uint32_t>(builder.cacheKeyBlockTokens()), "full");
 
-    return builder.setLinearStep(2)
-        .setSharedPoolLayoutLayerCount(2)
-        .setGroupedSpecs({linear_spec, full_spec},
-                         {{0, 1}, {2, 3}},
-                         {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                         {"linear", "full"})
-        .setSharedPoolStorage(std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes()), 0, 0)
-        .build();
+    auto config = builder.setLinearStep(2)
+                      .setGroupedSpecs({linear_spec, full_spec},
+                                       {{0, 1}, {2, 3}},
+                                       {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                       {"linear", "full"})
+                      .finalizeGroupGeometryFromSpecs()
+                      .build();
+    RTP_LLM_CHECK(config.group("linear").kernel_seq_size_per_block == 4);
+    RTP_LLM_CHECK(config.group("full").kernel_seq_size_per_block == 2);
+    return config;
 }
 
 CompleteTokenIdsPtr makeTokens(int batch_size, int seq_length, int seq_size_per_block) {
@@ -146,7 +148,6 @@ TEST_F(CoordinatorCacheManagerCPShardTest, HybridPoolCoordinatorPreservesSharded
     const auto linear_stride = config.group("linear").kv_block_stride_bytes;
     const auto full_stride   = config.group("full").kv_block_stride_bytes;
     config                   = TestCacheConfigBuilder::rebuildForTest(std::move(config))
-                 .setUsesIndependentBlockPools(true)
                  .setGroupBlockLayout({32, 32}, {linear_stride, full_stride}, {0, 0})
                  .build();
     auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);

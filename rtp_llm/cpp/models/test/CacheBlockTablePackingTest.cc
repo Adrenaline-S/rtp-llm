@@ -11,8 +11,21 @@ namespace {
 
 CacheGroup
 makeGroup(std::string tag, CacheGroupType type, uint32_t block_num, size_t physical_tokens, size_t kernel_tokens) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = physical_tokens;
+    KVCacheSpecPtr spec;
+    if (type == CacheGroupType::LINEAR) {
+        spec = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
+                                            1,
+                                            1,
+                                            1,
+                                            1,
+                                            2,
+                                            static_cast<uint32_t>(physical_tokens),
+                                            DataType::TYPE_FP16,
+                                            DataType::TYPE_FP16,
+                                            tag);
+    } else {
+        spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, static_cast<uint32_t>(physical_tokens), tag);
+    }
     CacheGroup group;
     group.tag                       = std::move(tag);
     group.spec                      = std::move(spec);

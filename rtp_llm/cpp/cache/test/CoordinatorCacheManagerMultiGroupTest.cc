@@ -148,13 +148,13 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig(SpeculativeType    sp
     sp_cfg.type              = sp_type;
     sp_cfg.gen_num_per_cycle = gen_num;
 
-    return CacheConfigCreator::createRankLocalSpeculativeConfig(score_model_cfg,
-                                                                propose_model_cfg,
-                                                                parallelism_cfg,
-                                                                runtime_cfg,
-                                                                kv_cache_cfg,
-                                                                sp_cfg,
-                                                                /*warm_up_result=*/std::nullopt);
+    return createTestSpeculativeCacheConfig(score_model_cfg,
+                                            propose_model_cfg,
+                                            parallelism_cfg,
+                                            runtime_cfg,
+                                            kv_cache_cfg,
+                                            sp_cfg,
+                                            /*warm_up_result=*/std::nullopt);
 }
 
 static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
@@ -258,18 +258,23 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigAllowsOnlyFullGr
     EXPECT_EQ(cache_config.group("full").tag, "full");
 }
 
-TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigRejectsMultipleFullGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigAllowsMultipleFullGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescsWithTags(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE}, {"full", "full1"});
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    try {
-        CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
-        FAIL() << "expected multiple full groups to be rejected";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("multiple full attention cache groups"), std::string::npos);
-    }
+    const auto cache_config = CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
+    ASSERT_EQ(cache_config.groupNums(), 2);
+    EXPECT_EQ(groupTagSet(cache_config), (std::set<std::string>{"full", "full1"}));
+    EXPECT_EQ(cache_config.group("full").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(cache_config.group("full1").policy.group_type, CacheGroupType::FULL);
+
+    auto manager = std::make_shared<CoordinatorCacheManager>(cache_config, AllocationType::DEVICE);
+    ASSERT_TRUE(manager->init());
+    ASSERT_NE(manager->blockPool("full"), nullptr);
+    ASSERT_NE(manager->blockPool("full1"), nullptr);
+    EXPECT_NE(manager->blockPool("full"), manager->blockPool("full1"));
 }
 
 TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigKeepsModelTokensPerBlock) {
@@ -328,7 +333,7 @@ TEST(HybridCacheConfigTest, LinearSpecUsesTensorParallelLocalHeadsForBlockSizes)
     EXPECT_EQ(spec->block_size(), 160u);
 }
 
-TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigRejectsOnlyLinearGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigAllowsOnlyLinearGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::LINEAR, HybridAttentionType::LINEAR});
     cfg.linear_attention_config.linear_conv_kernel_dim = 2;
@@ -339,15 +344,13 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigRejectsOnlyLinea
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    try {
-        CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
-        FAIL() << "expected a linear-only hybrid config to be rejected";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("exactly one FULL MHA/MLA cache group"), std::string::npos);
-    }
+    const auto cache_config = CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
+    ASSERT_EQ(cache_config.groupNums(), 1);
+    EXPECT_EQ(cache_config.group("linear").policy.group_type, CacheGroupType::LINEAR);
+    EXPECT_EQ(cache_config.group("linear").layer_ids, (std::vector<int>{0, 1}));
 }
 
-TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateSingleConfigRejectsLinearDescriptor) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateSingleConfigAllowsLinearDescriptor) {
     auto cfg                                            = makeTinyModelConfig(/*num_layers=*/1);
     cfg.hybrid_attention_config.enable_hybrid_attention = false;
     cfg.kv_cache_spec_descs = {{KVCacheSpecDesc{"linear", KVCacheSpecType::LinearAttention}}};
@@ -359,12 +362,10 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateSingleConfigRejectsLinearDes
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    try {
-        CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
-        FAIL() << "expected a linear-only single config to be rejected";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("exactly one FULL MHA/MLA cache group"), std::string::npos);
-    }
+    const auto cache_config = CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
+    ASSERT_EQ(cache_config.groupNums(), 1);
+    EXPECT_EQ(cache_config.group("linear").policy.group_type, CacheGroupType::LINEAR);
+    EXPECT_EQ(cache_config.group("linear").layer_ids, (std::vector<int>{0}));
 }
 
 TEST_F(CoordinatorCacheManagerMultiGroupTest, TopologyRejectsSpecPolicyTypeMismatch) {
@@ -459,7 +460,6 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigKeepsExplicitPhy
     ParallelismConfig parallelism_cfg;
     auto              config = CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
 
-    ASSERT_TRUE(config.usesIndependentBlockPools());
     ASSERT_EQ(config.groupNums(), 3);
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"full", "recurrent_state", "convolution_state"}));
     EXPECT_TRUE(config.group("recurrent_state").policy.enable_prefix_reuse);
@@ -624,16 +624,15 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateSpConfigPreservesQwenPacking
     sp_cfg.gen_num_per_cycle = 2;
 
     CacheConfig config;
-    ASSERT_NO_THROW(config = CacheConfigCreator::createRankLocalSpeculativeConfig(score_model_cfg,
-                                                                                  propose_model_cfg,
-                                                                                  parallelism_cfg,
-                                                                                  runtime_cfg,
-                                                                                  kv_cache_cfg,
-                                                                                  sp_cfg,
-                                                                                  /*warm_up_result=*/std::nullopt));
+    ASSERT_NO_THROW(config = createTestSpeculativeCacheConfig(score_model_cfg,
+                                                              propose_model_cfg,
+                                                              parallelism_cfg,
+                                                              runtime_cfg,
+                                                              kv_cache_cfg,
+                                                              sp_cfg,
+                                                              /*warm_up_result=*/std::nullopt));
 
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"full", "linear"}));
-    EXPECT_EQ(config.sharedPoolLayoutLayerCount(), 2);
     ASSERT_EQ(config.mtpModuleCount(), 2u);
 
     const std::string full_tag   = "full";
@@ -679,7 +678,7 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpAliasesCompatibleDefaultMl
 
 TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
     auto main_builder = TestCacheConfigBuilder::makeBase(2, 0, 1, 1, DataType::TYPE_INVALID);
-    auto main_config  = main_builder.setSharedPoolLayoutLayerCount(1)
+    auto main_config  = main_builder
                            .setGroupedSpecs({makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1),
                                              makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1)},
                                             {{0}, {1}},
@@ -781,7 +780,7 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsIncompatibleDefault
 
 TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpPrefersExactDefaultGroupMatch) {
     auto main_builder = TestCacheConfigBuilder::makeBase(2, 0, 1, 1, DataType::TYPE_INVALID);
-    auto main_config  = main_builder.setSharedPoolLayoutLayerCount(1)
+    auto main_config  = main_builder
                            .setGroupedSpecs({makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1),
                                              makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
                                             {{0}, {1}},
@@ -810,7 +809,7 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpPrefersExactDefaultGroupMa
     EXPECT_EQ(main_config.group(aux_tag).layer_ids, std::vector<int>({1}));
 }
 
-TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpDoesNotAliasDefaultLinearProposeGroup) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpKeepsDefaultLinearProposeAsDraftOnlyPool) {
     auto main_config = makeSingleLayerCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL,
@@ -821,14 +820,15 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpDoesNotAliasDefaultLinearP
         CacheGroupType::LINEAR,
         "default");
 
-    try {
-        TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
-            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
-            .build();
-        FAIL() << "expected a default Linear propose group not to use the FULL alias";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer 0"), std::string::npos);
-    }
+    const auto merged = TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+                            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
+                            .build();
+    EXPECT_EQ(groupTagSet(merged), (std::set<std::string>{"default", "full"}));
+    EXPECT_EQ(merged.group("full").layer_ids, std::vector<int>({0}));
+    EXPECT_EQ(merged.group("default").layer_ids, std::vector<int>({1}));
+    ASSERT_EQ(merged.mtpModuleCount(), 1u);
+    EXPECT_TRUE(merged.mtpModule(0).group("full").layer_ids.empty());
+    EXPECT_EQ(merged.mtpModule(0).group("default").layer_ids, std::vector<int>({0}));
 }
 
 TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpAliasErrorIdentifiesSourceAndTargetTags) {
@@ -838,8 +838,6 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpAliasErrorIdentifiesSource
         /*layer_num=*/2,
         /*block_num=*/4,
         "full");
-    main_config =
-        TestCacheConfigBuilder::rebuildForTest(std::move(main_config)).setSharedPoolLayoutLayerCount(2).build();
     auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, DataType::TYPE_FP16);
     auto propose_groups         = propose_config.groups();
@@ -861,14 +859,14 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpAliasErrorIdentifiesSource
     }
 }
 
-TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpDoesNotAliasMultiGroupProposeConfig) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpKeepsMultiGroupProposeTagsAsDraftOnlyPools) {
     auto main_config = makeSingleLayerCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL,
         "full");
 
     auto propose_builder = TestCacheConfigBuilder::makeBase(1, 0, 1, 1, DataType::TYPE_INVALID);
-    auto propose_config  = propose_builder.setSharedPoolLayoutLayerCount(1)
+    auto propose_config  = propose_builder
                               .setGroupedSpecs({makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1),
                                                 makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
                                                {{0}, {0}},
@@ -876,19 +874,20 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpDoesNotAliasMultiGroupProp
                                                {"default", "aux"})
                               .build();
 
-    try {
-        TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
-            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
-            .build();
-        FAIL() << "expected a multi-group propose config not to use the default alias";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer 0"), std::string::npos);
-    }
+    const auto merged = TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+                            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
+                            .build();
+    EXPECT_EQ(groupTagSet(merged), (std::set<std::string>{"aux", "default", "full"}));
+    EXPECT_EQ(merged.group("full").layer_ids, std::vector<int>({0}));
+    EXPECT_EQ(merged.group("default").layer_ids, std::vector<int>({1}));
+    EXPECT_EQ(merged.group("aux").layer_ids, std::vector<int>({1}));
+    ASSERT_EQ(merged.mtpModuleCount(), 1u);
+    EXPECT_EQ(merged.mtpModule(0).layers()[0], (std::vector<std::string>{"default", "aux"}));
 }
 
-TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsShortTargetGroup) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpExtendsExactShortTargetGroup) {
     auto main_builder = TestCacheConfigBuilder::makeBase(5, 0, 1, 1, DataType::TYPE_INVALID);
-    auto main_config  = main_builder.setSharedPoolLayoutLayerCount(3)
+    auto main_config  = main_builder
                            .setGroupedSpecs({makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1),
                                              makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
                                             {{0, 1, 2}, {3, 4}},
@@ -898,17 +897,17 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsShortTargetGroup) {
 
     auto propose_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    EXPECT_THROW(TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
-                     .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/5)
-                     .build(),
-                 std::runtime_error);
+    const auto merged = TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+                            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/5)
+                            .build();
+    EXPECT_EQ(merged.group("linear").layer_ids, (std::vector<int>{3, 4, 5}));
+    ASSERT_EQ(merged.mtpModuleCount(), 1u);
+    EXPECT_EQ(merged.mtpModule(0).group("linear").layer_ids, (std::vector<int>{0}));
 }
 
-TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsPartialOrReorderedSourceGroup) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpAcceptsTagLocalSourceMembershipButRejectsReordering) {
     auto main_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    main_config =
-        TestCacheConfigBuilder::rebuildForTest(std::move(main_config)).setSharedPoolLayoutLayerCount(2).build();
 
     auto partial_builder = TestCacheConfigBuilder::makeBase(2, 0, 1, 1, DataType::TYPE_INVALID);
     auto partial_source  = partial_builder
@@ -918,10 +917,16 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsPartialOrReorderedS
                                                {CacheGroupType::FULL, CacheGroupType::FULL},
                                                {"default", "aux"})
                               .build();
-    EXPECT_THROW(TestCacheConfigBuilder::rebuildForTest(main_config)
-                     .addComposedMTPModule(partial_source, /*module_index=*/0, /*main_layer_num=*/2)
-                     .build(),
-                 std::runtime_error);
+    const auto partial_merged = TestCacheConfigBuilder::rebuildForTest(main_config)
+                                    .addComposedMTPModule(partial_source,
+                                                          /*module_index=*/0,
+                                                          /*main_layer_num=*/2)
+                                    .build();
+    EXPECT_EQ(partial_merged.group("default").layer_ids, (std::vector<int>{0, 1, 2}));
+    EXPECT_EQ(partial_merged.group("aux").layer_ids, (std::vector<int>{3}));
+    ASSERT_EQ(partial_merged.mtpModuleCount(), 1u);
+    EXPECT_EQ(partial_merged.mtpModule(0).group("default").layer_ids, (std::vector<int>{0}));
+    EXPECT_EQ(partial_merged.mtpModule(0).group("aux").layer_ids, (std::vector<int>{1}));
 
     auto reordered_source = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
@@ -1601,7 +1606,7 @@ TEST_F(CoordinatorCacheManagerMultiGroupTest, ConvertIndexToBufferAndAllLayerCac
     EXPECT_NE(full_buf[0].addr, nullptr);
     EXPECT_EQ(linear_buf[0].size_bytes, config.group(linear_tag).kv_block_stride_bytes);
     EXPECT_EQ(full_buf[0].size_bytes, config.group(full_tag).kv_block_stride_bytes);
-    EXPECT_LT(linear_buf[0].size_bytes, config.sharedPoolKvBlockStrideBytes());
+    EXPECT_LT(linear_buf[0].size_bytes, full_buf[0].size_bytes);
 
     auto layout = allocator->allLayerCacheBase();
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));

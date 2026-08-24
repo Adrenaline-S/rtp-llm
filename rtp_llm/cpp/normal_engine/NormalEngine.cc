@@ -449,14 +449,23 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
-        auto config =
-            CacheConfigCreator::createRankLocalSpeculativeConfig(model_config_,
-                                                                 propose_params_->getEngineInitParams().model_config_,
-                                                                 parallelism_config,
-                                                                 runtime_config,
-                                                                 kv_cache_config,
-                                                                 sp_config,
-                                                                 warm_up_result);
+        const auto main_config = CacheConfigCreator::createConfig(
+            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
+        const auto draft_config =
+            CacheConfigCreator::createSpConfig(propose_params_->getEngineInitParams().model_config_,
+                                               parallelism_config,
+                                               runtime_config,
+                                               kv_cache_config,
+                                               sp_config,
+                                               warm_up_result);
+        const auto config = CacheConfigCreator::mergeSpConfig(main_config,
+                                                              draft_config,
+                                                              model_config_,
+                                                              parallelism_config,
+                                                              runtime_config,
+                                                              kv_cache_config,
+                                                              sp_config,
+                                                              warm_up_result);
 
         resource_context_.cache_manager = make_shared<KVCacheManager>(config,
                                                                       false,
@@ -476,7 +485,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_   = cache_cfg.groupNums();
     } else {
-        auto result = CacheConfigCreator::createRankLocalConfig(
+        auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
