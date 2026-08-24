@@ -68,11 +68,11 @@ enum GptModelInputIndex : size_t {
     inputLengths,
     sequenceLengths,
     prefixLengths,
-    maxKernelBlocksPerBatch,
-    maxBlocksPerBatch,
+    kvCacheKernelBlockTableNumel,
+    kvCachePoolBlockTableNumel,
     cacheKeysWidth,
     kvCacheGroupNum,
-    kvCacheLayerToGroupLen,
+    kvCacheBlockTableMetadataLen,
     kvCacheGroupTypesLen,
     kvCacheUpdateCopyNum,
     lmOutputIndexes,
@@ -137,6 +137,20 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
+// Immutable structural identity of one published packed block-table snapshot.
+// Values and valid lengths may change under this signature; every field below
+// requires a new full prepare because it changes backing/view geometry or the
+// execution-ordinal meaning of a region.
+struct CacheBlockTablePackingSignature {
+    std::vector<CacheGroupBlockTableRegion> groups;
+    size_t                                  batch_capacity = 0;
+    size_t                                  pool_numel     = 0;
+    size_t                                  kernel_numel   = 0;
+
+    static CacheBlockTablePackingSignature fromPlan(const CacheBlockTablePackingPlan& plan);
+    bool                                   matches(const CacheBlockTablePackingPlan& plan) const noexcept;
+};
+
 class ModelBase {
 public:
     virtual ~ModelBase()                                          = default;
@@ -144,10 +158,9 @@ public:
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
 
-    // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
-    // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
-    // No-op when no attention inputs have been prepared yet.
-    virtual void updateKVCacheKernelBlockId(const GptModelInputs& inputs) {}
+    // Refresh only kernel-table values and valid lengths on a previously
+    // prepared, structurally identical packed snapshot.
+    virtual void updateKVCacheKernelBlockTableValues(const GptModelInputs& inputs) {}
 
     // Optional spec-decode hand-off: target model exposes the pre-output-projection
     // residual buffer (DSv4: pre-``hc_head`` ``[T, hc*D]``) so MtpExecutor can

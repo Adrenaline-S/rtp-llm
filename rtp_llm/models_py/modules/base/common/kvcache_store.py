@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Optional, Type, Union
 
 import torch
@@ -43,6 +43,7 @@ class WriteCacheStoreOp(nn.Module):
         input_lengths: Optional[torch.Tensor] = None,
         prefix_lengths: Optional[torch.Tensor] = None,
         kv_cache_block_id_host: Optional[torch.Tensor] = None,
+        kv_cache_block_id_by_tag: Optional[Mapping[str, torch.Tensor]] = None,
     ):
         super().__init__()
         self.cache_store_writer = cache_store_writer
@@ -50,11 +51,21 @@ class WriteCacheStoreOp(nn.Module):
         self.input_lengths = input_lengths
         self.prefix_lengths = prefix_lengths
         self.kv_cache_block_id_host = kv_cache_block_id_host
+        self.kv_cache_block_id_by_tag = kv_cache_block_id_by_tag
 
     def _write_one(self, kv_cache: Optional[LayerKVCache]) -> None:
         if kv_cache is None:
             return
-        self.cache_store_writer.write(self.cache_store_inputs, kv_cache)
+        block_table = self.kv_cache_block_id_host
+        if self.kv_cache_block_id_by_tag is not None:
+            tag = str(kv_cache.tag)
+            if tag not in self.kv_cache_block_id_by_tag:
+                raise RuntimeError(
+                    f"cache-store tag {tag!r} has no block table; "
+                    f"available tags: {sorted(self.kv_cache_block_id_by_tag)}"
+                )
+            block_table = self.kv_cache_block_id_by_tag[tag]
+        self.cache_store_writer.write(self.cache_store_inputs, kv_cache, block_table)
 
     def forward(
         self,
@@ -88,6 +99,7 @@ def create_write_cache_store_impl(
     attn_inputs: PyAttentionInputs,
     kv_cache: Optional[KVCache] = None,
     *,
+    cache_group_attn_inputs: Optional[Mapping[str, object]] = None,
     op_cls: Type[WriteCacheStoreOp] = WriteCacheStoreOp,
 ) -> Optional[WriteCacheStoreOp]:
     """Create the per-forward write-cache-store op, or None when not needed.
@@ -139,10 +151,18 @@ def create_write_cache_store_impl(
     # ``PyAttentionInputs`` names the host block table ``kv_cache_block_id``
     # (its device mirror is ``kv_cache_block_id_device``). Duck-typed inputs
     # written against the older ``*_host`` spelling still resolve via fallback.
-    block_id_host = _first_non_empty(
-        getattr(attn_inputs, "kv_cache_block_id", None),
-        getattr(attn_inputs, "kv_cache_block_id_host", None),
-    )
+    block_id_by_tag = None
+    if cache_group_attn_inputs is not None:
+        block_id_by_tag = {
+            tag: group_inputs.kv_cache_block_id
+            for tag, group_inputs in cache_group_attn_inputs.items()
+        }
+        block_id_host = None
+    else:
+        block_id_host = _first_non_empty(
+            getattr(attn_inputs, "kv_cache_block_id", None),
+            getattr(attn_inputs, "kv_cache_block_id_host", None),
+        )
 
     return op_cls(
         cache_store_writer,
@@ -150,4 +170,5 @@ def create_write_cache_store_impl(
         input_lengths=input_lengths,
         prefix_lengths=prefix_lengths,
         kv_cache_block_id_host=block_id_host,
+        kv_cache_block_id_by_tag=block_id_by_tag,
     )

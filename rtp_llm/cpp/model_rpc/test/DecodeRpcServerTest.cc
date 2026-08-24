@@ -64,19 +64,20 @@ CacheGroup makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
     spec->seq_size_per_block = 8;
 
     CacheGroup group;
-    group.tag                              = std::move(tag);
-    group.layout.spec                      = std::move(spec);
-    group.policy                           = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                        = std::move(layer_ids);
-    group.layout.block_num                 = 8;
-    group.layout.seq_size_per_block        = 8;
-    group.layout.kernel_seq_size_per_block = 8;
+    group.tag                       = std::move(tag);
+    group.spec                      = std::move(spec);
+    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids                 = std::move(layer_ids);
+    group.block_num                 = 8;
+    group.seq_size_per_block        = 8;
+    group.kernel_seq_size_per_block = 8;
     return group;
 }
 
 CacheConfig makeRpcCacheConfig() {
-    return CacheConfigCreator::buildResolvedConfig(
-        {{makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})}, {{0, {"linear"}}, {1, {"full"}}}});
+    return test::TestCacheConfigBuilder()
+        .setTopology({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})}, {{"linear"}, {"full"}})
+        .build();
 }
 
 // DeepSeek-V4 shaped identity fixture: one layer owning every semantic group.
@@ -98,10 +99,8 @@ CacheConfig makeDsv4RpcConfig(bool reversed) {
     for (const auto& tag : tags) {
         groups.push_back(makeRpcGroup(tag, {0}));
     }
-    CacheLayerMembership layer;
-    layer.layer_id   = 0;
-    layer.group_tags = tags;
-    return CacheConfigCreator::buildResolvedConfig({std::move(groups), {std::move(layer)}});
+    CacheLayer layer = tags;
+    return test::TestCacheConfigBuilder().setTopology(std::move(groups), {std::move(layer)}).build();
 }
 
 class DecodeBoundaryTestEngine final: public EngineBase {
@@ -312,8 +311,9 @@ TEST(DecodeRpcServerTest, Dsv4MultiTagRowsRoundTripThroughReversedLocalTopology)
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByTagNotByLocalGroupOrder) {
-    auto config = CacheConfigCreator::buildResolvedConfig(
-        {{makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})}, {{0, {"linear"}}, {1, {"full"}}}});
+    auto config = test::TestCacheConfigBuilder()
+                      .setTopology({makeRpcGroup("linear", {0}), makeRpcGroup("full", {1})}, {{"linear"}, {"full"}})
+                      .build();
     BroadcastLoadRequestPB request;
     auto*                  full = request.add_tagged_group_block_ids();
     full->set_tag("full");
@@ -325,22 +325,24 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByTagNotByLocalGroupOrder) {
     const auto expected = std::map<std::string, BlockIndicesType>{{"full", {10}}, {"linear", {20}}};
     EXPECT_EQ(taggedRecordsOf(DecodeRpcServer::decodeGroupBlockRecords(request, config)), expected);
 
-    auto reordered = CacheConfigCreator::buildResolvedConfig(
-        {{makeRpcGroup("full", {1}), makeRpcGroup("linear", {0})}, {{0, {"linear"}}, {1, {"full"}}}});
+    auto reordered = test::TestCacheConfigBuilder()
+                         .setTopology({makeRpcGroup("full", {1}), makeRpcGroup("linear", {0})}, {{"linear"}, {"full"}})
+                         .build();
     EXPECT_EQ(taggedRecordsOf(DecodeRpcServer::decodeGroupBlockRecords(request, reordered)), expected);
     EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, config.group("full").tag),
               DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered.group("full").tag));
 }
 
 TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {
-    auto config = CacheConfigCreator::buildResolvedConfig({{makeRpcGroup("full", {0})}, {{0, {"full"}}}});
+    auto config = test::TestCacheConfigBuilder().setTopology({makeRpcGroup("full", {0})}, {{"full"}}).build();
     BroadcastLoadRequestPB request;
     EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockRecords(request, config));
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
-    auto config = CacheConfigCreator::buildResolvedConfig(
-        {{makeRpcGroup("full", {0}), makeRpcGroup("linear", {0})}, {{0, {"full", "linear"}}}});
+    auto config = test::TestCacheConfigBuilder()
+                      .setTopology({makeRpcGroup("full", {0}), makeRpcGroup("linear", {0})}, {{"full", "linear"}})
+                      .build();
     BroadcastLoadRequestPB missing_tag;
     auto*                  row = missing_tag.add_tagged_group_block_ids();
     row->set_tag("full");
@@ -350,8 +352,9 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsRejectInvalidTagIdentity) {
-    auto config = CacheConfigCreator::buildResolvedConfig(
-        {{makeRpcGroup("full", {0}), makeRpcGroup("linear", {0})}, {{0, {"full", "linear"}}}});
+    auto config = test::TestCacheConfigBuilder()
+                      .setTopology({makeRpcGroup("full", {0}), makeRpcGroup("linear", {0})}, {{"full", "linear"}})
+                      .build();
 
     BroadcastLoadRequestPB duplicate_tag;
     for (int i = 0; i < 2; ++i) {

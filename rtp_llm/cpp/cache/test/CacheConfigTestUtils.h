@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/BlockExpression.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
@@ -194,6 +195,19 @@ using CacheSemanticSnapshot = std::vector<CacheGroupSemanticSnapshot>;
 
 class TestCacheConfigBuilder {
 public:
+    uint32_t mainLayerCount() const noexcept {
+        return base_.main_layer_count_;
+    }
+    DataType dtype() const noexcept {
+        return base_.dtype_;
+    }
+    size_t cacheKeyBlockTokens() const noexcept {
+        return base_.cache_key_block_tokens_;
+    }
+    uint32_t blockCountBasis() const noexcept {
+        return base_.block_count_basis_;
+    }
+
     TestCacheConfigBuilder& addGroup(CacheGroup group) {
         groups_.push_back(std::move(group));
         return *this;
@@ -204,96 +218,239 @@ public:
         if (layers_.size() <= static_cast<size_t>(layer_id)) {
             layers_.resize(static_cast<size_t>(layer_id) + 1);
         }
-        layers_[static_cast<size_t>(layer_id)] = {layer_id, std::move(tags)};
+        layers_[static_cast<size_t>(layer_id)] = std::move(tags);
         return *this;
     }
 
     TestCacheConfigBuilder& configure(CacheConfig config) {
-        base_ = std::move(config);
+        base_   = std::move(config);
+        groups_ = base_.groups_;
+        layers_ = base_.layers_;
+        if (layers_.empty() && base_.main_layer_count_ > 0) {
+            layers_.resize(base_.main_layer_count_);
+        }
+        return *this;
+    }
+
+    static TestCacheConfigBuilder rebuildForTest(CacheConfig config) {
+        return TestCacheConfigBuilder().configure(std::move(config));
+    }
+
+    TestCacheConfigBuilder& setBlockCountBasis(uint32_t value) {
+        base_.block_count_basis_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setCacheKeyBlockTokens(size_t value) {
+        base_.cache_key_block_tokens_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setKernelBlockTokens(size_t value) {
+        base_.kernel_block_tokens_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setDType(DataType value) {
+        base_.dtype_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setLinearStep(int value) {
+        base_.linear_step_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setUsesMla(bool value) {
+        base_.uses_mla_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setIsSparse(bool value) {
+        base_.is_sparse_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setUsesIndependentBlockPools(bool value) {
+        base_.uses_independent_block_pools_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setUsesTypedCacheRegions(bool value) {
+        base_.uses_typed_cache_regions_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setUsesOpaqueKVCacheStore(bool value) {
+        base_.uses_opaque_kv_cache_store_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setDisablesDecodeFirstMallocDeviceReuse(bool value) {
+        base_.disables_decode_first_malloc_device_reuse_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setSharedPoolLayoutLayerCount(int value) {
+        base_.shared_pool_layout_layer_count_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setSharedPoolStrides(size_t kv_bytes, size_t scale_bytes) {
+        base_.shared_pool_kv_block_stride_bytes_ = kv_bytes;
+        base_.shared_pool_kv_scale_stride_bytes_ = scale_bytes;
+        return *this;
+    }
+    TestCacheConfigBuilder& setPagedBlockBudgetBytes(size_t value) {
+        base_.paged_block_budget_bytes_ = value;
+        return *this;
+    }
+    TestCacheConfigBuilder& setExplicitPoolReserveBytes(size_t value) {
+        base_.explicit_pool_reserve_bytes_ = value;
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setMainLayerCount(uint32_t value) {
+        base_.main_layer_count_ = value;
+        layers_.resize(value);
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setSharedPoolStorage(size_t kv_stride, size_t scale_stride, size_t budget) {
+        base_.shared_pool_kv_block_stride_bytes_ = kv_stride;
+        base_.shared_pool_kv_scale_stride_bytes_ = scale_stride;
+        base_.paged_block_budget_bytes_          = budget;
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setGroupBlockLayout(const std::vector<uint32_t>& block_nums,
+                                                const std::vector<size_t>&   kv_strides,
+                                                const std::vector<size_t>&   scale_strides) {
+        RTP_LLM_CHECK_WITH_INFO(block_nums.size() == groups_.size(), "test block layout size mismatch");
+        RTP_LLM_CHECK_WITH_INFO(kv_strides.size() == groups_.size(), "test kv stride size mismatch");
+        RTP_LLM_CHECK_WITH_INFO(scale_strides.size() == groups_.size(), "test scale stride size mismatch");
+        for (size_t i = 0; i < groups_.size(); ++i) {
+            groups_[i].block_num             = block_nums[i];
+            groups_[i].kv_block_stride_bytes = kv_strides[i];
+            groups_[i].kv_scale_stride_bytes = scale_strides[i];
+        }
+        base_.group_block_layout_initialized_ = true;
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setGroupPolicies(const std::vector<CacheGroupPolicy>& policies) {
+        RTP_LLM_CHECK_WITH_INFO(policies.size() == groups_.size(), "test group policy size mismatch");
+        for (size_t i = 0; i < groups_.size(); ++i) {
+            groups_[i].policy = policies[i];
+        }
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setGroupLocalKVHeadNums(const std::vector<uint32_t>& head_nums) {
+        RTP_LLM_CHECK_WITH_INFO(head_nums.size() == groups_.size(), "test group head-count size mismatch");
+        for (size_t i = 0; i < groups_.size(); ++i) {
+            groups_[i].local_kv_head_num = head_nums[i];
+        }
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setProjectedBlockCountBasis(uint32_t value) {
+        base_.groups_ = groups_;
+        base_.layers_ = layers_;
+        base_         = projectTreeForTest(base_, value);
+        groups_       = base_.groups_;
+        layers_       = base_.layers_;
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setMTPModules(std::vector<CacheConfig> modules) {
+        base_.mtp_sub_configs_.clear();
+        base_.mtp_sub_configs_.reserve(modules.size());
+        for (auto& module : modules) {
+            base_.mtp_sub_configs_.push_back(std::make_shared<const CacheConfig>(std::move(module)));
+        }
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
+                                            const std::vector<std::vector<int>>& layers_by_group,
+                                            const std::vector<CacheGroupType>&   types,
+                                            const std::vector<std::string>&      tags     = {},
+                                            const std::vector<CacheGroupPolicy>& policies = {}) {
+        RTP_LLM_CHECK_WITH_INFO(specs.size() == layers_by_group.size() && specs.size() == types.size(),
+                                "test grouped spec size mismatch");
+        groups_.clear();
+        for (auto& layer : layers_) {
+            layer.clear();
+        }
+        for (size_t i = 0; i < specs.size(); ++i) {
+            CacheGroup group;
+            group.tag       = tags.empty() ? (specs.size() == 1 ? "default" : std::to_string(i)) : tags[i];
+            group.spec      = specs[i];
+            group.policy    = policies.empty() ? defaultCacheGroupPolicy(types[i]) : policies[i];
+            group.layer_ids = layers_by_group[i];
+            for (int layer_id : group.layer_ids) {
+                layers_.at(static_cast<size_t>(layer_id)).push_back(group.tag);
+            }
+            groups_.push_back(std::move(group));
+        }
+        base_.group_block_layout_initialized_ = false;
+        return *this;
+    }
+
+    TestCacheConfigBuilder& setTopology(std::vector<CacheGroup> groups, std::vector<CacheLayer> layers) {
+        groups_ = std::move(groups);
+        layers_ = std::move(layers);
+        return *this;
+    }
+
+    TestCacheConfigBuilder&
+    addComposedMTPModule(const CacheConfig& propose, int module_index, uint32_t main_layer_num) {
+        base_.groups_ = groups_;
+        base_.layers_ = layers_;
+        auto module   = base_.composeAssemblyMTPModule(propose, module_index, main_layer_num);
+        base_.mtp_sub_configs_.push_back(std::move(module));
+        groups_ = base_.groups_;
+        layers_ = base_.layers_;
         return *this;
     }
 
     CacheConfig build() const {
-        CacheConfig config   = base_;
-        config.layer_num     = static_cast<uint32_t>(layers_.size());
-        config.layer_all_num = config.layer_num;
-        if (config.block_num == 0 && !groups_.empty()) {
+        CacheConfig config = base_;
+        if (config.block_count_basis_ == 0 && !groups_.empty()) {
             std::set<uint32_t> group_block_nums;
             for (const auto& group : groups_) {
-                group_block_nums.insert(group.layout.block_num);
+                group_block_nums.insert(group.block_num);
             }
             if (group_block_nums.size() == 1 && *group_block_nums.begin() > 0) {
-                config.block_num = *group_block_nums.begin();
+                config.block_count_basis_ = *group_block_nums.begin();
             }
         }
-        config.setResolvedData({groups_, layers_});
+        config.groups_ = groups_;
+        config.layers_ = layers_;
+        config.validateAndBuildIndex();
         return config;
     }
 
-    static CacheConfig withGroupBlockLayout(CacheConfig                  config,
-                                            const std::vector<uint32_t>& block_nums,
-                                            const std::vector<size_t>&   kv_strides,
-                                            const std::vector<size_t>&   scale_strides) {
-        config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
-        return config;
+    static bool groupBlockLayoutInitialized(const CacheConfig& config) {
+        return config.group_block_layout_initialized_;
     }
 
-    static CacheConfig withGroupPolicies(CacheConfig config, const std::vector<CacheGroupPolicy>& policies) {
-        config.setGroupPolicies(policies);
-        return config;
-    }
-
-    static void setGroupBlockLayout(CacheConfig&                 config,
-                                    const std::vector<uint32_t>& block_nums,
-                                    const std::vector<size_t>&   kv_strides,
-                                    const std::vector<size_t>&   scale_strides) {
-        config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
-    }
-
-    static void setGroupPolicies(CacheConfig& config, const std::vector<CacheGroupPolicy>& policies) {
-        config.setGroupPolicies(policies);
-    }
-
-    static void fromGroupedSpecs(CacheConfig&                         config,
-                                 const std::vector<KVCacheSpecPtr>&   specs,
-                                 const std::vector<std::vector<int>>& layers_by_group,
-                                 const std::vector<CacheGroupType>&   types,
-                                 const std::vector<std::string>&      tags     = {},
-                                 const std::vector<CacheGroupPolicy>& policies = {}) {
-        config.fromGroupedSpecs(specs, layers_by_group, types, tags, policies);
-    }
-
-    static CacheConfig
-    withResolvedData(CacheConfig config, std::vector<CacheGroup> groups, std::vector<CacheLayerMembership> layers) {
-        config.layer_num     = static_cast<uint32_t>(layers.size());
-        config.layer_all_num = config.layer_num;
-        config.setResolvedData({std::move(groups), std::move(layers)});
-        return config;
-    }
-
-    static void
-    setResolvedData(CacheConfig& config, std::vector<CacheGroup> groups, std::vector<CacheLayerMembership> layers) {
-        config.setResolvedData({std::move(groups), std::move(layers)});
-    }
-
-    static std::shared_ptr<CacheConfig>
-    mergeMTPModule(CacheConfig& config, const CacheConfig& propose, int module_index, uint32_t main_layer_num) {
-        return config.mergeMTPModule(propose, module_index, main_layer_num);
-    }
-
-    static CacheConfig withMTPModules(CacheConfig config, std::vector<CacheConfig> modules) {
-        config.mtp_sub_configs_.clear();
-        config.mtp_sub_configs_.reserve(modules.size());
-        for (auto& module : modules) {
-            config.mtp_sub_configs_.push_back(std::make_shared<const CacheConfig>(std::move(module)));
-        }
-        return config;
+    static TestCacheConfigBuilder makeBase(
+        uint32_t layer_count, uint32_t block_count, size_t cache_key_tokens, size_t kernel_tokens, DataType dtype) {
+        TestCacheConfigBuilder builder;
+        builder.base_.main_layer_count_       = layer_count;
+        builder.base_.block_count_basis_      = block_count;
+        builder.base_.cache_key_block_tokens_ = cache_key_tokens;
+        builder.base_.kernel_block_tokens_    = kernel_tokens;
+        builder.base_.dtype_                  = dtype;
+        builder.layers_.resize(layer_count);
+        return builder;
     }
 
 private:
-    CacheConfig                       base_;
-    std::vector<CacheGroup>           groups_;
-    std::vector<CacheLayerMembership> layers_;
+    static CacheConfig projectTreeForTest(const CacheConfig& config, uint32_t value) {
+        CacheConfig projected = config;
+        projected.mtp_sub_configs_.clear();
+        for (const auto& module : config.mtp_sub_configs_) {
+            projected.mtp_sub_configs_.push_back(
+                std::make_shared<const CacheConfig>(projectTreeForTest(*module, value)));
+        }
+        projected.projectAssemblyBlockCounts(value);
+        return projected;
+    }
+
+    CacheConfig             base_;
+    std::vector<CacheGroup> groups_;
+    std::vector<CacheLayer> layers_;
 };
 
 // Tag set of a cache plan. Group storage order is deterministic but carries no
@@ -312,7 +469,7 @@ inline std::set<std::string> groupTagSet(const CacheConfig& config) {
 inline GroupedCacheLayerLayout makeTopologyOnlyLayerLayout(const CacheConfig& config) {
     GroupedCacheLayerLayout::GroupLayouts groups;
     for (const auto& group : config.groups()) {
-        groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layerMemberships().size())));
+        groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layers().size())));
     }
     return GroupedCacheLayerLayout(config, std::move(groups));
 }
@@ -322,12 +479,11 @@ inline CacheSemanticSnapshot snapshotCacheConfig(const CacheConfig& config) {
     const auto&           groups = config.groups();
     snapshot.reserve(groups.size());
     for (const auto& group : groups) {
-        RTP_LLM_CHECK_WITH_INFO(group.layout.spec != nullptr,
-                                "cache semantic snapshot requires group %s to have a spec",
-                                group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            group.spec != nullptr, "cache semantic snapshot requires group %s to have a spec", group.tag.c_str());
         const auto& policy = group.policy;
         snapshot.push_back({group.tag,
-                            group.layout.spec->type,
+                            group.spec->type,
                             policy.group_type,
                             policy.enable_prefix_reuse,
                             policy.evict_policy,
@@ -338,27 +494,27 @@ inline CacheSemanticSnapshot snapshotCacheConfig(const CacheConfig& config) {
                             policy.cp_mapping,
                             policy.cp_slice,
                             group.layer_ids,
-                            group.layout.block_num,
-                            group.layout.seq_size_per_block,
-                            group.layout.kernel_seq_size_per_block,
+                            group.block_num,
+                            group.seq_size_per_block,
+                            group.kernel_seq_size_per_block,
                             config.blockSizeBytes(group.tag),
-                            group.layout.kv_block_stride_bytes,
-                            group.layout.kv_scale_stride_bytes,
-                            group.layout.local_kv_head_num,
-                            {group.layout.spec->memoryLayoutDType(),
-                             group.layout.spec->block_size(),
-                             group.layout.spec->k_block_size(),
-                             group.layout.spec->v_block_size(),
-                             group.layout.spec->block_size_bytes(),
-                             group.layout.spec->k_block_size_bytes(),
-                             group.layout.spec->v_block_size_bytes(),
-                             group.layout.spec->block_payload_bytes(),
-                             group.layout.spec->k_block_payload_bytes(),
-                             group.layout.spec->v_block_payload_bytes(),
-                             group.layout.spec->scale_block_size_bytes(),
-                             group.layout.spec->k_scale_block_size_bytes(),
-                             group.layout.spec->v_scale_block_size_bytes(),
-                             group.layout.spec->fingerprint()}});
+                            group.kv_block_stride_bytes,
+                            group.kv_scale_stride_bytes,
+                            group.local_kv_head_num,
+                            {group.spec->memoryLayoutDType(),
+                             group.spec->block_size(),
+                             group.spec->k_block_size(),
+                             group.spec->v_block_size(),
+                             group.spec->block_size_bytes(),
+                             group.spec->k_block_size_bytes(),
+                             group.spec->v_block_size_bytes(),
+                             group.spec->block_payload_bytes(),
+                             group.spec->k_block_payload_bytes(),
+                             group.spec->v_block_payload_bytes(),
+                             group.spec->scale_block_size_bytes(),
+                             group.spec->k_scale_block_size_bytes(),
+                             group.spec->v_scale_block_size_bytes(),
+                             group.spec->fingerprint()}});
     }
     std::sort(snapshot.begin(), snapshot.end(), [](const auto& lhs, const auto& rhs) { return lhs.tag < rhs.tag; });
     return snapshot;
@@ -430,18 +586,17 @@ inline CacheConfig makeTestCacheConfigByTag(int                                 
     }
 
     std::map<std::string, std::vector<int>> group_layer_ids;
-    std::vector<CacheLayerMembership>       layers;
+    std::vector<CacheLayer>                 layers;
     layers.reserve(static_cast<size_t>(layer_num));
     for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
-        CacheLayerMembership layer;
-        layer.layer_id = layer_id;
+        CacheLayer layer;
         for (const auto& tag : layer_group_tags[static_cast<size_t>(layer_id)]) {
             RTP_LLM_CHECK_WITH_INFO(std::find(tags.begin(), tags.end(), tag) != tags.end(),
                                     "test topology unknown tag=%s for layer=%d",
                                     tag.c_str(),
                                     layer_id);
             group_layer_ids[tag].push_back(layer_id);
-            layer.group_tags.push_back(tag);
+            layer.push_back(tag);
         }
         layers.push_back(std::move(layer));
     }
@@ -454,21 +609,21 @@ inline CacheConfig makeTestCacheConfigByTag(int                                 
         auto        spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag);
 
         CacheGroup group;
-        group.tag              = tag;
-        group.layout.spec      = std::move(spec);
-        group.policy           = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL : group_types[i]);
-        group.layer_ids        = group_layer_ids[tag];
-        group.layout.block_num = 16;
-        group.layout.seq_size_per_block        = blocks_per_kv_block;
-        group.layout.kernel_seq_size_per_block = 1;
+        group.tag                = tag;
+        group.spec               = std::move(spec);
+        group.policy             = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL : group_types[i]);
+        group.layer_ids          = group_layer_ids[tag];
+        group.block_num          = 16;
+        group.seq_size_per_block = blocks_per_kv_block;
+        group.kernel_seq_size_per_block = 1;
         groups.push_back(std::move(group));
     }
     TestCacheConfigBuilder builder;
     for (auto& group : groups) {
         builder.addGroup(std::move(group));
     }
-    for (auto& layer : layers) {
-        builder.setLayerTags(layer.layer_id, std::move(layer.group_tags));
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
+        builder.setLayerTags(static_cast<int>(layer_id), std::move(layers[layer_id]));
     }
     return builder.build();
 }
@@ -794,7 +949,7 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
     return SpecBuilder::build(desc, ctx).spec;
 }
 
-inline CacheConfig buildTestCacheConfigFromGroupedSpecs(CacheConfig                          base,
+inline CacheConfig buildTestCacheConfigFromGroupedSpecs(TestCacheConfigBuilder               builder,
                                                         const std::vector<KVCacheSpecPtr>&   specs,
                                                         const std::vector<std::vector<int>>& layers_by_group,
                                                         const std::vector<CacheGroupType>&   types,
@@ -803,16 +958,14 @@ inline CacheConfig buildTestCacheConfigFromGroupedSpecs(CacheConfig             
     RTP_LLM_CHECK_WITH_INFO(specs.size() == layers_by_group.size() && specs.size() == types.size()
                                 && specs.size() == tags.size(),
                             "test grouped cache config inputs must have equal sizes");
-    const size_t           layer_num = base.layer_num;
-    TestCacheConfigBuilder builder;
-    builder.configure(std::move(base));
+    const size_t                          layer_num = builder.mainLayerCount();
     std::vector<std::vector<std::string>> layer_tags(layer_num);
     for (size_t idx = 0; idx < specs.size(); ++idx) {
         CacheGroup group;
-        group.tag         = tags[idx];
-        group.layout.spec = specs[idx];
-        group.policy      = policies.empty() ? defaultCacheGroupPolicy(types[idx]) : policies[idx];
-        group.layer_ids   = layers_by_group[idx];
+        group.tag       = tags[idx];
+        group.spec      = specs[idx];
+        group.policy    = policies.empty() ? defaultCacheGroupPolicy(types[idx]) : policies[idx];
+        group.layer_ids = layers_by_group[idx];
         for (int layer_id : group.layer_ids) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_tags.size(),
                                     "test group tag=%s has invalid layer=%d",
@@ -830,36 +983,24 @@ inline CacheConfig buildTestCacheConfigFromGroupedSpecs(CacheConfig             
 
 inline CacheConfig makeSingleGroupCacheConfig(
     KVCacheSpecPtr spec, CacheGroupType group_type, int layer_num, int block_num, std::string tag) {
-    CacheConfig config;
-    config.dtype                     = spec->memoryLayoutDType();
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block        = spec->seq_size_per_block;
-    config.kernel_seq_size_per_block = spec->seq_size_per_block;
+    auto builder = TestCacheConfigBuilder::makeBase(static_cast<uint32_t>(layer_num),
+                                                    static_cast<uint32_t>(block_num),
+                                                    spec->seq_size_per_block,
+                                                    spec->seq_size_per_block,
+                                                    spec->memoryLayoutDType());
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    config =
-        buildTestCacheConfigFromGroupedSpecs(std::move(config), {spec}, {layer_ids}, {group_type}, {std::move(tag)});
-
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
-    return config;
+    const auto kv_stride    = spec->block_size_bytes();
+    const auto scale_stride = spec->scale_block_size_bytes();
+    return builder.setGroupedSpecs({spec}, {layer_ids}, {group_type}, {std::move(tag)})
+        .setSharedPoolStorage(kv_stride, scale_stride, static_cast<size_t>(layer_num) * (kv_stride + scale_stride))
+        .build();
 }
 
 inline CacheConfig
 makeSingleLayerCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, std::string tag, int block_num = 4) {
-    auto config = makeSingleGroupCacheConfig(std::move(spec), group_type, /*layer_num=*/1, block_num, std::move(tag));
-    config.group_layer_num = 1;
-    return config;
+    return makeSingleGroupCacheConfig(std::move(spec), group_type, /*layer_num=*/1, block_num, std::move(tag));
 }
 
 inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
@@ -889,22 +1030,16 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   int               group_layer_num   = 2,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
-    CacheConfig config;
-    config.dtype                     = dtype;
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block        = tokens_per_block;
-    config.kernel_seq_size_per_block = tokens_per_block;
-    config.group_layer_num           = std::max(group_layer_num, 1);
-    config.linear_step               = 2;
+    auto builder = TestCacheConfigBuilder::makeBase(
+        static_cast<uint32_t>(layer_num), static_cast<uint32_t>(block_num), tokens_per_block, tokens_per_block, dtype);
+    const int shared_pool_layer_count = std::max(group_layer_num, 1);
 
-    if (layer_num <= 0 || (layer_num % config.group_layer_num) != 0 || (layer_num / config.group_layer_num) < 2) {
+    if (layer_num <= 0 || (layer_num % shared_pool_layer_count) != 0 || (layer_num / shared_pool_layer_count) < 2) {
         return makeSimpleMhaCacheConfig(
             layer_num, block_num, tokens_per_block, dtype, local_head_num_kv, size_per_head);
     }
 
-    const int group_cnt = layer_num / config.group_layer_num;
+    const int group_cnt = layer_num / shared_pool_layer_count;
 
     auto linear_spec = makeLinearSpec("linear", tokens_per_block, dtype, local_head_num_kv, size_per_head);
     auto full_spec   = makeMhaSpec("full", tokens_per_block, dtype, local_head_num_kv, size_per_head);
@@ -922,9 +1057,9 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     // after their declaration ordinal, which is only how the tag is spelled.
     for (int ordinal = 0; ordinal < group_cnt; ++ordinal) {
         std::vector<int> group_layers;
-        group_layers.reserve(static_cast<size_t>(config.group_layer_num));
-        for (int local = 0; local < config.group_layer_num; ++local) {
-            group_layers.push_back(ordinal * config.group_layer_num + local);
+        group_layers.reserve(static_cast<size_t>(shared_pool_layer_count));
+        for (int local = 0; local < shared_pool_layer_count; ++local) {
+            group_layers.push_back(ordinal * shared_pool_layer_count + local);
         }
         if (ordinal == 0) {
             specs.push_back(linear_spec);
@@ -937,18 +1072,14 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         }
         layers_by_group.push_back(std::move(group_layers));
     }
-    config = buildTestCacheConfigFromGroupedSpecs(std::move(config), specs, layers_by_group, types, tags);
-
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
-    return config;
+    const auto kv_stride    = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    const auto scale_stride = full_spec->scale_block_size_bytes();
+    return builder.setSharedPoolLayoutLayerCount(shared_pool_layer_count)
+        .setLinearStep(2)
+        .setGroupedSpecs(std::move(specs), std::move(layers_by_group), std::move(types), std::move(tags))
+        .setSharedPoolStorage(
+            kv_stride, scale_stride, static_cast<size_t>(shared_pool_layer_count) * (kv_stride + scale_stride))
+        .build();
 }
 
 }  // namespace test

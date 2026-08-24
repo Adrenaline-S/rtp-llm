@@ -49,7 +49,7 @@ void updateKvCacheOffsetTensor(const torch::Tensor& kv_cache_offset, const torch
 
 XQAAttnOp::XQAAttnOp(const AttentionConfigs& attn_configs): attn_configs_(attn_configs) {}
 
-bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
+bool XQAAttnOp::support() const {
     return get_sm() >= 90
            && supportXqa(DataType::TYPE_BF16,
                          DataType::TYPE_BF16,
@@ -60,12 +60,13 @@ bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
 }
 
 ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    XQAParamsPtr params     = std::make_shared<XQAParams>();
-    int          batch_size = attn_inputs.sequence_lengths.size(0);
-    RTP_LLM_CHECK_WITH_INFO(attn_inputs.kv_cache_kernel_block_id_device.defined(),
-                            "decode should have kv cache block id.");
+    const auto&  sequence_lengths                = attn_inputs.sequence_lengths;
+    const auto&  kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
+    XQAParamsPtr params                          = std::make_shared<XQAParams>();
+    int          batch_size                      = sequence_lengths.size(0);
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_kernel_block_id_device.defined(), "decode should have kv cache block id.");
 
-    const auto& block_ids = attn_inputs.kv_cache_kernel_block_id_device;
+    const auto& block_ids = kv_cache_kernel_block_id_device;
     RTP_LLM_CHECK_WITH_INFO(block_ids.size(0) == batch_size,
                             "XQA kv blocks batch size expected [%d] but got [%d]",
                             batch_size,
@@ -95,20 +96,22 @@ ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     check_cuda_error();
 
     params->batch_size       = batch_size;
-    params->max_seq_len      = maxSeqLenWithoutDeviceSync(attn_configs_, attn_inputs.sequence_lengths);
-    params->sequence_lengths = attn_inputs.sequence_lengths;
+    params->max_seq_len      = maxSeqLenWithoutDeviceSync(attn_configs_, sequence_lengths);
+    params->sequence_lengths = sequence_lengths;
 
     return ParamsBasePtr(params);
 }
 
 void XQAAttnOp::update(const XQAParamsPtr& params, torch_ext::PyAttentionInputs attn_inputs) {
+    const auto& sequence_lengths                = attn_inputs.sequence_lengths;
+    const auto& kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     RTP_LLM_CHECK_WITH_INFO(params != nullptr, "XQAAttnOp::update received null params");
 
-    const auto& block_ids = attn_inputs.kv_cache_kernel_block_id_device;
+    const auto& block_ids = kv_cache_kernel_block_id_device;
     updateKvCacheOffsetTensor(params->kv_cache_offset, block_ids);
 
     params->batch_size       = static_cast<size_t>(block_ids.size(0));
-    params->sequence_lengths = attn_inputs.sequence_lengths;
+    params->sequence_lengths = sequence_lengths;
 }
 
 void XQAAttnOp::updateKvCacheOffset(const torch::Tensor& kv_cache_offset,
@@ -165,7 +168,7 @@ void registerXQAAttnOp(const py::module& m) {
         .def_readwrite("kv_cache_offset", &XQAParams::kv_cache_offset);
     pybind11::class_<XQAAttnOp>(m, "XQAAttnOp")
         .def(pybind11::init<const AttentionConfigs&>(), py::arg("attn_configs"))
-        .def("support", &XQAAttnOp::support, py::arg("attn_inputs").noconvert())
+        .def("support", &XQAAttnOp::support)
         .def("prepare", &XQAAttnOp::prepare, py::arg("attn_inputs"))
         .def("update", &XQAAttnOp::update, py::arg("params"), py::arg("attn_inputs"))
         .def("update_kv_cache_offset",

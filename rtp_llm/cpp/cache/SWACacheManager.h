@@ -2,18 +2,19 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 
 namespace rtp_llm {
 
-class SWAKVCacheGroup: public KVCacheGroup {
+class SWACacheManager: public SingleTypeCacheManager {
 public:
-    SWAKVCacheGroup(const CacheGroup&                   cache_group,
+    SWACacheManager(const CacheGroup&                   cache_group,
                     BlockPoolPtr                        block_pool,
                     int                                 linear_step      = 0,
                     SharedBlockCache*                   shared_cache     = nullptr,
                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(cache_group, std::move(block_pool), shared_cache, metrics_reporter), linear_step_(linear_step) {}
+        SingleTypeCacheManager(cache_group, std::move(block_pool), shared_cache, metrics_reporter),
+        linear_step_(linear_step) {}
 
     MatchResult    matchSingleKey(CacheKeyType cache_key) const override;
     bool           malloc(GroupBlockToPoolBlockBinding& binding,
@@ -54,6 +55,6 @@ private:
     int linear_step_ = 0;
 };
 
-using SWAKVCacheGroupPtr = std::shared_ptr<SWAKVCacheGroup>;
+using SWACacheManagerPtr = std::shared_ptr<SWACacheManager>;
 
 }  // namespace rtp_llm

@@ -27,42 +27,48 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
 
 class CacheConfigCreator {
 public:
-    static CacheConfig buildResolvedConfig(ResolvedCacheConfigData data);
+    static CacheConfig createRankLocalConfig(const ModelConfig&                 model_config,
+                                             const ParallelismConfig&           parallelism_config,
+                                             const RuntimeConfig&               runtime_config,
+                                             const KVCacheConfig&               kv_cache_config,
+                                             const std::optional<WarmUpResult>& warm_up_result          = std::nullopt,
+                                             const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
+    static CacheConfig createRankLocalSpeculativeConfig(const ModelConfig&                 score_model_config,
+                                                        const ModelConfig&                 propose_model_config,
+                                                        const ParallelismConfig&           parallelism_config,
+                                                        const RuntimeConfig&               runtime_config,
+                                                        const KVCacheConfig&               kv_cache_config,
+                                                        const SpeculativeExecutionConfig&  sp_config,
+                                                        const std::optional<WarmUpResult>& warm_up_result);
+    static CacheConfig createDecodeWarmupConfig(const ModelConfig&       model_config,
+                                                const ParallelismConfig& parallelism_config,
+                                                const KVCacheConfig&     kv_cache_config,
+                                                int                      gen_num_per_cycle);
 
-    // Returns a finalized value; config and all of its MTP descendants remain unchanged.
-    static CacheConfig finalizeBlockNums(const CacheConfig&  config,
-                                         uint32_t            global_block_num,
-                                         const RuntimeConfig& runtime_config);
-
-    // Owns all production descriptor lowering. The legacy creator classes are
-    // retained only as test oracles until their Task 9 deletion.
-    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
-                                         const ParallelismConfig& parallelism_config,
-                                         bool                     is_mtp,
-                                         int                      gen_num_per_cycle);
-    static CacheConfig createConfig(const ModelConfig&                               model_config,
-                                    const ParallelismConfig&                         parallelism_config,
-                                    const RuntimeConfig&                             runtime_config,
-                                    const KVCacheConfig&                             kv_cache_config,
-                                    const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
-                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt);
-    static CacheConfig createSpConfig(const ModelConfig&                 score_model_config,
-                                      const ModelConfig&                 propose_model_config,
-                                      const ParallelismConfig&           parallelism_config,
-                                      const RuntimeConfig&               runtime_config,
-                                      const KVCacheConfig&               kv_cache_config,
-                                      const SpeculativeExecutionConfig&  sp_config,
-                                      const std::optional<WarmUpResult>& warm_up_result,
-                                      bool                               is_mtp,
-                                      bool                               is_eagle);
-
-    // Unified desc->spec conversion. Callers provide the runtime build context;
-    // descs remain read-only.
-    static LayerBuiltSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
-                                                    const SpecBuildContext&      ctx,
-                                                    int64_t                      expected_layer_num);
+    // Reconciles only capacity. Descriptor lowering, group topology, geometry,
+    // and MTP composition remain exactly as published by the rank-local creator.
+    static CacheConfig withRankSynchronizedBlockCountBasis(const CacheConfig& config, uint32_t block_count_basis);
 
 private:
+    static void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name);
+    static uint32_t    computeBlockNum(CacheConfig&                                     config,
+                                       const ModelConfig&                               model_config,
+                                       const RuntimeConfig&                             runtime_config,
+                                       const KVCacheConfig&                             kv_cache_config,
+                                       const ParallelismConfig&                         parallelism_config,
+                                       const std::optional<WarmUpResult>&               warm_up_result,
+                                       const std::optional<SpeculativeExecutionConfig>& sp_config);
+    static void        populateGroupsFromLayerSpecs(CacheConfig&             config,
+                                                    const LayerBuiltSpecs&   layer_specs,
+                                                    const ModelConfig&       model_config,
+                                                    const ParallelismConfig& parallelism_config);
+    static void        finalizeGroupStorage(CacheConfig& config);
+    static CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
+                                             const ParallelismConfig& parallelism_config,
+                                             const KVCacheConfig&     kv_cache_config,
+                                             int                      gen_num_per_cycle);
+    static CacheConfig projectBlockCounts(const CacheConfig& config, uint32_t block_count_basis, bool validate_basis);
+
     // Removed functions moved to MemoryEvaluationHelper:
     // getDefaultRuntimeMemorySize
     // getKVCacheMemorySize

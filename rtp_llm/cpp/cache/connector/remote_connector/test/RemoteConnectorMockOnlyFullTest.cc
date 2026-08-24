@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
@@ -111,7 +111,7 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_);
+            auto allocator = std::make_shared<CoordinatorCacheManager>(cache_config_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
@@ -127,38 +127,36 @@ private:
     }
 
     void initCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-        cache_config_.layer_num          = layer_num;
-        cache_config_.layer_all_num      = layer_num;
-        cache_config_.block_num          = block_num;
-        cache_config_.seq_size_per_block = seq_size_per_block;
+        auto builder = TestCacheConfigBuilder::makeBase(
+            layer_num, block_num, seq_size_per_block, seq_size_per_block, DataType::TYPE_FP16);
 
-        auto mha_spec                       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
-        cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP16;
-        cache_config_.kv_block_stride_bytes = mha_spec->block_size_bytes();  // one-layer KV bytes for one logical block
-        cache_config_.kv_scale_stride_bytes = 0;
-        cache_config_.kv_block_size_bytes   = static_cast<size_t>(layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_size_bytes   = 0;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes;  // (kv + scale)
+        auto             mha_spec = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
-        cache_config_ = buildTestCacheConfigFromGroupedSpecs(
-            std::move(cache_config_), {mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        cache_config_ = std::move(builder)
+                            .setSharedPoolStorage(mha_spec->block_size_bytes(),
+                                                  0,
+                                                  static_cast<size_t>(layer_num) * mha_spec->block_size_bytes())
+                            .setGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"})
+                            .build();
     }
 };
 
 #ifdef USE_REMOTE_KV_CACHE
 TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAndBuildsFullPolicy) {
-    CacheConfig hybrid_config                 = cache_config_;
-    hybrid_config.use_independent_block_pools = true;
-    const auto hybrid_block_num               = hybrid_config.block_num;
-    const auto hybrid_kv_stride               = hybrid_config.group("default").layout.spec->block_size_bytes();
-    const auto hybrid_scale_stride            = hybrid_config.group("default").layout.spec->scale_block_size_bytes();
-    hybrid_config                             = TestCacheConfigBuilder::withGroupBlockLayout(
-        std::move(hybrid_config), {hybrid_block_num}, {hybrid_kv_stride}, {hybrid_scale_stride});
+    CacheConfig hybrid_config = cache_config_;
+    hybrid_config =
+        TestCacheConfigBuilder::rebuildForTest(std::move(hybrid_config)).setUsesIndependentBlockPools(true).build();
+    const auto hybrid_block_num    = hybrid_config.blockCountBasis();
+    const auto hybrid_kv_stride    = hybrid_config.group("default").spec->block_size_bytes();
+    const auto hybrid_scale_stride = hybrid_config.group("default").spec->scale_block_size_bytes();
+    hybrid_config                  = TestCacheConfigBuilder::rebuildForTest(std::move(hybrid_config))
+                        .setGroupBlockLayout({hybrid_block_num}, {hybrid_kv_stride}, {hybrid_scale_stride})
+                        .build();
 
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(hybrid_config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(hybrid_config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     const auto sole_pool = allocator->blockPool("default");
     ASSERT_NE(sole_pool, nullptr);
@@ -189,7 +187,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAnd
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, ManagerRegistersOrdinarySingleFullHybridPoolWithRemoteConnector) {
-    ASSERT_FALSE(cache_config_.use_independent_block_pools);
+    ASSERT_FALSE(cache_config_.usesIndependentBlockPools());
     ASSERT_EQ(cache_config_.groupNums(), 1);
 
     auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();
@@ -210,7 +208,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, ManagerRegistersOrdinarySingleFullHybrid
                                                     sp_config_);
 
     ASSERT_TRUE(manager->init());
-    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    auto allocator = manager->coordinator_cache_manager_;
     ASSERT_NE(allocator, nullptr);
     const auto sole_pool = allocator->blockPool("default");
     ASSERT_NE(sole_pool, nullptr);
@@ -255,7 +253,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
         // 没有其他connector
         UriStrVec          expected_uris        = genUris({1, 2, 3});
         BlockBuffersExpect block_buffers_expect = {
-            3, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
+            3, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"1", "2", "3"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -282,7 +280,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
         // 其他connector也命中了部分
         UriStrVec          expected_uris        = genUris({2, 3});
         BlockBuffersExpect block_buffers_expect = {
-            2, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
+            2, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"2", "3"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -348,7 +346,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
         // 没有其他connector
         UriStrVec          expected_uris        = genUris({2, 3});
         BlockBuffersExpect block_buffers_expect = {
-            2, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
+            2, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"2", "3"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -372,7 +370,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
         // 有其他connector
         UriStrVec          expected_uris        = genUris({3});
         BlockBuffersExpect block_buffers_expect = {
-            1, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
+            1, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
         std::vector<std::string> expect_block_ids({"3"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -434,7 +432,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
     UriStrVec actual_uris   = genUris({1, 2, 3}, {}, "actual_");
 
     BlockBuffersExpect block_buffers_expect = {
-        3, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
+        3, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
     std::vector<std::string> expect_block_ids({"1", "2", "3"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -481,7 +479,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     UriStrVec actual_uris   = genUris({2, 3}, {}, "actual_");
 
     BlockBuffersExpect block_buffers_expect = {
-        2, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
+        2, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
     std::vector<std::string> expect_block_ids({"2", "3"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -529,7 +527,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     UriStrVec actual_uris   = genUris({2, 4}, {}, "actual_");
 
     BlockBuffersExpect block_buffers_expect = {
-        2, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
+        2, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
     std::vector<std::string> expect_block_ids({"2", "4"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -602,7 +600,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
     UriStrVec expected_uris = genUris({1, 2, 3});
 
     BlockBuffersExpect block_buffers_expect = {
-        3, kFakeLayerNum, cache_config_.group("default").layout.spec->block_size_bytes()};
+        3, kFakeLayerNum, cache_config_.group("default").spec->block_size_bytes()};
     std::vector<std::string> expect_block_ids({"1", "2", "3"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),

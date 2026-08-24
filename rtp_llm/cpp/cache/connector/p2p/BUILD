@@ -24,6 +24,7 @@ cc_library(
     ],
     deps = [
         ":layer_block_converter",
+        "//rtp_llm/cpp/cache:block_expression",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",

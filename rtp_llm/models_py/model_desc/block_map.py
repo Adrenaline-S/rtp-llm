@@ -3,7 +3,6 @@ from typing import Protocol, TypeVar
 
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
 
-AttentionInputs = PyAttentionInputs | Mapping[str, PyAttentionInputs]
 T = TypeVar("T")
 
 
@@ -13,41 +12,18 @@ class LayeredKVCache(Protocol):
     ) -> Sequence[LayerKVCache]: ...
 
 
-def get_attention_inputs_value(inputs: PyModelInputs) -> AttentionInputs:
+def get_attention_inputs_value(inputs: PyModelInputs) -> PyAttentionInputs:
     value = inputs.attention_inputs
     if isinstance(value, PyAttentionInputs):
         return value
-    if isinstance(value, Mapping) and value:
-        return value
-    raise RuntimeError(
-        "PyModelInputs.attention_inputs must be PyAttentionInputs or a non-empty tag mapping"
-    )
+    raise RuntimeError("PyModelInputs.attention_inputs must be PyAttentionInputs")
 
 
 def get_primary_attention_inputs(
     inputs: PyModelInputs, kv_cache: LayeredKVCache | None = None
 ) -> PyAttentionInputs:
     """Return the common/single fast-path value without interpreting tag names."""
-    value = get_attention_inputs_value(inputs)
-    if isinstance(value, PyAttentionInputs):
-        return value
-    return next(iter(value.values()))
-
-
-def select_attention_inputs_for_tag(
-    attention_inputs: AttentionInputs, tag: str
-) -> PyAttentionInputs:
-    """Select a group directly when the model already knows its business tag."""
-    if isinstance(attention_inputs, PyAttentionInputs):
-        return attention_inputs
-    if not isinstance(attention_inputs, Mapping):
-        raise RuntimeError(f"invalid attention_inputs type: {type(attention_inputs)!r}")
-    try:
-        return attention_inputs[tag]
-    except KeyError as error:
-        raise RuntimeError(
-            f"attention input tag {tag!r} is missing; available tags={list(attention_inputs)}"
-        ) from error
+    return get_attention_inputs_value(inputs)
 
 
 def get_layer_tags(kv_cache: LayeredKVCache | None, local_layer_idx: int) -> list[str]:
@@ -141,18 +117,29 @@ def get_group_tags_for_layers(
     return tags
 
 
-def select_attention_inputs_for_layer(
+def select_cache_group_attn_inputs_for_layer(
     inputs: PyModelInputs,
     kv_cache: LayeredKVCache | None,
     local_layer_idx: int,
 ) -> PyAttentionInputs | list[PyAttentionInputs]:
-    """Return the group-local input(s) owned by a model-local layer."""
-    value = get_attention_inputs_value(inputs)
-    if isinstance(value, PyAttentionInputs):
-        return value
-
-    tags = get_layer_tags(kv_cache, local_layer_idx)
-    selected = [select_attention_inputs_for_tag(value, tag) for tag in tags]
+    """Return this layer's per-group attention inputs, keyed by cache tag."""
+    if kv_cache is None:
+        raise RuntimeError(
+            f"KV cache is not initialized for local layer {local_layer_idx}"
+        )
+    layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
+    if not layer_caches:
+        raise RuntimeError(f"local layer {local_layer_idx} has no KV cache group")
+    group_attn_inputs = inputs.cache_group_attn_inputs
+    selected = []
+    for layer_cache in layer_caches:
+        tag = str(layer_cache.tag)
+        if tag not in group_attn_inputs:
+            raise RuntimeError(
+                f"local layer {local_layer_idx} cache tag {tag!r} has no attention "
+                f"inputs; available tags: {sorted(group_attn_inputs)}"
+            )
+        selected.append(group_attn_inputs[tag])
     return selected[0] if len(selected) == 1 else selected
 
 
@@ -163,14 +150,17 @@ def select_fmha_impl_for_layer(
 ) -> T | list[T]:
     if not isinstance(fmha_impl, Mapping):
         return fmha_impl
-    tags = get_layer_tags(kv_cache, local_layer_idx)
-    selected = []
-    for tag in tags:
-        if tag not in fmha_impl:
-            raise RuntimeError(
-                f"FMHA tag {tag!r} is missing; available tags={list(fmha_impl)}"
-            )
-        selected.append(fmha_impl[tag])
+    if kv_cache is None:
+        raise RuntimeError(
+            f"KV cache is not initialized for local layer {local_layer_idx}"
+        )
+    layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
+    if not layer_caches:
+        raise RuntimeError(f"local layer {local_layer_idx} has no KV cache group")
+    selected = [
+        select_fmha_impl_for_tag(fmha_impl, str(layer_cache.tag))
+        for layer_cache in layer_caches
+    ]
     return selected[0] if len(selected) == 1 else selected
 
 

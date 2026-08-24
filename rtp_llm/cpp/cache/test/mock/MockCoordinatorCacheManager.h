@@ -2,15 +2,19 @@
 
 #include <gmock/gmock.h>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 
 namespace rtp_llm {
 
-class MockKVCacheAllocator: public KVCacheAllocator {
+class MockCoordinatorCacheManager: public CoordinatorCacheManager {
 public:
-    explicit MockKVCacheAllocator(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
-        KVCacheAllocator(config, atype) {}
-    ~MockKVCacheAllocator() override = default;
+    explicit MockCoordinatorCacheManager(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
+        CoordinatorCacheManager(config, atype) {}
+    ~MockCoordinatorCacheManager() override = default;
+
+    void installSoleGroupBlockPoolForTest(BlockPoolPtr pool) {
+        setSoleGroupBlockPoolForTest(std::move(pool));
+    }
 
 public:
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
@@ -51,6 +55,26 @@ public:
     MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
 
 protected:
+    MallocStatus
+    evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override {
+        const int need_blocks = getNeedBlocks(malloc_info);
+        if (need_blocks <= 0) {
+            return MallocStatus::NONE;
+        }
+
+        const size_t required_blocks = static_cast<size_t>(need_blocks);
+        const auto   fits            = [required_blocks, reserve_blocks](size_t capacity) {
+            return required_blocks <= capacity && reserve_blocks <= capacity - required_blocks;
+        };
+        if (!fits(totalBlocksNum())) {
+            return MallocStatus::PERMANENT_RESOURCE_EXHAUSTED;
+        }
+        if (mode == InitCapacityMode::TOTAL_AND_AVAILABLE && !fits(availableBlocksNum())) {
+            return MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+        }
+        return MallocStatus::NONE;
+    }
+
     MOCK_METHOD(bool, doInit, (), (override));
     MOCK_METHOD(MallocResult, incrMalloc, (const MallocInfo&), (override));
     MOCK_METHOD(MallocResult, initMallocForCommonLen, (const MallocInfo&), (override));

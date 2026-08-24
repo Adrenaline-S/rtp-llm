@@ -27,31 +27,19 @@ BlockDependency childDep(CacheKeyType parent, uint32_t ordinal) {
 }
 
 CacheConfig makeTaggedCacheConfig() {
-    CacheConfig config;
-    config.dtype                     = DataType::TYPE_FP16;
-    config.layer_num                 = 2;
-    config.layer_all_num             = 2;
-    config.block_num                 = 16;
-    config.seq_size_per_block        = 4;
-    config.kernel_seq_size_per_block = 4;
+    auto builder = TestCacheConfigBuilder::makeBase(2, 16, 4, 4, DataType::TYPE_FP16);
 
-    auto linear = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "linear");
-    auto full   = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
-        config, {linear, full}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"linear", "full"});
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(
-        config, {16, 16}, {linear->block_size_bytes(), full->block_size_bytes()}, {0, 0});
-    return config;
+    auto linear = makeResolvedMhaSpec(builder.dtype(), 1, 1, 4, "linear");
+    auto full   = makeResolvedMhaSpec(builder.dtype(), 1, 1, 4, "full");
+    return builder
+        .setGroupedSpecs({linear, full}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"linear", "full"})
+        .setGroupBlockLayout({16, 16}, {linear->block_size_bytes(), full->block_size_bytes()}, {0, 0})
+        .build();
 }
 
 CacheConfig makeSlotCacheConfig(size_t group_count) {
-    CacheConfig config;
-    config.dtype                     = DataType::TYPE_FP16;
-    config.layer_num                 = static_cast<uint32_t>(group_count);
-    config.layer_all_num             = static_cast<uint32_t>(group_count);
-    config.block_num                 = 2048;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 1;
+    auto builder =
+        TestCacheConfigBuilder::makeBase(static_cast<uint32_t>(group_count), 2048, 1, 1, DataType::TYPE_FP16);
 
     std::vector<KVCacheSpecPtr>   specs;
     std::vector<std::vector<int>> layer_ids;
@@ -62,7 +50,7 @@ CacheConfig makeSlotCacheConfig(size_t group_count) {
     std::vector<size_t>           scale_strides;
     for (size_t slot = 0; slot < group_count; ++slot) {
         const auto tag  = "group" + std::to_string(slot);
-        auto       spec = makeResolvedMhaSpec(config.dtype, 1, 1, 1, tag);
+        auto       spec = makeResolvedMhaSpec(builder.dtype(), 1, 1, 1, tag);
         kv_strides.push_back(spec->block_size_bytes());
         specs.push_back(std::move(spec));
         layer_ids.push_back({static_cast<int>(slot)});
@@ -71,9 +59,9 @@ CacheConfig makeSlotCacheConfig(size_t group_count) {
         block_nums.push_back(2048);
         scale_strides.push_back(0);
     }
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(config, specs, layer_ids, group_types, tags);
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
-    return config;
+    return builder.setGroupedSpecs(specs, layer_ids, group_types, tags)
+        .setGroupBlockLayout(block_nums, kv_strides, scale_strides)
+        .build();
 }
 
 BlockPoolPtr makeLargeTestPool() {

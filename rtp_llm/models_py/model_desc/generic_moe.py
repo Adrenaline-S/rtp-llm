@@ -12,7 +12,6 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     get_layer_caches_for_tags,
     select_fmha_impl_for_layer,
-    select_fmha_impl_for_tag,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -33,7 +32,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    LayerKVCache,
+    PyModelInitResources,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
@@ -417,6 +421,9 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._sparse_layer_kv_caches: Optional[tuple[dict[str, LayerKVCache], ...]] = (
+            None
+        )
 
     def _uses_sparse_mla(self) -> bool:
         return bool(
@@ -428,21 +435,23 @@ class GenericMoeModel(GptModelBase):
             return ["default", "indexer_kv"]
         return None
 
-    def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
-    ) -> Any:
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        initialized = super().initialize(init_resource)
         if self._uses_sparse_mla():
-            attention_inputs = get_attention_inputs_value(inputs)
-            raw_tags = (
-                list(attention_inputs) if isinstance(attention_inputs, Mapping) else []
-            )
+            raw_tags = self._get_fmha_group_tags() or []
             required_tags = {"default", "indexer_kv"}
             if len(raw_tags) != len(required_tags) or set(raw_tags) != required_tags:
                 raise RuntimeError(
                     "sparse MLA requires exactly attention input tags "
                     f"{sorted(required_tags)}; available tags={raw_tags}"
                 )
-        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+            self._sparse_layer_kv_caches = tuple(
+                get_layer_caches_for_tags(
+                    self.kv_cache, layer_idx, ("default", "indexer_kv")
+                )
+                for layer_idx in range(self.layer_num)
+            )
+        return initialized
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -454,25 +463,26 @@ class GenericMoeModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
         is_sparse_mla = self._uses_sparse_mla()
         if is_sparse_mla:
-            required_tags = {"default", "indexer_kv"}
-            if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
-                available_tags = (
-                    list(fmha_impl) if isinstance(fmha_impl, Mapping) else []
-                )
+            if not isinstance(fmha_impl, Mapping):
+                raise RuntimeError("sparse MLA requires tag-keyed FMHA implementations")
+            if self._sparse_layer_kv_caches is None:
                 raise RuntimeError(
-                    "sparse MLA requires exactly FMHA tags "
-                    f"{sorted(required_tags)}; available tags={available_tags}"
+                    "sparse MLA cache bindings were not resolved during initialization"
                 )
-            sparse_fmha_impl = {
-                tag: select_fmha_impl_for_tag(fmha_impl, tag)
-                for tag in ("default", "indexer_kv")
-            }
+            try:
+                sparse_fmha_impl = {
+                    "default": fmha_impl["default"],
+                    "indexer_kv": fmha_impl["indexer_kv"],
+                }
+            except KeyError as error:
+                raise RuntimeError(
+                    "sparse MLA FMHA implementation is missing for tag "
+                    f"{error.args[0]!r}"
+                ) from error
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             if is_sparse_mla:
                 layer_fmha_impl = sparse_fmha_impl
-                layer_kv_cache = get_layer_caches_for_tags(
-                    self.kv_cache, i, ("default", "indexer_kv")
-                )
+                layer_kv_cache = self._sparse_layer_kv_caches[i]
             else:
                 layer_fmha_impl = select_fmha_impl_for_layer(
                     fmha_impl, self.kv_cache, i

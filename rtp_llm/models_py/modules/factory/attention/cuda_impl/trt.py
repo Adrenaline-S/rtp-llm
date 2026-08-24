@@ -127,11 +127,19 @@ class TRTLLMFMHAv2PagedPrefillOp:
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         page_size = attn_configs.kernel_tokens_per_block
-        return _supports_trtllm_fmha_v2(attn_configs) and (
-            page_size > 0 and page_size.bit_count() == 1
+        kernel_table = attn_inputs.kv_cache_kernel_block_id_device
+        has_kernel_table = kernel_table is not None and kernel_table.numel() > 0
+        return (
+            _supports_trtllm_fmha_v2(attn_configs)
+            and has_kernel_table
+            and page_size > 0
+            and page_size.bit_count() == 1
         )
 
-    def prepare(self, attn_inputs: PyAttentionInputs) -> TRTLLMFMHAv2Params:
+    def prepare(
+        self,
+        attn_inputs: PyAttentionInputs,
+    ) -> TRTLLMFMHAv2Params:
         cu_seqlens = attn_inputs.cu_seqlens_device
         cu_kv_seqlens = attn_inputs.cu_kv_seqlens_device
         seq_lens = cu_kv_seqlens[1:] - cu_kv_seqlens[:-1]
@@ -322,7 +330,6 @@ class TRTLLMFMHAv2PrefillOp:
 
 
 class FlashInferTRTLLMFMHAv2PagedPrefillImpl(FMHAImplBase):
-
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -354,7 +361,10 @@ class FlashInferTRTLLMFMHAv2PagedPrefillImpl(FMHAImplBase):
         )
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+    def prepare_cuda_graph(
+        self,
+        attn_inputs: PyAttentionInputs,
+    ) -> None:
         self.fmha_impl.prepare_cuda_graph(self.fmha_params)
         new_kv_cache_offset = self.rope_kvcache_impl.prepare(
             attn_inputs
@@ -404,7 +414,10 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
         )
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+    def prepare_cuda_graph(
+        self,
+        attn_inputs: PyAttentionInputs,
+    ) -> None:
         self.fmha_impl.prepare_cuda_graph(self.fmha_params)
         new_kv_cache_offset = self.rope_kvcache_impl.prepare(
             attn_inputs

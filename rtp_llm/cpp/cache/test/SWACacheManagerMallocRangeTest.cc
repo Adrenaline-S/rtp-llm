@@ -6,7 +6,7 @@
 #include <string>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SWACacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 namespace rtp_llm {
@@ -78,21 +78,21 @@ std::shared_ptr<MHAKVCacheSpec> makeMHASpec(int seq_size_per_block) {
 
 }  // namespace
 
-TEST(SWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M) {
+TEST(SWACacheManagerMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M) {
     constexpr int kSeqSizePerBlock = 256;
     constexpr int kMaxSeqLen       = 1000000;
 
     ScopedEnvVar disable_pin_host_pool("RTP_LLM_PIN_HOST_BLOCK_POOL", "0");
     auto         block_pool = createHostBlockPool();
     CacheGroup   group_config;
-    group_config.tag                              = "swa";
-    group_config.layout.spec                      = makeMHASpec(kSeqSizePerBlock);
-    group_config.policy                           = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    group_config.layout.seq_size_per_block        = kSeqSizePerBlock;
-    group_config.layout.kernel_seq_size_per_block = kSeqSizePerBlock;
-    group_config.layout.kv_block_stride_bytes     = group_config.layout.spec->block_size_bytes();
-    group_config.layout.kv_scale_stride_bytes     = group_config.layout.spec->scale_block_size_bytes();
-    SWAKVCacheGroup group(std::move(group_config), block_pool, 0);
+    group_config.tag                       = "swa";
+    group_config.spec                      = makeMHASpec(kSeqSizePerBlock);
+    group_config.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    group_config.seq_size_per_block        = kSeqSizePerBlock;
+    group_config.kernel_seq_size_per_block = kSeqSizePerBlock;
+    group_config.kv_block_stride_bytes     = group_config.spec->block_size_bytes();
+    group_config.kv_scale_stride_bytes     = group_config.spec->scale_block_size_bytes();
+    SWACacheManager group(std::move(group_config), block_pool, 0);
 
     auto check_seq_len = [&](int seq_len) {
         GroupBlockToPoolBlockBinding block_ids;

@@ -24,6 +24,21 @@ __global__ void cudaGraphPrepareFillKernel(CudaGraphPrepareFillParams params) {
     }
 }
 
+__global__ void cudaGraphPrepareFillRegionsKernel(const CudaGraphPrepareFillRegion* regions, int32_t region_count) {
+    const int32_t region_idx = static_cast<int32_t>(blockIdx.x);
+    if (region_idx >= region_count) {
+        return;
+    }
+    const auto region = regions[region_idx];
+    if (region.ptr == nullptr || region.count <= 0) {
+        return;
+    }
+    const int32_t fill_value = region.value_ptr != nullptr ? *region.value_ptr : region.value;
+    for (int64_t i = threadIdx.x; i < region.count; i += blockDim.x) {
+        region.ptr[i] = fill_value;
+    }
+}
+
 __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_lengths_plus_1,
                                                     const int32_t* block_ids,
                                                     int32_t*       batch_indice,
@@ -85,6 +100,21 @@ void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t 
     cudaGraphPrepareFillKernel<<<blocks, block_size, 0, stream>>>(params);
     const auto result = cudaGetLastError();
     TORCH_CHECK(result == cudaSuccess, "cuda graph prepare fill kernel failed: ", cudaGetErrorString(result));
+}
+
+void invokeCudaGraphPrepareFillRegions(const CudaGraphPrepareFillRegion* regions,
+                                       int32_t                           region_count,
+                                       cudaStream_t                      stream) {
+    TORCH_CHECK(region_count >= 0, "invalid dynamic fill region count: ", region_count);
+    if (region_count == 0) {
+        return;
+    }
+    TORCH_CHECK(regions != nullptr, "dynamic fill region storage is null");
+
+    constexpr int block_size = 256;
+    cudaGraphPrepareFillRegionsKernel<<<region_count, block_size, 0, stream>>>(regions, region_count);
+    const auto result = cudaGetLastError();
+    TORCH_CHECK(result == cudaSuccess, "dynamic fill kernel failed: ", cudaGetErrorString(result));
 }
 
 void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,

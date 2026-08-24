@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockExpression.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 
@@ -198,12 +199,7 @@ protected:
                                         desc.compression_ratio,
                                         ctx.kernel_tokens_per_block);
                 const uint32_t physical_tokens_per_block = seqSizePerBlock(desc, ctx);
-                RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block >= ctx.kernel_tokens_per_block
-                                            && physical_tokens_per_block % ctx.kernel_tokens_per_block == 0,
-                                        "desc tag=%s physical block %u must be >= and divisible by kernel block %u",
-                                        desc.tag.c_str(),
-                                        physical_tokens_per_block,
-                                        ctx.kernel_tokens_per_block);
+                (void)PoolBlockToKernelBlockProjection(physical_tokens_per_block, ctx.kernel_tokens_per_block);
                 entries = physical_tokens_per_block / desc.compression_ratio;
                 break;
             }
@@ -296,7 +292,9 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         size_t         stride    = blockStrideBytes(desc, payload, entries);
         if (desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
             const uint32_t kernel_entries = ctx.kernel_tokens_per_block / desc.compression_ratio;
-            const uint32_t kernel_pages   = spec->seq_size_per_block / ctx.kernel_tokens_per_block;
+            const uint32_t kernel_pages   = static_cast<uint32_t>(
+                PoolBlockToKernelBlockProjection(spec->seq_size_per_block, ctx.kernel_tokens_per_block)
+                    .projectedSize(1));
             RTP_LLM_CHECK_WITH_INFO(entries == kernel_entries * kernel_pages,
                                     "desc tag=%s physical entries %u do not match kernel entries %u * pages %u",
                                     desc.tag.c_str(),

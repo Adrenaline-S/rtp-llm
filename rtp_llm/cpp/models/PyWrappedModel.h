@@ -9,6 +9,8 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+#include <map>
+#include <vector>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <pybind11/pybind11.h>
@@ -17,6 +19,8 @@
 // cuda_graph_base.h is platform-agnostic (only defines GraphParams/CudaGraphState structs),
 // safe to include unconditionally. cuda_graph_runner.h requires CUDA/ROCm runtime.
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/cache/BlockExpression.h"
+#include "rtp_llm/cpp/models/CacheGroupAttentionInputs.h"
 #if USING_CUDA || USING_ROCM
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #endif
@@ -75,31 +79,35 @@ public:
     bool            hasMtpTargetHiddenBuffer() const override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    void            updateKVCacheKernelBlockTableValues(const GptModelInputs& inputs) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
+    struct CacheGroupBindingResult {
+        PackedBlockTableStorage                             storage;
+        std::vector<CacheGroupBinding>                      bindings;
+        std::map<std::string, torch_ext::PyAttentionInputs> group_inputs;
+    };
+
+    CacheGroupBindingResult bindCacheGroupsForInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
+                                                     const GptModelInputs&         inputs);
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
-    torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
-    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
-                                                                   const GptModelInputs&         inputs,
-                                                                   const std::vector<size_t>&     input_idx_by_tag);
-    std::vector<size_t> validateTaggedCacheBoundary(const GptModelInputs& inputs) const;
-    GptModelOutputs forwardMicroBatchedValidated(const GptModelInputs& inputs,
-                                                  const std::vector<size_t>& input_idx_by_tag);
-    void prepareAttentionInputsValidated(const GptModelInputs&     inputs,
-                                         bool                      skip_forward_event_sync,
-                                         const std::vector<size_t>& input_idx_by_tag);
-    GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
-                                                          const GptModelInputs& inputs,
-                                                          bool                  skip_final_layernorm,
-                                                          size_t                num_valid_tokens = -1);
-    torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    void            bindCacheGroups(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs);
+    void            bindCacheStoreOffsets(torch_ext::PyAttentionInputs& py_attn_inputs);
+    void            validateCacheBlockTableBoundary(const GptModelInputs& inputs) const;
+    GptModelOutputs forwardMicroBatchedValidated(const GptModelInputs& inputs);
+    void            prepareAttentionInputsValidated(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,
+                                          const GptModelInputs& inputs,
+                                          bool                  skip_final_layernorm,
+                                          size_t                num_valid_tokens = -1);
+    torch::Tensor   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -134,11 +142,11 @@ private:
     // Canonical sorted cache tags of kv_cache_layer_layout_. Every positional
     // cache-group payload this model packs or unpacks is ordered by this
     // sequence; see rtp_llm/cpp/cache/CacheGroupTagOrder.h.
-    std::vector<std::string>                        kv_cache_boundary_group_tags_;
-    std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
-    torch::Tensor                                   residual_scale_fp32_;
-    torch::Tensor                                   residual_scale_;
-    TensorHolder                                    buffer_holder_;
+    std::vector<std::string>        kv_cache_boundary_group_tags_;
+    std::shared_ptr<KVCacheManager> cache_manager_;  // For cache_store access
+    torch::Tensor                   residual_scale_fp32_;
+    torch::Tensor                   residual_scale_;
+    TensorHolder                    buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
@@ -161,10 +169,17 @@ private:
     static constexpr int kPinnedCheckForwardCount = 3;
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 
-    std::atomic<bool>               prepared_attention_inputs_{false};
-    torch_ext::PyAttentionInputs    attention_inputs_;
-    torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
-    CudaGraphState                  graph_state_;
+    std::atomic<bool>                                   prepared_attention_inputs_{false};
+    torch_ext::PyAttentionInputs                        attention_inputs_;
+    PackedBlockTableStorage                             packed_tables_;
+    std::vector<CacheGroupBinding>                      group_bindings_;
+    std::map<std::string, torch_ext::PyAttentionInputs> cache_group_attn_inputs_;
+    std::optional<CacheBlockTablePackingSignature>      cache_block_table_signature_;
+    size_t                                              last_kernel_tail_fill_launch_count_{0};
+    torch::Tensor                                       kernel_tail_fill_regions_host_;
+    torch::Tensor                                       kernel_tail_fill_regions_device_;
+    size_t                                              kernel_tail_fill_region_capacity_{0};
+    CudaGraphState                                      graph_state_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -239,13 +254,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // attention_conf still reflects the 64-token --seq_size_per_block
         // CLI flag, causing the fused compressor to index state block_table
         // with the wrong stride and trap on unallocated ring slots.
-        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0
-                                    && params.tokens_per_block % params.kernel_tokens_per_block == 0,
-                                "GptModelInitParams must carry valid tokens_per_block / kernel_tokens_per_block "
-                                "from CacheConfig before constructing PyWrappedModel KVCache; got tokens_per_block=%zu "
-                                "kernel_tokens_per_block=%zu",
-                                params.tokens_per_block,
-                                params.kernel_tokens_per_block);
+        (void)PoolBlockToKernelBlockProjection(params.tokens_per_block, params.kernel_tokens_per_block);
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
@@ -309,9 +318,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
-        if (params.kv_cache_layer_layout.has_value()) {
-            graph_params.kv_cache_group_tags = kv_cache_boundary_group_tags_;
-        }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
         // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style
@@ -361,6 +367,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             dspark_model_role_ != DSparkModelRole::NONE || use_spec_decoding || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
+        }
+        if (params.kv_cache_layer_layout.has_value()) {
+            const size_t max_pool_blocks =
+                (static_cast<size_t>(params.max_seq_len) + params.tokens_per_block - 1) / params.tokens_per_block
+                + static_cast<size_t>(graph_params.sp_steps);
+            graph_params.kv_cache_block_table_groups.reserve(kv_cache_boundary_group_tags_.size());
+            for (const auto& tag : kv_cache_boundary_group_tags_) {
+                const auto&  group = params.kv_cache_layer_layout->groupConfig(tag);
+                const size_t pool_width =
+                    group.block_num == 0 ? max_pool_blocks : std::min<size_t>(max_pool_blocks, group.block_num);
+                graph_params.kv_cache_block_table_groups.push_back(
+                    {tag, pool_width, pool_width * group.kernelBlocksPerPoolBlock()});
+            }
         }
 
         graph_runner_ = new CudaGraphRunner(graph_params, py_instance, forward_method);

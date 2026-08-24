@@ -397,6 +397,7 @@ class TRTLLMFMHAv2TestBase(BaseAttentionTest):
         atol: float = 5e-3,
         max_mismatch_rate: float = 0.0,
         use_packed_kv_cache: bool = False,
+        requires_kernel_block_table: bool = False,
     ):
         """Run correctness test for an attention operator
 
@@ -549,7 +550,11 @@ class TRTLLMFMHAv2TestBase(BaseAttentionTest):
                 # For non-paged or normal TRT: pass full QKV
                 attn_input = qkv
 
-            params = attn_op.prepare(attn_inputs)
+            params = (
+                attn_op.prepare(attn_inputs)
+                if requires_kernel_block_table
+                else attn_op.prepare(attn_inputs)
+            )
             print_attn_inputs_detail(attn_inputs, qkv)
             self.assertIsNotNone(params, f"{op_name} prepare() returned None")
 

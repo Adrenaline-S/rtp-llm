@@ -215,7 +215,10 @@ class AiterDecodeLayoutParityTest(unittest.TestCase):
                 fmha_config.use_asm_pa = use_asm_pa
                 fmha_config.use_triton_pa = True
                 impl = attn_factory.get_fmha_impl(
-                    config, None, inputs, fmha_config=fmha_config
+                    config,
+                    None,
+                    inputs,
+                    fmha_config=fmha_config,
                 )
                 self.assertIsInstance(impl, AiterDecodeImplTriton)
                 self.assertEqual(impl.fmha_impl.linear_v, expected_linear_v)

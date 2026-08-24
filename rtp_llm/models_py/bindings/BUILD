@@ -1,6 +1,18 @@
 load("//:def.bzl", "copts", "rocm_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+# Staged for the Phase 2 terminal block-expression source gate.
+filegroup(
+    name = "cache_block_expression_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+        "core/*.h",
+        "core/*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
+)
+
 cc_library(
     name = "op_defs",
     hdrs = [

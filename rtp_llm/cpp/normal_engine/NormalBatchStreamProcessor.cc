@@ -15,29 +15,26 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.is_multimodal           = model_config.mm_model_config.is_multimodal;
     model_input_gatherer_config_.mm_position_ids_style =
         static_cast<PositionIdsStyle>(model_config.mm_model_config.mm_position_ids_style);
-    model_input_gatherer_config_.position_id_len_factor     = model_config.attn_config.rope_config.index_factor;
-    model_input_gatherer_config_.role_type                  = pd_sep_config.role_type;
-    model_input_gatherer_config_.decode_entrance            = pd_sep_config.decode_entrance;
-    model_input_gatherer_config_.block_stride_bytes         = cache_config.kv_block_stride_bytes;
-    model_input_gatherer_config_.scale_stride_bytes         = cache_config.kv_scale_stride_bytes;
-    model_input_gatherer_config_.seq_size_per_block         = cache_config.seq_size_per_block;
-    model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.kernel_seq_size_per_block;
-    model_input_gatherer_config_.kernel_blocks_per_kv_block = 1;
-    model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;
+    model_input_gatherer_config_.position_id_len_factor    = model_config.attn_config.rope_config.index_factor;
+    model_input_gatherer_config_.role_type                 = pd_sep_config.role_type;
+    model_input_gatherer_config_.decode_entrance           = pd_sep_config.decode_entrance;
+    model_input_gatherer_config_.block_stride_bytes        = cache_config.sharedPoolKvBlockStrideBytes();
+    model_input_gatherer_config_.scale_stride_bytes        = cache_config.sharedPoolKvScaleStrideBytes();
+    model_input_gatherer_config_.seq_size_per_block        = cache_config.cacheKeyBlockTokens();
+    model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.kernelBlockTokens();
+    model_input_gatherer_config_.use_opaque_kv_cache_store = cache_config.usesOpaqueKVCacheStore();
     // Tagged group records in CacheConfig's own order; the gatherer sorts them
     // into the canonical boundary order before packing any positional payload.
     // A warm-up processor is built from a CacheConfig with no topology at all,
     // so leave the record list empty rather than dereferencing it.
     model_input_gatherer_config_.kv_cache_groups.clear();
     if (cache_config.groupNums() > 0) {
-        const auto& groups = cache_config.groups();
+        model_input_gatherer_config_.cache_config = cache_config;
+        const auto& groups                        = cache_config.groups();
         for (const auto& group : groups) {
             const auto [it, inserted] = model_input_gatherer_config_.kv_cache_groups.emplace(group.tag, group);
             (void)it;
             RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate model-input cache tag=%s", group.tag.c_str());
-            model_input_gatherer_config_.kernel_blocks_per_kv_block =
-                std::max(model_input_gatherer_config_.kernel_blocks_per_kv_block,
-                         cache_config.kernelBlocksPerKvBlock(group.tag));
         }
     }
     model_input_gatherer_config_.warm_up                 = warm_up;
@@ -64,9 +61,13 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     return sampler_input_gatherer_->gather(stream_groups, model_inputs, model_output);
 }
 
-absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                                     TensorHolder& host_holder) const {
-    return model_input_gatherer_->gatherKvCacheKernelBlockId(stream_groups, host_holder);
+absl::StatusOr<PackedBlockTableSnapshot> NormalBatchStreamProcessor::gatherKvCacheKernelBlockId(
+    const StreamGroups& stream_groups, TensorHolder& host_holder, bool include_pool_tables) const {
+    return model_input_gatherer_->gatherKvCacheKernelBlockId(stream_groups, host_holder, include_pool_tables);
+}
+
+CacheBlockTablePackingPlan NormalBatchStreamProcessor::blockTablePackingPlan(const StreamGroups& stream_groups) const {
+    return model_input_gatherer_->blockTablePackingPlan(stream_groups);
 }
 
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,

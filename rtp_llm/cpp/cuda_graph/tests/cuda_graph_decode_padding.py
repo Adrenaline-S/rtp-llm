@@ -69,6 +69,14 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             self.tokens_per_block,
             self.kernel_tokens_per_block,
             self.decode_capture_batch_sizes,
+            ["default"],
+            False,
+            1,
+            [(self.max_seq_len + self.tokens_per_block - 1) // self.tokens_per_block],
+            [
+                (self.max_seq_len + self.kernel_tokens_per_block - 1)
+                // self.kernel_tokens_per_block
+            ],
         )
         print(f"CUDA Graph initialized with batch sizes: 1 to {self.max_batch_size}")
 
@@ -115,20 +123,34 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             batch_size + 1, dtype=torch.int32, device="cuda"
         )
 
-        # kv_cache_block_id_device [batch_size, block_num], ids from 1 to batch_size*block_num
-        block_num = (max_seq_len + seq_size_per_block - 1) // seq_size_per_block
-        num_blocks = batch_size * block_num
-        block_ids = torch.arange(
-            1, num_blocks + 1, dtype=torch.int32, device="cuda"
-        ).view(batch_size, block_num)
-        attention_inputs.kv_cache_kernel_block_id_device = block_ids
-        attention_inputs.kv_cache_kernel_block_id = block_ids.cpu()
+        kernel_block_num = (max_seq_len + seq_size_per_block - 1) // seq_size_per_block
+        pool_block_num = (
+            max_seq_len + self.tokens_per_block - 1
+        ) // self.tokens_per_block
+        kernel_block_ids = torch.arange(
+            1,
+            batch_size * kernel_block_num + 1,
+            dtype=torch.int32,
+            device="cuda",
+        ).view(batch_size, kernel_block_num)
+        pool_block_ids = torch.arange(
+            1,
+            batch_size * pool_block_num + 1,
+            dtype=torch.int32,
+            device="cuda",
+        ).view(batch_size, pool_block_num)
+        attention_inputs.kv_cache_kernel_block_id_device = kernel_block_ids
+        attention_inputs.kv_cache_kernel_block_id = kernel_block_ids.cpu()
+        attention_inputs.kv_cache_block_id_device = pool_block_ids
+        attention_inputs.kv_cache_block_id = pool_block_ids.cpu()
 
-        # Keep legacy fields in sync for compatibility with non-cuda-graph paths.
-        attention_inputs.kv_cache_block_id_device = block_ids
-        attention_inputs.kv_cache_block_id = (
-            attention_inputs.kv_cache_kernel_block_id
+        attention_inputs.pool_valid_lengths = torch.full(
+            (batch_size,), pool_block_num, dtype=torch.int32
         )
+        attention_inputs.kernel_valid_lengths = torch.full(
+            (batch_size,), kernel_block_num, dtype=torch.int32
+        )
+        inputs.cache_group_attn_inputs = {"default": attention_inputs}
 
         # padding_offset
         attention_inputs.padding_offset = torch.zeros(
@@ -200,7 +222,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         pass_ratio = close_mask.float().mean().item()
         assert (
             pass_ratio >= 0.999
-        ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.9%"
+        ), f"Only {pass_ratio * 100:.2f}% elements pass, expected >= 99.9%"
 
     def test_batch_decode(self):
         batch_range = [

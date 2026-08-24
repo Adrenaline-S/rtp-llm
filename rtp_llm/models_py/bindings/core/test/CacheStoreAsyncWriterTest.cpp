@@ -86,27 +86,22 @@ private:
 class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
 static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride) {
-    CacheConfig config;
-    config.layer_num                 = 1;
-    config.layer_all_num             = 1;
-    config.block_num                 = 1;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 1;
-    config.kv_block_stride_bytes     = kv_stride;
+    auto builder = test::TestCacheConfigBuilder::makeBase(
+        /*layer_count=*/1, /*block_count=*/1, /*cache_key_tokens=*/1, /*kernel_tokens=*/1, DataType::TYPE_UINT8);
+    builder.setSharedPoolStorage(kv_stride, 0, kv_stride);
 
     auto spec = test::makeResolvedOpaqueSpec(false, tag, DataType::TYPE_UINT8, kv_stride, 1);
 
     CacheGroup group;
-    group.tag                              = tag;
-    group.layout.spec                      = std::move(spec);
-    group.policy                           = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                        = {0};
-    group.layout.block_num                 = 1;
-    group.layout.seq_size_per_block        = 1;
-    group.layout.kernel_seq_size_per_block = 1;
+    group.tag                       = tag;
+    group.spec                      = std::move(spec);
+    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids                 = {0};
+    group.block_num                 = 1;
+    group.seq_size_per_block        = 1;
+    group.kernel_seq_size_per_block = 1;
 
-    return test::TestCacheConfigBuilder::withResolvedData(
-        std::move(config), {std::move(group)}, {{0, {tag}}});
+    return std::move(builder).setTopology({std::move(group)}, {{tag}}).build();
 }
 
 TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
@@ -230,8 +225,9 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
 
 TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     auto main_config = makeWriterTestCacheConfig("main", /*kv_stride=*/16);
-    main_config = test::TestCacheConfigBuilder::withMTPModules(
-        std::move(main_config), {makeWriterTestCacheConfig("draft", /*kv_stride=*/32)});
+    main_config      = test::TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+                      .setMTPModules({makeWriterTestCacheConfig("draft", /*kv_stride=*/32)})
+                      .build();
     auto cache_manager = std::make_shared<KVCacheManager>(main_config, /*warmup=*/true);
 
     CacheStoreAsyncWriter writer(

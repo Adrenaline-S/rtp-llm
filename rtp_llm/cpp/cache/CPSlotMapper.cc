@@ -98,7 +98,7 @@ size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, std::stri
     if (blockRoundRobinGroup(config, tag)) {
         return static_cast<size_t>(virtual_block_size_);
     }
-    return group.layout.seq_size_per_block;
+    return group.seq_size_per_block;
 }
 
 CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) const {
@@ -168,7 +168,7 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1, "CP byte slicing expects one block part, got %zu", parts.size());
     RTP_LLM_CHECK_WITH_INFO(
         peer_idx < static_cast<size_t>(cp_size_), "CP slice peer_idx=%zu out of cp_size=%d", peer_idx, cp_size_);
-    const auto& spec = group.layout.spec;
+    const auto& spec = group.spec;
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CP slice got null spec for tag=%s", group.tag.c_str());
     auto& block = parts[0];
     RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "CP byte slicing got null block addr");

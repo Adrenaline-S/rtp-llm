@@ -112,21 +112,17 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     test_spec->k_scale_bytes = k_scale_stride_bytes;
     test_spec->v_scale_bytes = v_scale_stride_bytes;
 
-    rtp_llm::CacheConfig cache_config;
-    cache_config.layer_num             = kLayerNum;
-    cache_config.layer_all_num         = kLayerNum;
-    cache_config.block_num             = kBlockNum;
-    cache_config.dtype                 = dtype;
-    cache_config.seq_size_per_block    = seq_size_per_block;
-    cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
-    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
-
+    auto builder = rtp_llm::test::TestCacheConfigBuilder::makeBase(
+        kLayerNum, kBlockNum, seq_size_per_block, seq_size_per_block, dtype);
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(cache_config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    auto groups                 = cache_config.groups();
-    groups[0].layout.local_kv_head_num = test_spec->local_kv_head_num;
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(cache_config, std::move(groups), cache_config.layerMemberships());
+    auto cache_config = builder
+                            .setSharedPoolStorage(k_block_stride_bytes + v_block_stride_bytes,
+                                                  k_scale_stride_bytes + v_scale_stride_bytes,
+                                                  0)
+                            .setGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"})
+                            .setGroupLocalKVHeadNums({test_spec->local_kv_head_num})
+                            .build();
 
     return BlockPoolConfigHelper::createConfig(cache_config);
 }

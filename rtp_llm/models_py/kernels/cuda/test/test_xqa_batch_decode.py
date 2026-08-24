@@ -419,15 +419,13 @@ class TestXQABatchDecode(unittest.TestCase):
         FMHAImplBase.__init__ = patched_init
         try:
             attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
+            xqa_impl = XQADecodeImpl(
+                attn_configs,
+                attn_inputs,
+            )
             # Prepare fmha_params with scale parameters
             if kv_dtype == "fp8":
-                xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(
-                    attn_inputs,
-                    q_scale=q_scale * k_scale * sm_scale,
-                    kv_scale=v_scale / o_scale,
-                    o_scale=o_scale,
-                )
+                xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
             else:
                 xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
             xqa_impl.attn_inputs = attn_inputs
@@ -531,7 +529,10 @@ class TestXQABatchDecode(unittest.TestCase):
         FMHAImplBase.__init__ = patched_init
         try:
             attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl = XQADecodeImpl(
+                attn_configs,
+                cap_inputs,
+            )
             xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
             xqa_impl.attn_inputs = cap_inputs
             xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
@@ -676,7 +677,10 @@ class TestXQABatchDecode(unittest.TestCase):
         FMHAImplBase.__init__ = patched_init
         try:
             attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl = XQADecodeImpl(
+                attn_configs,
+                cap_inputs,
+            )
             xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
             xqa_impl.attn_inputs = cap_inputs
             xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
@@ -736,10 +740,10 @@ class TestXQABatchDecode(unittest.TestCase):
                     torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
                 )
                 rep_inputs.total_tokens = capture_batch_size * q_len_per_req
-                rep_inputs.decode_cu_seqlens_device = generate_cumsum_lens(padded_q_lens)
-                rep_inputs.decode_cu_seqlens = generate_cumsum_lens(
+                rep_inputs.decode_cu_seqlens_device = generate_cumsum_lens(
                     padded_q_lens
-                ).cpu()
+                )
+                rep_inputs.decode_cu_seqlens = generate_cumsum_lens(padded_q_lens).cpu()
                 rep_inputs.cu_seqlens_device = generate_cumsum_lens(padded_q_lens).cpu()
                 padded_full_seq_lens = torch.cat(
                     [
@@ -884,7 +888,10 @@ class TestXQABatchDecode(unittest.TestCase):
         FMHAImplBase.__init__ = patched_init
         try:
             attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl = XQADecodeImpl(
+                attn_configs,
+                cap_inputs,
+            )
             xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
             xqa_impl.attn_inputs = cap_inputs
             xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
@@ -919,13 +926,18 @@ class TestXQABatchDecode(unittest.TestCase):
         )
         page_table_rep, _, _ = create_page_table(batch_size, seq_lens_rep, page_size)
 
+        # CUDA graph nodes retain the capture-time page-table address. Update
+        # that backing in place and keep the replay view bound to it.
+        page_table_cap.copy_(page_table_rep)
+        cap_inputs.kv_cache_kernel_block_id.copy_(page_table_rep.cpu())
+
         rep_inputs = PyAttentionInputs()
         rep_inputs.is_prefill = False
         rep_inputs.sequence_lengths = in_kv_lens_rep
         rep_inputs.input_lengths = q_lens_rep
-        rep_inputs.kv_cache_block_id_device = page_table_rep
-        rep_inputs.kv_cache_kernel_block_id_device = page_table_rep
-        rep_inputs.kv_cache_kernel_block_id = page_table_rep.cpu()
+        rep_inputs.kv_cache_block_id_device = page_table_cap
+        rep_inputs.kv_cache_kernel_block_id_device = page_table_cap
+        rep_inputs.kv_cache_kernel_block_id = cap_inputs.kv_cache_kernel_block_id
         rep_inputs.dtype = get_typemeta(
             torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
         )
@@ -1077,7 +1089,10 @@ class TestXQABatchDecode(unittest.TestCase):
         FMHAImplBase.__init__ = patched_init
         try:
             attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl = XQADecodeImpl(
+                attn_configs,
+                cap_inputs,
+            )
             xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
             xqa_impl.attn_inputs = cap_inputs
             xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
@@ -1241,7 +1256,10 @@ class TestXQABatchDecode(unittest.TestCase):
         FMHAImplBase.__init__ = patched_init
         try:
             attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl = XQADecodeImpl(
+                attn_configs,
+                cap_inputs,
+            )
             xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
             xqa_impl.attn_inputs = cap_inputs
             xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
@@ -1315,21 +1333,27 @@ class TestXQABatchDecode(unittest.TestCase):
                 )
                 padded_page_table[:actual_batch_size] = page_table_real
 
+                # Keep the page-table address captured by the graph stable.
+                page_table_cap.copy_(padded_page_table)
+                cap_inputs.kv_cache_kernel_block_id.copy_(padded_page_table.cpu())
+
                 rep_inputs = PyAttentionInputs()
                 rep_inputs.is_prefill = False
                 rep_inputs.sequence_lengths = padded_seq_lens
                 rep_inputs.input_lengths = padded_q_lens
-                rep_inputs.kv_cache_block_id_device = padded_page_table
-                rep_inputs.kv_cache_kernel_block_id_device = padded_page_table
-                rep_inputs.kv_cache_kernel_block_id = padded_page_table.cpu()
+                rep_inputs.kv_cache_block_id_device = page_table_cap
+                rep_inputs.kv_cache_kernel_block_id_device = page_table_cap
+                rep_inputs.kv_cache_kernel_block_id = (
+                    cap_inputs.kv_cache_kernel_block_id
+                )
                 rep_inputs.dtype = get_typemeta(
                     torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
                 )
                 rep_inputs.total_tokens = capture_batch_size * q_len_per_req
-                rep_inputs.decode_cu_seqlens_device = generate_cumsum_lens(padded_q_lens)
-                rep_inputs.decode_cu_seqlens = generate_cumsum_lens(
+                rep_inputs.decode_cu_seqlens_device = generate_cumsum_lens(
                     padded_q_lens
-                ).cpu()
+                )
+                rep_inputs.decode_cu_seqlens = generate_cumsum_lens(padded_q_lens).cpu()
                 rep_inputs.cu_seqlens_device = generate_cumsum_lens(padded_q_lens).cpu()
                 padded_full_seq_lens = torch.cat(
                     [
@@ -1475,7 +1499,10 @@ class TestXQABatchDecode(unittest.TestCase):
         FMHAImplBase.__init__ = patched_init
         try:
             attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
+            xqa_impl = XQADecodeImpl(
+                attn_configs,
+                attn_inputs,
+            )
             xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
             xqa_impl.attn_inputs = attn_inputs
 
@@ -1501,7 +1528,10 @@ class TestXQABatchDecode(unittest.TestCase):
         FMHAImplBase.__init__ = patched_init
         try:
             attn_configs.need_rope_kv_cache = False
-            xqa_impl2 = XQADecodeImpl(attn_configs, attn_inputs)
+            xqa_impl2 = XQADecodeImpl(
+                attn_configs,
+                attn_inputs,
+            )
             xqa_impl2.fmha_params = xqa_impl2.fmha_impl.prepare(attn_inputs)
             xqa_impl2.attn_inputs = attn_inputs
             xqa_impl2.rope_params = DummyRopeParams()

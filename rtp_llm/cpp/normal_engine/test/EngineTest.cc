@@ -55,14 +55,17 @@ TEST_F(NormalEngineTest, testDecodeWarmUpUsesHybridCacheTagsAndGeometry) {
         const auto& cache_config                 = init_params.cache_manager->cacheConfig();
         const auto& full_group                   = cache_config.group("full");
         observation.full_type                    = full_group.policy.group_type;
-        observation.full_seq_size_per_block      = full_group.layout.seq_size_per_block;
-        observation.full_kernel_size_per_block   = full_group.layout.kernel_seq_size_per_block;
+        observation.full_seq_size_per_block      = full_group.seq_size_per_block;
+        observation.full_kernel_size_per_block   = full_group.kernel_seq_size_per_block;
         const auto& linear_group                 = cache_config.group("linear");
         observation.linear_type                  = linear_group.policy.group_type;
-        observation.linear_seq_size_per_block    = linear_group.layout.seq_size_per_block;
-        observation.linear_kernel_size_per_block = linear_group.layout.kernel_seq_size_per_block;
+        observation.linear_seq_size_per_block    = linear_group.seq_size_per_block;
+        observation.linear_kernel_size_per_block = linear_group.kernel_seq_size_per_block;
         return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
-            observation.tags = inputs.kv_cache_group_tags;
+            observation.tags.clear();
+            for (uint32_t ordinal = 0; ordinal < inputs.kv_cache_block_table_plan.groupCount(); ++ordinal) {
+                observation.tags.push_back(inputs.kv_cache_block_table_plan.group(ordinal).tag);
+            }
             observation.block_shape.assign(inputs.kv_cache_block_id.sizes().begin(),
                                            inputs.kv_cache_block_id.sizes().end());
             observation.kernel_block_shape.assign(inputs.kv_cache_kernel_block_id.sizes().begin(),
@@ -70,13 +73,14 @@ TEST_F(NormalEngineTest, testDecodeWarmUpUsesHybridCacheTagsAndGeometry) {
             const auto group_types = inputs.kv_cache_group_types.cpu().contiguous();
             observation.group_types.assign(group_types.data_ptr<int32_t>(),
                                            group_types.data_ptr<int32_t>() + group_types.numel());
-            const auto  kernel_blocks = inputs.kv_cache_kernel_block_id.cpu().contiguous();
-            const auto  batch_size    = static_cast<size_t>(kernel_blocks.size(1));
-            const auto  row_width     = static_cast<size_t>(kernel_blocks.size(2));
-            const auto* rows          = kernel_blocks.data_ptr<int32_t>();
-            observation.full_kernel_row.assign(rows, rows + row_width);
-            observation.linear_kernel_row.assign(rows + batch_size * row_width,
-                                                 rows + batch_size * row_width + row_width);
+            const auto full_kernel   = inputs.kv_cache_block_table_plan.kernelView(inputs.kv_cache_kernel_block_id, 0);
+            const auto linear_kernel = inputs.kv_cache_block_table_plan.kernelView(inputs.kv_cache_kernel_block_id, 1);
+            const auto full_row      = full_kernel[0].contiguous();
+            const auto linear_row    = linear_kernel[0].contiguous();
+            observation.full_kernel_row.assign(full_row.data_ptr<int32_t>(),
+                                               full_row.data_ptr<int32_t>() + full_row.numel());
+            observation.linear_kernel_row.assign(linear_row.data_ptr<int32_t>(),
+                                                 linear_row.data_ptr<int32_t>() + linear_row.numel());
             observation.seq_size_per_block        = inputs.seq_size_per_block;
             observation.kernel_seq_size_per_block = inputs.kernel_seq_size_per_block;
         });
@@ -90,15 +94,14 @@ TEST_F(NormalEngineTest, testDecodeWarmUpUsesHybridCacheTagsAndGeometry) {
     auto engine = std::make_shared<NormalEngine>(params, nullptr);
 
     EXPECT_EQ(observation.tags, (std::vector<std::string>{"full", "linear"}));
-    EXPECT_EQ(observation.block_shape, (std::vector<int64_t>{2, runtime_config.max_generate_batch_size, 10}));
-    EXPECT_EQ(observation.kernel_block_shape, (std::vector<int64_t>{2, runtime_config.max_generate_batch_size, 20}));
+    EXPECT_EQ(observation.block_shape, (std::vector<int64_t>{runtime_config.max_generate_batch_size * 20}));
+    EXPECT_EQ(observation.kernel_block_shape, (std::vector<int64_t>{runtime_config.max_generate_batch_size * 30}));
     EXPECT_EQ(observation.group_types,
               (std::vector<int32_t>{static_cast<int32_t>(CacheGroupType::FULL),
                                     static_cast<int32_t>(CacheGroupType::LINEAR)}));
     EXPECT_EQ(observation.full_kernel_row,
               (std::vector<int32_t>{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1}));
-    EXPECT_EQ(observation.linear_kernel_row,
-              (std::vector<int32_t>{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
+    EXPECT_EQ(observation.linear_kernel_row, (std::vector<int32_t>{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));
     EXPECT_EQ(observation.seq_size_per_block, 2u);
     EXPECT_EQ(observation.kernel_seq_size_per_block, 2u);
     EXPECT_EQ(observation.full_type, CacheGroupType::FULL);

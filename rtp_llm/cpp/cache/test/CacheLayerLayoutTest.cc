@@ -20,11 +20,11 @@ CacheGroup makeLayoutGroup(std::string tag, std::vector<int> layer_ids) {
 
     CacheGroup group;
     group.tag                       = std::move(tag);
-    group.layout.spec                      = std::move(spec);
+    group.spec                      = std::move(spec);
     group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
     group.layer_ids                 = std::move(layer_ids);
-    group.layout.seq_size_per_block        = 512;
-    group.layout.kernel_seq_size_per_block = 128;
+    group.seq_size_per_block        = 512;
+    group.kernel_seq_size_per_block = 128;
     return group;
 }
 
@@ -36,8 +36,7 @@ CacheLayerLayout makeLayerLayout(size_t layer_count, const std::vector<int>& act
     return CacheLayerLayout(std::move(layers));
 }
 
-CacheConfig makeLayoutConfig(std::vector<CacheGroup> groups,
-                             std::vector<std::vector<std::string>> layer_group_tags) {
+CacheConfig makeLayoutConfig(std::vector<CacheGroup> groups, std::vector<std::vector<std::string>> layer_group_tags) {
     test::TestCacheConfigBuilder builder;
     for (auto& group : groups) {
         builder.addGroup(std::move(group));
@@ -61,8 +60,8 @@ TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesSlotApi) {
 }
 
 TEST(CacheLayerLayoutTest, SupportsOneGroupPerLayerAndOneToManyTopology) {
-    auto config = makeLayoutConfig(
-        {makeLayoutGroup("a", {0, 2}), makeLayoutGroup("b", {1, 2})}, {{"a"}, {"b"}, {"a", "b"}});
+    auto config =
+        makeLayoutConfig({makeLayoutGroup("a", {0, 2}), makeLayoutGroup("b", {1, 2})}, {{"a"}, {"b"}, {"a", "b"}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("a", makeLayerLayout(3, {0, 2}, 1));
     groups.emplace("b", makeLayerLayout(3, {1, 2}, 2));
@@ -78,8 +77,8 @@ TEST(CacheLayerLayoutTest, SupportsOneGroupPerLayerAndOneToManyTopology) {
 }
 
 TEST(CacheLayerLayoutTest, EmptyPlaceholderIsSkippedAndProjectionRecountsActiveLayers) {
-    auto config = makeLayoutConfig(
-        {makeLayoutGroup("active", {0, 1}), makeLayoutGroup("mtp", {})}, {{"active"}, {"active"}});
+    auto config =
+        makeLayoutConfig({makeLayoutGroup("active", {0, 1}), makeLayoutGroup("mtp", {})}, {{"active"}, {"active"}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("active", makeLayerLayout(2, {0, 1}, 1));
     groups.emplace("mtp", makeLayerLayout(2, {}, 0));
@@ -97,7 +96,7 @@ TEST(CacheLayerLayoutTest, EmptyPlaceholderIsSkippedAndProjectionRecountsActiveL
 }
 
 TEST(CacheLayerLayoutTest, InvalidTagAndLayerFailFast) {
-    auto config = makeLayoutConfig({makeLayoutGroup("full", {0})}, {{"full"}});
+    auto                                  config = makeLayoutConfig({makeLayoutGroup("full", {0})}, {{"full"}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("full", makeLayerLayout(1, {0}, 1));
     GroupedCacheLayerLayout layout(config, std::move(groups));

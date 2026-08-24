@@ -6,7 +6,7 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -92,7 +92,7 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    const auto layer_layout       = allocator_->allLayerCacheBase();
+    const auto layer_layout       = coordinator_cache_manager_->allLayerCacheBase();
     uint64_t   group_name_bithash = 1;
     for (size_t layer_id = 0; layer_id < layer_layout.layerCount(); ++layer_id) {
         const auto& group_tags = layer_layout.groupTagsForLayer(static_cast<int>(layer_id));
@@ -111,7 +111,7 @@ bool DefaultLayerGroupPolicy::init() {
                     RTP_LLM_LOG_ERROR("not support bigger than 64 groups");
                     return false;
                 }
-                const auto&       group_layout      = layer_layout.groupLayout(cache_tag);
+                const auto&       group_config      = layer_layout.groupConfig(cache_tag);
                 const std::string prefix            = is_full_group ? "F" : GetOtherGroupPrefixName();
                 std::string       group_name        = prefix + cache_tag;
                 size_t            group_layer_count = 0;
@@ -121,7 +121,7 @@ bool DefaultLayerGroupPolicy::init() {
                         std::find(candidate_tags.begin(), candidate_tags.end(), cache_tag) != candidate_tags.end();
                 }
                 const size_t block_size_bytes =
-                    group_layer_count * (group_layout.kv_block_stride_bytes + group_layout.kv_scale_stride_bytes);
+                    group_layer_count * (group_config.kv_block_stride_bytes + group_config.kv_scale_stride_bytes);
                 groups_[cache_tag] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 tag_to_layer_ids_[cache_tag] = {};
                 if (groups_.size() < 64) {
@@ -209,7 +209,8 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& ta
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             // if support scale, block_infos: {kv_info, scale_info}
-            const auto& block_infos = allocator_->convertIndexToBufferByTag(layer_ids[j], tag, block_ids[i]);
+            const auto& block_infos =
+                coordinator_cache_manager_->convertIndexToBufferByTag(layer_ids[j], tag, block_ids[i]);
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING("convertIndexToBuffer returned empty for layer_id [%d] tag [%s] block_id[%d]",
                                     layer_ids[j],

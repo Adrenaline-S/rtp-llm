@@ -23,18 +23,18 @@ struct NeedBlocksInfo {
     int extra_blocks  = 0;  // extra blocks per batch
 };
 
-class KVCacheGroup {
+class SingleTypeCacheManager {
 public:
-    KVCacheGroup(const CacheGroup&                   cache_group,
-                 BlockPoolPtr                        block_pool,
-                 SharedBlockCache*                   shared_cache     = nullptr,
-                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+    SingleTypeCacheManager(const CacheGroup&                   cache_group,
+                           BlockPoolPtr                        block_pool,
+                           SharedBlockCache*                   shared_cache     = nullptr,
+                           const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         cache_group_(cache_group),
         block_pool_(std::move(block_pool)),
         shared_cache_(shared_cache),
         metrics_reporter_(metrics_reporter) {}
 
-    virtual ~KVCacheGroup() = default;
+    virtual ~SingleTypeCacheManager() = default;
 
     bool                init();
     virtual bool        malloc(GroupBlockToPoolBlockBinding& binding,
@@ -106,6 +106,6 @@ protected:
     std::unordered_map<int, int>           global_layer_to_local_layer;
 };
 
-using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
+using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
 
 }  // namespace rtp_llm

@@ -77,16 +77,14 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    // NOTE: createSpConfig builds main global layer routing and local MTP sub-config routing.
-    auto cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
-                                                           propose_model_config,
-                                                           parallelism_config,
-                                                           runtime_config,
-                                                           kv_cache_config,
-                                                           sp_config,
-                                                           /*warm_up_result=*/std::nullopt,
-                                                           /*is_mtp=*/true,
-                                                           /*is_eagle=*/false);
+    // NOTE: createRankLocalSpeculativeConfig builds main global layer routing and local MTP sub-config routing.
+    auto cfg = rtp_llm::CacheConfigCreator::createRankLocalSpeculativeConfig(score_model_config,
+                                                                             propose_model_config,
+                                                                             parallelism_config,
+                                                                             runtime_config,
+                                                                             kv_cache_config,
+                                                                             sp_config,
+                                                                             /*warm_up_result=*/std::nullopt);
     return cfg;
 }
 
@@ -105,18 +103,18 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
-    // Use createSpConfig logic so that group layer ids are filled for main + sub-model layers.
+    // Use createRankLocalSpeculativeConfig logic so that group layer ids are filled for main + sub-model layers.
     // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_GT(cache_cfg.groupNums(), 0);
-    ASSERT_EQ(cache_cfg.soleGroupForLayer(0).layer_ids.size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_EQ(cache_cfg.soleGroupForLayer(0).layer_ids.size(), cache_cfg.layerCount());
 
     ASSERT_EQ(cache_cfg.mtpModuleCount(), 2u);
     ASSERT_EQ(cache_cfg.mtpModule(0).groupNums(), 1);
     ASSERT_EQ(cache_cfg.mtpModule(1).groupNums(), 1);
-    EXPECT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).layout.spec->block_size_bytes(),
-              cache_cfg.mtpModule(1).soleGroupForLayer(0).layout.spec->block_size_bytes());
+    EXPECT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).spec->block_size_bytes(),
+              cache_cfg.mtpModule(1).soleGroupForLayer(0).spec->block_size_bytes());
 
     ASSERT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).layer_ids.size(), 1u);
     ASSERT_EQ(cache_cfg.mtpModule(1).soleGroupForLayer(0).layer_ids.size(), 1u);
@@ -124,10 +122,11 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(cache_cfg.mtpModule(1).soleGroupForLayer(0).layer_ids[0], 0);
 
     RuntimeConfig runtime_config;
-    cache_cfg = CacheConfigCreator::finalizeBlockNums(cache_cfg, /*global_block_num=*/3, runtime_config);
-    EXPECT_EQ(cache_cfg.block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtpModule(0).block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtpModule(1).block_num, 3u);
+    cache_cfg =
+        test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_cfg)).setProjectedBlockCountBasis(3).build();
+    EXPECT_EQ(cache_cfg.blockCountBasis(), 3u);
+    EXPECT_EQ(cache_cfg.mtpModule(0).blockCountBasis(), 3u);
+    EXPECT_EQ(cache_cfg.mtpModule(1).blockCountBasis(), 3u);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
@@ -219,12 +218,12 @@ TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_EQ(cache_cfg.mtpModuleCount(), 2u);
-    ASSERT_EQ(cache_cfg.mtpModule(0).block_num, 4u);
-    ASSERT_EQ(cache_cfg.mtpModule(1).block_num, 4u);
+    ASSERT_EQ(cache_cfg.mtpModule(0).blockCountBasis(), 4u);
+    ASSERT_EQ(cache_cfg.mtpModule(1).blockCountBasis(), 4u);
 
-    // Shared default pool follows the main cache_config.block_num after TP sync.
-    // MTP sub-config block_num may still contain the pre-sync local value.
-    cache_cfg.block_num = 3;
+    // Shared default pool follows the finalized global block count after TP sync.
+    cache_cfg =
+        test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_cfg)).setProjectedBlockCountBasis(3).build();
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.block_num, 3u);

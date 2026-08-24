@@ -42,3 +42,15 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
 )
+
+# Staged for the Phase 2 terminal block-expression source gate.
+filegroup(
+    name = "cache_block_expression_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+        "speculative/*.h",
+        "speculative/*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
+)

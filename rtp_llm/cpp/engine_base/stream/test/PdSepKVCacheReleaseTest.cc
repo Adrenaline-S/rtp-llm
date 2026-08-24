@@ -234,6 +234,57 @@ torch_ext::PyCacheStoreInputs makeSingleBlockWriteInputs(int64_t cache_key, int 
     return inputs;
 }
 
+class SingleBlockWriteCacheSpec: public KVCacheSpec {
+public:
+    SingleBlockWriteCacheSpec(
+        const std::string&, size_t tokens_per_block, size_t kv_stride, size_t kv_scale_stride, bool opaque_store):
+        kv_stride_(kv_stride), kv_scale_stride_(kv_scale_stride) {
+        this->type               = opaque_store ? KVCacheSpecType::OpaqueState : KVCacheSpecType::MultiHeadAttention;
+        this->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+    }
+
+    size_t block_size() const override {
+        return kv_stride_;
+    }
+    size_t k_block_size() const override {
+        return kv_stride_ / 2;
+    }
+    size_t v_block_size() const override {
+        return kv_stride_ - k_block_size();
+    }
+    size_t block_size_bytes() const override {
+        return kv_stride_;
+    }
+    size_t k_block_size_bytes() const override {
+        return k_block_size();
+    }
+    size_t v_block_size_bytes() const override {
+        return v_block_size();
+    }
+    size_t scale_block_size_bytes() const override {
+        return kv_scale_stride_;
+    }
+    size_t k_scale_block_size_bytes() const override {
+        return kv_scale_stride_ / 2;
+    }
+    size_t v_scale_block_size_bytes() const override {
+        return kv_scale_stride_ - k_scale_block_size_bytes();
+    }
+    DataType memoryLayoutDType() const override {
+        return DataType::TYPE_UINT8;
+    }
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<SingleBlockWriteCacheSpec>(*this);
+    }
+    std::string debugString(size_t = 0) const override {
+        return "SingleBlockWriteCacheSpec";
+    }
+
+private:
+    size_t kv_stride_       = 0;
+    size_t kv_scale_stride_ = 0;
+};
+
 // Single-group, single-layer config that pins the physical block strides and the
 // opaque-store policy the write path must use. Geometry now travels through
 // CacheConfig instead of the per-call write inputs.
@@ -243,23 +294,18 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                        size_t             kv_scale_stride,
                                        bool               use_opaque_kv_cache_store) {
     constexpr uint32_t kBlockNum = 2;
-    // BF16 keeps the prototype spec scale-free, so a caller asking for
-    // kv_scale_stride == 0 really gets a scale-less group (an INT8/FP8 prototype
-    // would have CacheConfig::setTopology backfill a non-zero scale stride).
-    auto config                      = test::makeSingleGroupCacheConfig(test::makeMhaSpec(tag,
-                                                                     static_cast<size_t>(tokens_per_block),
-                                                                     rtp_llm::DataType::TYPE_BF16,
-                                                                     /*local_head_num_kv=*/1,
-                                                                     /*size_per_head=*/1),
-                                                   CacheGroupType::FULL,
-                                                   /*layer_num=*/1,
-                                                   /*block_num=*/static_cast<int>(kBlockNum),
-                                                   tag);
-    config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
-    config.kv_block_stride_bytes     = kv_stride;
-    config.kv_scale_stride_bytes     = kv_scale_stride;
-    rtp_llm::test::TestCacheConfigBuilder::setGroupBlockLayout(config, {kBlockNum}, {kv_stride}, {kv_scale_stride});
-    return config;
+    auto               config    = test::makeSingleGroupCacheConfig(
+        std::make_shared<SingleBlockWriteCacheSpec>(
+            tag, static_cast<size_t>(tokens_per_block), kv_stride, kv_scale_stride, use_opaque_kv_cache_store),
+        CacheGroupType::FULL,
+        /*layer_num=*/1,
+        /*block_num=*/static_cast<int>(kBlockNum),
+        tag);
+    return test::TestCacheConfigBuilder::rebuildForTest(std::move(config))
+        .setUsesOpaqueKVCacheStore(use_opaque_kv_cache_store)
+        .setGroupBlockLayout({kBlockNum}, {kv_stride}, {kv_scale_stride})
+        .setSharedPoolStorage(kv_stride, kv_scale_stride, kv_stride + kv_scale_stride)
+        .build();
 }
 
 // Per-request metadata for a DSV4 PD prefill write of one context request.
@@ -275,7 +321,7 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
     inputs.request_id            = torch::tensor({request_id}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
     inputs.cache_keys            = torch::from_blob(const_cast<CacheKeyType*>(cache_keys.data()),
-                                         {1, (int64_t)cache_keys.size()},
+                                                    {1, (int64_t)cache_keys.size()},
                                          torch::TensorOptions(torch::kInt64))
                             .clone();
     return inputs;
@@ -342,11 +388,10 @@ protected:
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
         kv_config.test_block_num            = block_num;
-        auto config                         = CacheConfigCreator::createConfig(mc, pc, RuntimeConfig{}, kv_config);
-        // KVCacheManager::init() calls finalizeBlockNums(block_num), which fans the
+        auto config = CacheConfigCreator::createRankLocalConfig(mc, pc, RuntimeConfig{}, kv_config);
+        // KVCacheManager::init() calls withRankSynchronizedBlockCountBasis(block_num), which fans the
         // global block count out to every group according to its capacity policy.
-        config.block_num = block_num;
-        return config;
+        return test::TestCacheConfigBuilder::rebuildForTest(std::move(config)).setBlockCountBasis(block_num).build();
     }
 
     // Build a PREFILL stream with reuse_cache enabled
@@ -636,11 +681,11 @@ TEST_F(PdSepKVCacheReleaseTest, testTerminalOutputWaitsForSynchronousMemoryCache
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
 
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
 
     std::atomic<bool> store_submitted{false};
@@ -709,11 +754,11 @@ TEST_F(PdSepKVCacheReleaseTest, testPermanentlyPendingSynchronousPublicationHasB
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     std::atomic<bool> done{false};
     auto              pending_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -761,11 +806,11 @@ TEST_F(PdSepKVCacheReleaseTest, testTimedOutSynchronousPublicationLateSuccessCon
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     std::atomic<bool> done{false};
     auto              context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -808,11 +853,11 @@ TEST_F(PdSepKVCacheReleaseTest, testTimedOutSynchronousPublicationLateFailureRet
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     std::atomic<bool> failed_done{false};
     auto              failed_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
@@ -855,11 +900,11 @@ TEST_F(PdSepKVCacheReleaseTest, testCancelBeforeTerminalConsumeDoesNotPublishCac
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(0);
 
@@ -885,11 +930,11 @@ TEST_F(PdSepKVCacheReleaseTest, testPdRemoteHandoffOutputDoesNotPublishCache) {
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(0);
 
@@ -916,11 +961,11 @@ TEST_F(PdSepKVCacheReleaseTest, testNullSynchronousPublicationRetriesAtRelease) 
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     auto success_context         = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
@@ -950,11 +995,11 @@ TEST_F(PdSepKVCacheReleaseTest, testPendingAsynchronousPublicationIsNotSubmitted
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = false;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     auto pending_context         = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     ON_CALL(*pending_context, done()).WillByDefault(testing::Return(false));
@@ -981,11 +1026,11 @@ TEST_F(PdSepKVCacheReleaseTest, testFailedSynchronousPublicationRetriesAtRelease
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     auto failed_context          = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     ON_CALL(*failed_context, done()).WillByDefault(testing::Return(true));
@@ -1018,11 +1063,11 @@ TEST_F(PdSepKVCacheReleaseTest, testPublicationExceptionDoesNotFailInferenceAndR
     resource.resource_context_.enable_device_cache = false;
     resource.resource_context_.enable_memory_cache = true;
     resource.resource_context_.write_cache_sync    = true;
-    auto mock_coordinator =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     cache_manager_->coordinator_ = mock_coordinator;
     auto success_context         = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
@@ -1128,7 +1173,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     auto config = makeDsv4Config();
     // linear_step=4: with the default step of 1 every slot is a step hit and all
     // blocks materialize, defeating the tail-only assertions below.
-    config.linear_step = 4;
+    config = test::TestCacheConfigBuilder::rebuildForTest(std::move(config)).setLinearStep(4).build();
     prepareStreamWithConfig(tokens, config, spb, RoleType::PREFILL);
     allocateAndFinish();
 
@@ -1330,7 +1375,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
-            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).layout.seq_size_per_block);
+            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seq_size_per_block);
             layer_cache.layer_id           = layer_id;
             layer_cache.tag                = tag;
 
@@ -1485,8 +1530,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     const std::string csa_tag = "csa_kv";
     const auto first_csa_key  = "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[0]), /*layer_id=*/2, "csa_kv");
     ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
-    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(),
-              cache_config.group(csa_tag).layout.kv_block_stride_bytes);
+    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(), cache_config.group(csa_tag).kv_block_stride_bytes);
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -1615,7 +1659,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
-            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).layout.seq_size_per_block);
+            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seq_size_per_block);
             layer_cache.layer_id           = layer_id;
             layer_cache.tag                = tag;
 
@@ -1715,7 +1759,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         ASSERT_TRUE(buf.defined());
         for (int b = 0; b < block_num; ++b) {
             auto bid       = encodedPoolBlocksForTest(resource->blockBinding(0, default_tag))[b];
-            auto kv_stride = config.kv_block_stride_bytes;
+            auto kv_stride = config.group(default_tag).kv_block_stride_bytes;
             ASSERT_FALSE(isNullBlockIdx(bid));
             auto device_slice = torch::from_blob((uint8_t*)buf.data_ptr() + bid * kv_stride,
                                                  {(int64_t)kv_stride},

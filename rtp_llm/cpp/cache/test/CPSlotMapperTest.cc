@@ -150,15 +150,12 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
 }
 
 TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
-    CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
-    config.layer_all_num      = 1;
+    auto builder = TestCacheConfigBuilder::makeBase(1, 0, 8, 8, DataType::TYPE_FP16);
 
     auto       full_spec = std::make_shared<MHAKVCacheSpec>();
     CacheGroup full_group;
     full_group.tag               = "full";
-    full_group.layout.spec       = full_spec;
+    full_group.spec              = full_spec;
     full_group.layer_ids         = {0};
     full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
@@ -167,12 +164,11 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     auto       swa_spec = std::make_shared<MHAKVCacheSpec>();
     CacheGroup swa_group;
     swa_group.tag             = "swa";
-    swa_group.layout.spec     = swa_spec;
+    swa_group.spec            = swa_spec;
     swa_group.layer_ids       = {0};
     swa_group.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
-        config, {std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
+    auto config = builder.setTopology({std::move(full_group), std::move(swa_group)}, {{"full", "swa"}}).build();
 
     CPSlotMapper mapper(0, 2, 8);
 
@@ -182,33 +178,29 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
 }
 
 TEST_F(CPSlotMapperTest, TaggedGroupsKeepGlobalKeySpanAndGroupPhysicalSpanDistinct) {
-    CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
-    config.layer_all_num      = 1;
+    auto builder = TestCacheConfigBuilder::makeBase(1, 0, 8, 8, DataType::TYPE_FP16);
 
     CacheGroup full_group;
-    full_group.tag                       = "full";
-    full_group.layout.spec               = std::make_shared<MHAKVCacheSpec>();
-    full_group.layer_ids                 = {0};
-    full_group.layout.seq_size_per_block = 24;
-    full_group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    full_group.policy.cp_mapping         = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    full_group.tag                = "full";
+    full_group.spec               = std::make_shared<MHAKVCacheSpec>();
+    full_group.layer_ids          = {0};
+    full_group.seq_size_per_block = 24;
+    full_group.policy             = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_group.policy.cp_mapping  = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 
     CacheGroup swa_group;
-    swa_group.tag                       = "swa";
-    swa_group.layout.spec               = std::make_shared<MHAKVCacheSpec>();
-    swa_group.layer_ids                 = {0};
-    swa_group.layout.seq_size_per_block = 32;
-    swa_group.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_group.policy.cp_mapping         = CpBlockMappingMode::COMPACT_LAST_RANK;
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
-        config, {std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
+    swa_group.tag                = "swa";
+    swa_group.spec               = std::make_shared<MHAKVCacheSpec>();
+    swa_group.layer_ids          = {0};
+    swa_group.seq_size_per_block = 32;
+    swa_group.policy             = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_group.policy.cp_mapping  = CpBlockMappingMode::COMPACT_LAST_RANK;
+    auto config = builder.setTopology({std::move(full_group), std::move(swa_group)}, {{"full", "swa"}}).build();
 
     CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*global key B=*/8);
 
     EXPECT_TRUE(mapper.blockRoundRobinGroup(config, "full"));
-    EXPECT_EQ(config.group("full").layout.seq_size_per_block, 24u);
+    EXPECT_EQ(config.group("full").seq_size_per_block, 24u);
     EXPECT_EQ(mapper.logicalSeqSizePerBlock(config, "full"), 16u);
     EXPECT_EQ(mapper.effectiveSeqLenForAlloc(config, "full", 33), 24);
 
@@ -218,17 +210,14 @@ TEST_F(CPSlotMapperTest, TaggedGroupsKeepGlobalKeySpanAndGroupPhysicalSpanDistin
 }
 
 TEST_F(CPSlotMapperTest, TaggedGroupMethodsRejectMissingIdentity) {
-    CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
-    config.layer_all_num      = 1;
+    auto builder = TestCacheConfigBuilder::makeBase(1, 0, 8, 8, DataType::TYPE_FP16);
 
     CacheGroup group;
-    group.tag         = "full";
-    group.layout.spec = std::make_shared<MHAKVCacheSpec>();
-    group.layer_ids   = {0};
-    group.policy      = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, {std::move(group)}, {{0, {"full"}}});
+    group.tag       = "full";
+    group.spec      = std::make_shared<MHAKVCacheSpec>();
+    group.layer_ids = {0};
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto config     = builder.setTopology({std::move(group)}, {{"full"}}).build();
 
     CPSlotMapper mapper(0, 2, 8);
     EXPECT_ANY_THROW(mapper.layoutForGroup(config, ""));
@@ -248,19 +237,16 @@ TEST_F(CPSlotMapperTest, TransferPlannerReturnsDirectTailPositions) {
 }
 
 TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDummyTail) {
-    CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
-    config.layer_all_num      = 1;
+    auto builder = TestCacheConfigBuilder::makeBase(1, 0, 8, 8, DataType::TYPE_FP16);
 
     auto       full_spec = std::make_shared<MHAKVCacheSpec>();
     CacheGroup full_group;
     full_group.tag               = "full";
-    full_group.layout.spec       = full_spec;
+    full_group.spec              = full_spec;
     full_group.layer_ids         = {0};
     full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, {std::move(full_group)}, {{0, {"full"}}});
+    auto config                  = builder.setTopology({std::move(full_group)}, {{"full"}}).build();
 
     const CacheKeysType         full_keys{10, 11, 12, 13, 14};
     const BlockDependenciesType full_dependencies{
@@ -291,26 +277,22 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDu
 }
 
 TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagMappedBlocks) {
-    CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
-    config.layer_all_num      = 1;
+    auto builder = TestCacheConfigBuilder::makeBase(1, 0, 8, 8, DataType::TYPE_FP16);
 
     CacheGroup full;
     full.tag               = "full";
-    full.layout.spec       = std::make_shared<MHAKVCacheSpec>();
+    full.spec              = std::make_shared<MHAKVCacheSpec>();
     full.layer_ids         = {0};
     full.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 
     CacheGroup swa;
     swa.tag               = "swa";
-    swa.layout.spec       = std::make_shared<MHAKVCacheSpec>();
+    swa.spec              = std::make_shared<MHAKVCacheSpec>();
     swa.layer_ids         = {0};
     swa.policy            = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa.policy.cp_mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
-        config, {std::move(full), std::move(swa)}, {{0, {"full", "swa"}}});
+    auto config           = builder.setTopology({std::move(full), std::move(swa)}, {{"full", "swa"}}).build();
 
     KVCacheResource source;
     source.initGroups(config);

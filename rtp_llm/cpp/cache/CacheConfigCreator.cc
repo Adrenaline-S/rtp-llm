@@ -8,6 +8,7 @@
 #include <sstream>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/BlockExpression.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
@@ -15,45 +16,6 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-
-class CacheConfigResolverAccess {
-public:
-    static void setResolvedData(CacheConfig& config, ResolvedCacheConfigData data) {
-        config.setResolvedData(std::move(data));
-    }
-
-    static void setGroupBlockLayout(CacheConfig&                  config,
-                                    const std::vector<uint32_t>&   block_nums,
-                                    const std::vector<size_t>&     kv_strides,
-                                    const std::vector<size_t>&     scale_strides) {
-        config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
-    }
-
-    static void finalizeBlockNums(CacheConfig& config, uint32_t block_num, const RuntimeConfig& runtime_config) {
-        config.finalizeBlockNums(block_num, runtime_config);
-    }
-
-    static CacheConfig withFinalizedBlockNums(const CacheConfig&  config,
-                                              uint32_t            block_num,
-                                              const RuntimeConfig& runtime_config) {
-        return config.withFinalizedBlockNums(block_num, runtime_config);
-    }
-
-    static std::shared_ptr<CacheConfig>
-    mergeMTPModule(CacheConfig& config, const CacheConfig& propose, int module_index, uint32_t main_layer_num) {
-        return config.mergeMTPModule(propose, module_index, main_layer_num);
-    }
-
-    static void resetMTPModules(CacheConfig& config, size_t module_count) {
-        config.mtp_sub_configs_.clear();
-        config.mtp_sub_configs_.reserve(module_count);
-    }
-
-    static void addMTPModule(CacheConfig& config, std::shared_ptr<CacheConfig> module) {
-        RTP_LLM_CHECK_WITH_INFO(module != nullptr, "CacheConfigCreator cannot publish a null MTP module");
-        config.mtp_sub_configs_.push_back(std::move(module));
-    }
-};
 
 namespace {
 
@@ -77,12 +39,12 @@ bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVC
 
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
-    if (!config.use_independent_block_pools) {
-        budget.paged_block_bytes = config.block_size_bytes;
+    if (!config.usesIndependentBlockPools()) {
+        budget.paged_block_bytes = config.pagedBlockBudgetBytes();
         return budget;
     }
 
-    budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
+    budget.explicit_pool_reserve_bytes = config.explicitPoolReserveBytes();
     for (const auto& group : config.groups()) {
         if (config.usesExplicitIndependentBlocks(group.tag)) {
             continue;
@@ -116,50 +78,51 @@ void addBlockBudget(KVCacheBlockBudget& total, const KVCacheBlockBudget& additio
     add(total.swa_block_bytes, addition.swa_block_bytes, "SWA block bytes");
 }
 
-void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name) {
+}  // namespace
+
+void CacheConfigCreator::setupKernelSeqSize(CacheConfig&         config,
+                                            const KVCacheConfig& kv_cache_config,
+                                            const char*          config_name) {
     auto groups = config.groups();
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const auto requested_kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block % requested_kernel_seq_size_per_block == 0,
-                                "%s seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                config_name,
-                                config.seq_size_per_block,
-                                requested_kernel_seq_size_per_block);
+        (void)config_name;
+        (void)PoolBlockToKernelBlockProjection(config.cacheKeyBlockTokens(), requested_kernel_seq_size_per_block);
         for (auto& group : groups) {
-            group.layout.kernel_seq_size_per_block =
+            group.kernel_seq_size_per_block =
                 group.policy.group_type == CacheGroupType::FULL ?
-                    std::min(requested_kernel_seq_size_per_block, group.layout.seq_size_per_block) :
-                    group.layout.seq_size_per_block;
+                    std::min(requested_kernel_seq_size_per_block, group.seq_size_per_block) :
+                    group.seq_size_per_block;
         }
     }
 
     size_t compatibility_seq_size    = std::numeric_limits<size_t>::max();
     size_t compatibility_kernel_size = std::numeric_limits<size_t>::max();
     for (const auto& group : groups) {
-        compatibility_seq_size    = std::min(compatibility_seq_size, group.layout.seq_size_per_block);
-        compatibility_kernel_size = std::min(compatibility_kernel_size, group.layout.kernel_seq_size_per_block);
+        compatibility_seq_size    = std::min(compatibility_seq_size, group.seq_size_per_block);
+        compatibility_kernel_size = std::min(compatibility_kernel_size, group.kernel_seq_size_per_block);
     }
-    config.seq_size_per_block        = compatibility_seq_size;
-    config.kernel_seq_size_per_block = compatibility_kernel_size;
-    CacheConfigResolverAccess::setResolvedData(config, {std::move(groups), config.layerMemberships()});
+    config.cache_key_block_tokens_ = compatibility_seq_size;
+    config.kernel_block_tokens_    = compatibility_kernel_size;
+    config.replaceAssemblyTopology(std::move(groups), config.layers());
 }
 
-uint32_t computeBlockNum(CacheConfig&                                     config,
-                         const ModelConfig&                               model_config,
-                         const RuntimeConfig&                             runtime_config,
-                         const KVCacheConfig&                             kv_cache_config,
-                         const ParallelismConfig&                         parallelism_config,
-                         const std::optional<WarmUpResult>&               warm_up_result,
-                         const std::optional<SpeculativeExecutionConfig>& sp_config) {
+uint32_t CacheConfigCreator::computeBlockNum(CacheConfig&                                     config,
+                                             const ModelConfig&                               model_config,
+                                             const RuntimeConfig&                             runtime_config,
+                                             const KVCacheConfig&                             kv_cache_config,
+                                             const ParallelismConfig&                         parallelism_config,
+                                             const std::optional<WarmUpResult>&               warm_up_result,
+                                             const std::optional<SpeculativeExecutionConfig>& sp_config) {
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
-        CacheConfigResolverAccess::finalizeBlockNums(config, kv_cache_config.test_block_num, runtime_config);
+        config.projectAssemblyBlockCounts(kv_cache_config.test_block_num);
         return static_cast<uint32_t>(kv_cache_config.test_block_num);
     }
 
     const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
         runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-    CacheConfigResolverAccess::finalizeBlockNums(config, 0, runtime_config);
+    config.projectAssemblyBlockCounts(0);
 
     const auto block_budget = blockBudgetForConfig(config);
     if (block_budget.explicit_pool_reserve_bytes > 0) {
@@ -172,8 +135,10 @@ uint32_t computeBlockNum(CacheConfig&                                     config
                          kv_cache_mem_size / 1024 / 1024,
                          block_budget.explicit_pool_reserve_bytes / 1024 / 1024);
     }
-    return maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget, config.linear_step);
+    return maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget, config.linearStep());
 }
+
+namespace {
 
 uint32_t mhaLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
     const auto     attn_tp = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
@@ -328,23 +293,24 @@ void validateHybridLayerSpecs(const ModelConfig& model_config, const LayerBuiltS
                             model_config.num_layers);
 }
 
-void populateGroupsFromLayerSpecs(CacheConfig&             config,
-                                  const LayerBuiltSpecs&   layer_specs,
-                                  const ModelConfig&       model_config,
-                                  const ParallelismConfig& parallelism_config) {
-    RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(config.layer_num),
+}  // namespace
+
+void CacheConfigCreator::populateGroupsFromLayerSpecs(CacheConfig&             config,
+                                                      const LayerBuiltSpecs&   layer_specs,
+                                                      const ModelConfig&       model_config,
+                                                      const ParallelismConfig& parallelism_config) {
+    RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(config.mainLayerCount()),
                             "cache layer spec count %zu != layer_num %u",
                             layer_specs.size(),
-                            config.layer_num);
+                            config.mainLayerCount());
 
     const bool legacy_hybrid = model_config.hybrid_attention_config.enable_hybrid_attention
                                && !model_config.hybrid_attention_config.enable_independent_kv_cache_pools;
     std::map<std::string, CacheGroup> groups_by_tag;
-    std::vector<std::string>         ordered_tags;
-    std::vector<CacheLayerMembership> layers(static_cast<size_t>(config.layer_num));
-    for (uint32_t layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-        layers[layer_id].layer_id = static_cast<int>(layer_id);
-        const auto& specs         = layer_specs[layer_id];
+    std::vector<std::string>          ordered_tags;
+    std::vector<CacheLayer>           layers(static_cast<size_t>(config.mainLayerCount()));
+    for (uint32_t layer_id = 0; layer_id < config.mainLayerCount(); ++layer_id) {
+        const auto& specs = layer_specs[layer_id];
         RTP_LLM_CHECK_WITH_INFO(!specs.empty(), "cache layer %u has no specs", layer_id);
         if (legacy_hybrid) {
             RTP_LLM_CHECK_WITH_INFO(specs.size() == 1,
@@ -381,14 +347,14 @@ void populateGroupsFromLayerSpecs(CacheConfig&             config,
             auto& group            = it->second;
             if (inserted) {
                 group.tag                       = built.tag;
-                group.layout.spec                      = built.spec;
-                group.policy                           = built.policy;
-                group.layout.local_kv_head_num         = local_heads;
-                group.layout.seq_size_per_block        = built.spec->seq_size_per_block;
-                group.layout.kernel_seq_size_per_block = group.layout.seq_size_per_block;
+                group.spec                      = built.spec;
+                group.policy                    = built.policy;
+                group.local_kv_head_num         = local_heads;
+                group.seq_size_per_block        = built.spec->seq_size_per_block;
+                group.kernel_seq_size_per_block = group.seq_size_per_block;
                 ordered_tags.push_back(built.tag);
             } else {
-                RTP_LLM_CHECK_WITH_INFO(group.layout.spec->fingerprint() == built.spec->fingerprint(),
+                RTP_LLM_CHECK_WITH_INFO(group.spec->fingerprint() == built.spec->fingerprint(),
                                         "hybrid-pool tag=%s has multiple physical prototypes",
                                         built.tag.c_str());
                 RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == built.policy.group_type,
@@ -397,12 +363,12 @@ void populateGroupsFromLayerSpecs(CacheConfig&             config,
                 RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(group.policy, built.policy),
                                         "hybrid-pool tag=%s has inconsistent policy",
                                         built.tag.c_str());
-                RTP_LLM_CHECK_WITH_INFO(group.layout.local_kv_head_num == local_heads,
+                RTP_LLM_CHECK_WITH_INFO(group.local_kv_head_num == local_heads,
                                         "hybrid-pool tag=%s has inconsistent local_kv_head_num",
                                         built.tag.c_str());
             }
             group.layer_ids.push_back(static_cast<int>(layer_id));
-            layers[layer_id].group_tags.push_back(built.tag);
+            layers[layer_id].push_back(built.tag);
         }
     }
 
@@ -416,10 +382,10 @@ void populateGroupsFromLayerSpecs(CacheConfig&             config,
     for (const auto& tag : ordered_tags) {
         groups.push_back(std::move(groups_by_tag.at(tag)));
     }
-    CacheConfigResolverAccess::setResolvedData(config, {std::move(groups), std::move(layers)});
+    config.replaceAssemblyTopology(std::move(groups), std::move(layers));
 }
 
-void finalizeGroupStorage(CacheConfig& config, bool is_mtp) {
+void CacheConfigCreator::finalizeGroupStorage(CacheConfig& config) {
     auto                  groups = config.groups();
     std::vector<uint32_t> group_block_nums(groups.size(), 0);
     std::vector<size_t>   group_kv_strides(groups.size(), 0);
@@ -429,91 +395,88 @@ void finalizeGroupStorage(CacheConfig& config, bool is_mtp) {
     size_t                total_kv_block_bytes    = 0;
     size_t                total_scale_block_bytes = 0;
     uint32_t              max_group_layers        = 0;
-    config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
-    config.use_typed_cache_regions   = false;
-    config.use_opaque_kv_cache_store = false;
+    config.uses_typed_cache_regions_              = false;
+    config.uses_opaque_kv_cache_store_            = false;
 
     for (size_t idx = 0; idx < groups.size(); ++idx) {
         auto& group = groups[idx];
-        RTP_LLM_CHECK_WITH_INFO(group.layout.spec != nullptr, "cache group tag=%s has null spec", group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(group.layout.kernel_seq_size_per_block > 0
-                                    && group.layout.seq_size_per_block % group.layout.kernel_seq_size_per_block == 0,
-                                "cache group tag=%s physical block %zu must be divisible by kernel block %zu",
-                                group.tag.c_str(),
-                                group.layout.seq_size_per_block,
-                                group.layout.kernel_seq_size_per_block);
-        group.layout.kv_block_stride_bytes = group.layout.spec->block_size_bytes();
-        group.layout.kv_scale_stride_bytes = group.layout.spec->scale_block_size_bytes();
-        group.layout.block_num             = 0;
-        group_kv_strides[idx]              = group.layout.kv_block_stride_bytes;
-        group_scale_strides[idx]           = group.layout.kv_scale_stride_bytes;
+        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache group tag=%s has null spec", group.tag.c_str());
+        (void)group.kernelBlocksPerPoolBlock();
+        group.kv_block_stride_bytes = group.spec->block_size_bytes();
+        group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
+        group.block_num             = 0;
+        group_kv_strides[idx]       = group.kv_block_stride_bytes;
+        group_scale_strides[idx]    = group.kv_scale_stride_bytes;
 
         const auto layer_count = static_cast<uint32_t>(group.layer_ids.size());
         const bool contributes_to_paged_budget =
-            !config.use_independent_block_pools
+            !config.usesIndependentBlockPools()
             || ((group.policy.group_type == CacheGroupType::FULL || group.policy.group_type == CacheGroupType::LINEAR)
                 && group.policy.explicit_block_num == 0);
         if (contributes_to_paged_budget) {
-            total_kv_block_bytes += static_cast<size_t>(layer_count) * group.layout.kv_block_stride_bytes;
-            total_scale_block_bytes += static_cast<size_t>(layer_count) * group.layout.kv_scale_stride_bytes;
+            total_kv_block_bytes += static_cast<size_t>(layer_count) * group.kv_block_stride_bytes;
+            total_scale_block_bytes += static_cast<size_t>(layer_count) * group.kv_scale_stride_bytes;
         }
-        max_kv_stride    = std::max(max_kv_stride, group.layout.kv_block_stride_bytes);
-        max_scale_stride = std::max(max_scale_stride, group.layout.kv_scale_stride_bytes);
+        max_kv_stride    = std::max(max_kv_stride, group.kv_block_stride_bytes);
+        max_scale_stride = std::max(max_scale_stride, group.kv_scale_stride_bytes);
         max_group_layers = std::max(max_group_layers, layer_count);
-        for (int layer_id : group.layer_ids) {
-            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0
-                                        && static_cast<size_t>(layer_id) < config.layer_to_block_stride_bytes.size(),
-                                    "cache group tag=%s has invalid layer id %d",
-                                    group.tag.c_str(),
-                                    layer_id);
-            config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] =
-                static_cast<int>(group.layout.kv_block_stride_bytes + group.layout.kv_scale_stride_bytes);
-        }
-
         const bool opaque =
-            group.layout.spec->type == KVCacheSpecType::OpaqueKV || group.layout.spec->type == KVCacheSpecType::OpaqueState;
-        config.use_typed_cache_regions   = config.use_typed_cache_regions || opaque;
-        config.use_opaque_kv_cache_store = config.use_opaque_kv_cache_store || opaque;
-        config.is_sparse                 = config.is_sparse || group.layout.spec->type == KVCacheSpecType::OpaqueKV;
+            group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
+        config.uses_typed_cache_regions_   = config.usesTypedCacheRegions() || opaque;
+        config.uses_opaque_kv_cache_store_ = config.usesOpaqueKVCacheStore() || opaque;
+        config.is_sparse_                  = config.isSparse() || group.spec->type == KVCacheSpecType::OpaqueKV;
     }
 
-    config.group_layer_num         = static_cast<int>(std::max<uint32_t>(1, max_group_layers));
-    config.kv_block_stride_bytes   = max_kv_stride;
-    config.kv_scale_stride_bytes   = max_scale_stride;
-    config.kv_block_size_bytes     = total_kv_block_bytes;
-    config.kv_scale_size_bytes     = total_scale_block_bytes;
-    const size_t paged_block_bytes = total_kv_block_bytes + total_scale_block_bytes;
+    config.shared_pool_layout_layer_count_    = static_cast<int>(std::max<uint32_t>(1, max_group_layers));
+    config.shared_pool_kv_block_stride_bytes_ = max_kv_stride;
+    config.shared_pool_kv_scale_stride_bytes_ = max_scale_stride;
+    const size_t paged_block_bytes            = total_kv_block_bytes + total_scale_block_bytes;
     if (paged_block_bytes == 0) {
-        RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,
-                                "cache paged groups produced zero block bytes");
-        config.kv_block_size_bytes = 1;
-        config.block_size_bytes    = 1;
+        RTP_LLM_CHECK_WITH_INFO(config.usesTypedCacheRegions(), "cache paged groups produced zero block bytes");
+        config.paged_block_budget_bytes_ = 1;
     } else {
-        config.block_size_bytes = paged_block_bytes;
+        config.paged_block_budget_bytes_ = paged_block_bytes;
     }
-    config.explicitly_sized_pool_reserve_bytes = 0;
-    config.disable_decode_first_malloc_device_reuse =
-        config.disable_decode_first_malloc_device_reuse || config.use_opaque_kv_cache_store;
-    CacheConfigResolverAccess::setResolvedData(config, {std::move(groups), config.layerMemberships()});
-    const auto& finalized_groups     = config.groups();
-    config.seq_size_per_block        = std::numeric_limits<size_t>::max();
-    config.kernel_seq_size_per_block = std::numeric_limits<size_t>::max();
+    config.explicit_pool_reserve_bytes_ = 0;
+    config.disables_decode_first_malloc_device_reuse_ =
+        config.disablesDecodeFirstMallocDeviceReuse() || config.usesOpaqueKVCacheStore();
+    config.replaceAssemblyTopology(std::move(groups), config.layers());
+    const auto& finalized_groups   = config.groups();
+    config.cache_key_block_tokens_ = std::numeric_limits<size_t>::max();
+    config.kernel_block_tokens_    = std::numeric_limits<size_t>::max();
     for (const auto& group : finalized_groups) {
-        config.seq_size_per_block        = std::min(config.seq_size_per_block, group.layout.seq_size_per_block);
-        config.kernel_seq_size_per_block =
-            std::min(config.kernel_seq_size_per_block, group.layout.kernel_seq_size_per_block);
+        config.cache_key_block_tokens_ = std::min(config.cacheKeyBlockTokens(), group.seq_size_per_block);
+        config.kernel_block_tokens_    = std::min(config.kernelBlockTokens(), group.kernel_seq_size_per_block);
     }
-    if (config.use_independent_block_pools) {
-        CacheConfigResolverAccess::setGroupBlockLayout(
-            config, group_block_nums, group_kv_strides, group_scale_strides);
+    if (config.usesIndependentBlockPools()) {
+        config.replaceAssemblyGroupBlockLayout(group_block_nums, group_kv_strides, group_scale_strides);
     }
 }
 
-CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
-                                  const ParallelismConfig& parallelism_config,
-                                  const KVCacheConfig&     kv_cache_config,
-                                  bool                     is_mtp,
-                                  int                      gen_num_per_cycle) {
+static LayerBuiltSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
+                                                const SpecBuildContext&      ctx,
+                                                int64_t                      expected_layer_num) {
+    RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(expected_layer_num),
+                            "kv_cache_spec_descs size %zu != num_layers %ld",
+                            layer_descs.size(),
+                            expected_layer_num);
+    LayerBuiltSpecs layer_specs(layer_descs.size());
+    for (size_t layer_id = 0; layer_id < layer_descs.size(); ++layer_id) {
+        const auto& descs = layer_descs[layer_id];
+        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "kv_cache_spec_descs layer %zu has no descs", layer_id);
+        auto& specs = layer_specs[layer_id];
+        specs.reserve(descs.size());
+        for (const auto& desc : descs) {
+            specs.push_back(SpecBuilder::build(desc, ctx));
+        }
+    }
+    return layer_specs;
+}
+
+CacheConfig CacheConfigCreator::createConfigFromDescs(const ModelConfig&       model_config,
+                                                      const ParallelismConfig& parallelism_config,
+                                                      const KVCacheConfig&     kv_cache_config,
+                                                      int                      gen_num_per_cycle) {
     const bool    independent            = model_config.hybrid_attention_config.enable_independent_kv_cache_pools;
     const bool    hybrid                 = model_config.hybrid_attention_config.enable_hybrid_attention;
     const auto    dtype                  = MemoryEvaluationHelper::getDataTypeForCache(model_config);
@@ -529,25 +492,19 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "cache seq_size_per_block must be > 0");
     if (independent) {
         RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0, "hybrid-pool kernel_seq_size_per_block must be > 0");
-        RTP_LLM_CHECK_WITH_INFO(
-            physical_tokens_per_block >= kernel_tokens_per_block
-                && physical_tokens_per_block % kernel_tokens_per_block == 0,
-            "hybrid-pool seq_size_per_block=%u must be >= kernel_seq_size_per_block=%u and divisible by it",
-            physical_tokens_per_block,
-            kernel_tokens_per_block);
+        (void)PoolBlockToKernelBlockProjection(physical_tokens_per_block, kernel_tokens_per_block);
         validateIndependentDescs(model_config, kernel_tokens_per_block, gen_num_per_cycle);
     }
 
     CacheConfig config;
-    config.layer_num                   = static_cast<uint32_t>(model_config.num_layers);
-    config.layer_all_num               = config.layer_num;
-    config.seq_size_per_block          = 0;
-    config.kernel_seq_size_per_block   = 0;
-    config.use_mla                     = model_config.attn_config.use_mla;
-    config.dtype                       = dtype;
-    config.linear_step                 = 1;
-    config.is_sparse                   = model_config.attn_config.is_sparse;
-    config.use_independent_block_pools = independent || hybrid;
+    config.main_layer_count_             = static_cast<uint32_t>(model_config.num_layers);
+    config.cache_key_block_tokens_       = 0;
+    config.kernel_block_tokens_          = 0;
+    config.uses_mla_                     = model_config.attn_config.use_mla;
+    config.dtype_                        = dtype;
+    config.linear_step_                  = 1;
+    config.is_sparse_                    = model_config.attn_config.is_sparse;
+    config.uses_independent_block_pools_ = independent || hybrid;
 
     SpecBuildContext ctx;
     ctx.dtype                   = dtype;
@@ -557,8 +514,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     ctx.linear_attention_config = &model_config.linear_attention_config;
     ctx.parallelism_config      = &parallelism_config;
     ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
-    auto layer_specs =
-        CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
+    auto layer_specs = buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     if (!independent && hybrid) {
         validateHybridLayerSpecs(model_config, layer_specs);
@@ -583,18 +539,18 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     {
         auto groups = config.groups();
         for (auto& group : groups) {
-            group.layout.kernel_seq_size_per_block =
+            group.kernel_seq_size_per_block =
                 group.policy.group_type == CacheGroupType::FULL ?
-                    std::min(static_cast<size_t>(kernel_tokens_per_block), group.layout.seq_size_per_block) :
-                    group.layout.seq_size_per_block;
+                    std::min(static_cast<size_t>(kernel_tokens_per_block), group.seq_size_per_block) :
+                    group.seq_size_per_block;
         }
-        CacheConfigResolverAccess::setResolvedData(config, {std::move(groups), config.layerMemberships()});
+        config.replaceAssemblyTopology(std::move(groups), config.layers());
     }
     if (!independent && hybrid) {
         const auto full_group_num =
-            std::count_if(config.groups().begin(),
-                          config.groups().end(),
-                          [](const CacheGroup& group) { return group.policy.group_type == CacheGroupType::FULL; });
+            std::count_if(config.groups().begin(), config.groups().end(), [](const CacheGroup& group) {
+                return group.policy.group_type == CacheGroupType::FULL;
+            });
         RTP_LLM_CHECK_WITH_INFO(
             full_group_num <= 1,
             "multiple full attention cache groups (%zu) are not supported: FMHA parameters bind one block table before "
@@ -602,29 +558,29 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
             static_cast<size_t>(full_group_num));
         if (full_group_num != 0) {
             const auto& full_group =
-                *std::find_if(config.groups().begin(),
-                              config.groups().end(),
-                              [](const CacheGroup& group) { return group.policy.group_type == CacheGroupType::FULL; });
-            if (full_group.layout.spec == nullptr || full_group.tag != "full") {
+                *std::find_if(config.groups().begin(), config.groups().end(), [](const CacheGroup& group) {
+                    return group.policy.group_type == CacheGroupType::FULL;
+                });
+            if (full_group.spec == nullptr || full_group.tag != "full") {
                 RTP_LLM_LOG_WARNING("hybrid full cache group is expected to be tag=full, got tag=%s type=%d",
-                                    full_group.layout.spec == nullptr ? "<null>" : full_group.tag.c_str(),
+                                    full_group.spec == nullptr ? "<null>" : full_group.tag.c_str(),
                                     static_cast<int>(full_group.policy.group_type));
             }
         }
     }
-    finalizeGroupStorage(config, is_mtp);
+    finalizeGroupStorage(config);
     if (!independent && hybrid) {
-        config.group_layer_num = hybridGroupLayerNum(model_config);
+        config.shared_pool_layout_layer_count_ = hybridGroupLayerNum(model_config);
     } else if (!independent) {
-        config.group_layer_num = static_cast<int>(model_config.num_layers);
+        config.shared_pool_layout_layer_count_ = static_cast<int>(model_config.num_layers);
     }
 
     if (!independent) {
-        const auto full_group_num = std::count_if(
-            config.groups().begin(), config.groups().end(), [](const CacheGroup& group) {
-                return group.policy.group_type == CacheGroupType::FULL && group.layout.spec
-                       && (group.layout.spec->type == KVCacheSpecType::MultiHeadAttention
-                           || group.layout.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+        const auto full_group_num =
+            std::count_if(config.groups().begin(), config.groups().end(), [](const CacheGroup& group) {
+                return group.policy.group_type == CacheGroupType::FULL && group.spec
+                       && (group.spec->type == KVCacheSpecType::MultiHeadAttention
+                           || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
             });
         RTP_LLM_CHECK_WITH_INFO(full_group_num == 1,
                                 "cache config requires exactly one FULL MHA/MLA cache group, got %zu",
@@ -632,8 +588,6 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     }
     return config;
 }
-
-}  // namespace
 
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step) {
     RTP_LLM_CHECK_WITH_INFO(budget.paged_block_bytes > 0 || budget.swa_block_bytes > 0,
@@ -652,59 +606,15 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
     return low;
 }
 
-CacheConfig CacheConfigCreator::buildResolvedConfig(ResolvedCacheConfigData data) {
-    CacheConfig config;
-    CacheConfigResolverAccess::setResolvedData(config, std::move(data));
-    config.layer_num     = static_cast<uint32_t>(config.layerMemberships().size());
-    config.layer_all_num = config.layer_num;
-    return config;
-}
+CacheConfig CacheConfigCreator::createRankLocalConfig(const ModelConfig&                 model_config,
+                                                      const ParallelismConfig&           parallelism_config,
+                                                      const RuntimeConfig&               runtime_config,
+                                                      const KVCacheConfig&               kv_cache_config,
+                                                      const std::optional<WarmUpResult>& warm_up_result,
+                                                      const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    CacheConfig config = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, 0);
 
-CacheConfig CacheConfigCreator::finalizeBlockNums(const CacheConfig&  config,
-                                                  uint32_t            global_block_num,
-                                                  const RuntimeConfig& runtime_config) {
-    return CacheConfigResolverAccess::withFinalizedBlockNums(config, global_block_num, runtime_config);
-}
-
-LayerBuiltSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
-                                                             const SpecBuildContext&      ctx,
-                                                             int64_t                      expected_layer_num) {
-    RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(expected_layer_num),
-                            "kv_cache_spec_descs size %zu != num_layers %ld",
-                            layer_descs.size(),
-                            expected_layer_num);
-    LayerBuiltSpecs layer_specs(layer_descs.size());
-    for (size_t layer_id = 0; layer_id < layer_descs.size(); ++layer_id) {
-        const auto& descs = layer_descs[layer_id];
-        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "kv_cache_spec_descs layer %zu has no descs", layer_id);
-        auto& specs = layer_specs[layer_id];
-        specs.reserve(descs.size());
-        for (const auto& desc : descs) {
-            specs.push_back(SpecBuilder::build(desc, ctx));
-        }
-    }
-    return layer_specs;
-}
-
-CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
-                                                  const ParallelismConfig& parallelism_config,
-                                                  bool                     is_mtp,
-                                                  int                      gen_num_per_cycle) {
-    KVCacheConfig no_override_config;
-    no_override_config.seq_size_per_block        = 0;
-    no_override_config.kernel_seq_size_per_block = 0;
-    return createConfigFromDescs(model_config, parallelism_config, no_override_config, is_mtp, gen_num_per_cycle);
-}
-
-CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
-                                             const ParallelismConfig&                         parallelism_config,
-                                             const RuntimeConfig&                             runtime_config,
-                                             const KVCacheConfig&                             kv_cache_config,
-                                             const std::optional<WarmUpResult>&               warm_up_result,
-                                             const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    CacheConfig config = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, false, 0);
-
-    config.linear_step = kv_cache_config.linear_step;
+    config.linear_step_ = kv_cache_config.linear_step;
     setupKernelSeqSize(config, kv_cache_config, "cache");
 
     uint32_t block_num = computeBlockNum(
@@ -712,11 +622,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_num,
-                            static_cast<long>(config.block_size_bytes / 1024 / 1024));
+                            static_cast<long>(config.pagedBlockBudgetBytes() / 1024 / 1024));
 
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    config.block_num            = static_cast<int>(block_num);
-    CacheConfigResolverAccess::finalizeBlockNums(config, block_num, runtime_config);
+    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.cacheKeyBlockTokens();
+    config.block_count_basis_   = block_num;
+    config.projectAssemblyBlockCounts(block_num);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
@@ -728,48 +638,65 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     return config;
 }
 
-CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&                 score_model_config,
-                                               const ModelConfig&                 propose_model_config,
-                                               const ParallelismConfig&           parallelism_config,
-                                               const RuntimeConfig&               runtime_config,
-                                               const KVCacheConfig&               kv_cache_config,
-                                               const SpeculativeExecutionConfig&  sp_config,
-                                               const std::optional<WarmUpResult>& warm_up_result,
-                                               bool                               is_mtp,
-                                               bool                               is_eagle) {
-    CacheConfig score_config = createConfigFromDescs(
-        score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle);
-    CacheConfig propose_config = createConfigFromDescs(
-        propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle);
+CacheConfig CacheConfigCreator::createRankLocalSpeculativeConfig(const ModelConfig&                score_model_config,
+                                                                 const ModelConfig&                propose_model_config,
+                                                                 const ParallelismConfig&          parallelism_config,
+                                                                 const RuntimeConfig&              runtime_config,
+                                                                 const KVCacheConfig&              kv_cache_config,
+                                                                 const SpeculativeExecutionConfig& sp_config,
+                                                                 const std::optional<WarmUpResult>& warm_up_result) {
+    CacheConfig score_config =
+        createConfigFromDescs(score_model_config, parallelism_config, kv_cache_config, sp_config.gen_num_per_cycle);
+    CacheConfig propose_config =
+        createConfigFromDescs(propose_model_config, parallelism_config, kv_cache_config, sp_config.gen_num_per_cycle);
 
-    const int joint_step       = std::max(1, kv_cache_config.linear_step);
-    score_config.linear_step   = joint_step;
-    propose_config.linear_step = joint_step;
+    const int joint_step        = std::max(1, kv_cache_config.linear_step);
+    score_config.linear_step_   = joint_step;
+    propose_config.linear_step_ = joint_step;
 
     setupKernelSeqSize(score_config, kv_cache_config, "score");
     setupKernelSeqSize(propose_config, kv_cache_config, "propose");
 
-    int num_mtp_modules = 1;
-    if (is_mtp) {
-        num_mtp_modules = sp_config.gen_num_per_cycle;
-        if (is_eagle || sp_config.type == SP_TYPE_DSPARK) {
-            // DSpARK is one multi-layer block-draft model; gamma is its
-            // proposal width, not a count of independent one-layer modules.
-            num_mtp_modules = 1;
+    const bool is_mtp =
+        sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_DSPARK;
+    // MTP contributes one one-layer module per proposal step. EAGLE and
+    // DSpARK each contribute one multi-layer draft model; their gamma is a
+    // proposal width, not an independent-module count. Other speculative
+    // modes keep the historical single draft-model topology.
+    const int num_mtp_modules = sp_config.type == SP_TYPE_MTP ? sp_config.gen_num_per_cycle : 1;
+    RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "speculative cache requires at least one propose module");
+
+    score_config.projectAssemblyBlockCounts(0);
+    propose_config.projectAssemblyBlockCounts(0);
+
+    uint32_t total_layer_num = score_config.mainLayerCount();
+    for (int i = 0; i < num_mtp_modules; ++i) {
+        total_layer_num += propose_config.mainLayerCount();
+    }
+
+    size_t total_block_size_bytes = score_config.pagedBlockBudgetBytes();
+    for (int i = 0; i < num_mtp_modules; ++i) {
+        total_block_size_bytes += propose_config.pagedBlockBudgetBytes();
+    }
+
+    // Compose the complete root/sub-model topology before solving capacity.
+    // No partially composed score config is published or used as the result of
+    // the memory-budget decision.
+    CacheConfig config               = score_config;
+    config.linear_step_              = joint_step;
+    config.paged_block_budget_bytes_ = total_block_size_bytes;
+    const uint32_t main_layer_num    = score_config.mainLayerCount();
+    config.mtp_sub_configs_.clear();
+    config.mtp_sub_configs_.reserve(static_cast<size_t>(num_mtp_modules));
+    for (int m = 0; m < num_mtp_modules; ++m) {
+        auto sub_cfg                     = config.composeAssemblyMTPModule(propose_config, m, main_layer_num);
+        sub_cfg->cache_key_block_tokens_ = std::numeric_limits<size_t>::max();
+        sub_cfg->kernel_block_tokens_    = std::numeric_limits<size_t>::max();
+        for (const auto& group : sub_cfg->groups()) {
+            sub_cfg->cache_key_block_tokens_ = std::min(sub_cfg->cacheKeyBlockTokens(), group.seq_size_per_block);
+            sub_cfg->kernel_block_tokens_    = std::min(sub_cfg->kernelBlockTokens(), group.kernel_seq_size_per_block);
         }
-    }
-
-    CacheConfigResolverAccess::finalizeBlockNums(score_config, 0, runtime_config);
-    CacheConfigResolverAccess::finalizeBlockNums(propose_config, 0, runtime_config);
-
-    uint32_t total_layer_num = score_config.layer_num;
-    for (int i = 0; i < num_mtp_modules; ++i) {
-        total_layer_num += propose_config.layer_num;
-    }
-
-    size_t total_block_size_bytes = score_config.block_size_bytes;
-    for (int i = 0; i < num_mtp_modules; ++i) {
-        total_block_size_bytes += propose_config.block_size_bytes;
+        config.mtp_sub_configs_.push_back(std::move(sub_cfg));
     }
 
     KVCacheBlockBudget joint_budget = blockBudgetForConfig(score_config);
@@ -794,8 +721,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 "sp kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB (score=%zu MiB + propose=%zu MiB x %d)",
                 kv_cache_mem_size / 1024 / 1024,
                 explicit_pool_reserve / 1024 / 1024,
-                score_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
-                propose_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
+                score_config.explicitPoolReserveBytes() / 1024 / 1024,
+                propose_config.explicitPoolReserveBytes() / 1024 / 1024,
                 num_mtp_modules);
         }
         block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, joint_budget, joint_step);
@@ -803,49 +730,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
 
-    CacheConfig config                         = score_config;
-    config.linear_step                         = joint_step;
-    config.layer_all_num                       = score_config.layer_num;
-    config.block_size_bytes                    = total_block_size_bytes;
-    config.block_num                           = block_num;
-    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
+    config = projectBlockCounts(config, static_cast<uint32_t>(block_num), /*validate_basis=*/false);
+    config.explicit_pool_reserve_bytes_ = explicit_pool_reserve;
 
-    const uint32_t main_layer_num = score_config.layer_num;
-    const uint32_t mtp_layer_num  = propose_config.layer_num;
-
-    CacheConfigResolverAccess::resetMTPModules(config, static_cast<size_t>(num_mtp_modules));
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
-
-    const size_t score_layers = static_cast<size_t>(main_layer_num);
-    RTP_LLM_CHECK_WITH_INFO(score_config.layer_to_block_stride_bytes.size() == score_layers,
-                            "score_config.layer_to_block_stride_bytes size mismatch, got=%zu need=%zu",
-                            score_config.layer_to_block_stride_bytes.size(),
-                            score_layers);
-    for (size_t l = 0; l < score_layers; ++l) {
-        config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
-    }
-
-    for (int m = 0; m < num_mtp_modules; ++m) {
-        RTP_LLM_CHECK_WITH_INFO(propose_config.layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
-                                "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
-                                propose_config.layer_to_block_stride_bytes.size(),
-                                mtp_layer_num);
-        auto sub_cfg = CacheConfigResolverAccess::mergeMTPModule(config, propose_config, m, main_layer_num);
-        sub_cfg->seq_size_per_block        = std::numeric_limits<size_t>::max();
-        sub_cfg->kernel_seq_size_per_block = std::numeric_limits<size_t>::max();
-        for (const auto& group : sub_cfg->groups()) {
-            sub_cfg->seq_size_per_block = std::min(sub_cfg->seq_size_per_block, group.layout.seq_size_per_block);
-            sub_cfg->kernel_seq_size_per_block =
-                std::min(sub_cfg->kernel_seq_size_per_block, group.layout.kernel_seq_size_per_block);
-        }
-        CacheConfigResolverAccess::finalizeBlockNums(*sub_cfg, static_cast<uint32_t>(block_num), runtime_config);
-        CacheConfigResolverAccess::addMTPModule(config, std::move(sub_cfg));
-    }
-
-    CacheConfigResolverAccess::finalizeBlockNums(config, static_cast<uint32_t>(block_num), runtime_config);
-    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
-
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
+    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.cacheKeyBlockTokens();
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
                      "allows storing %zu tokens, total_block_size=%zu bytes (main=%zu + %d*propose=%zu)",
                      is_mtp,
@@ -854,9 +742,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                      block_num,
                      kv_cache_seq_len,
                      total_block_size_bytes,
-                     score_config.block_size_bytes,
+                     score_config.pagedBlockBudgetBytes(),
                      num_mtp_modules,
-                     propose_config.block_size_bytes);
+                     propose_config.pagedBlockBudgetBytes());
 
     RTP_LLM_LOG_INFO("CacheConfig debugString(main_score_model):\n%s", score_config.debugString().c_str());
     for (size_t i = 0; i < config.mtpModuleCount(); ++i) {
@@ -865,6 +753,45 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     }
 
     return config;
+}
+
+CacheConfig CacheConfigCreator::createDecodeWarmupConfig(const ModelConfig&       model_config,
+                                                         const ParallelismConfig& parallelism_config,
+                                                         const KVCacheConfig&     kv_cache_config,
+                                                         int                      gen_num_per_cycle) {
+    CacheConfig config  = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    config.linear_step_ = kv_cache_config.linear_step;
+    setupKernelSeqSize(config, kv_cache_config, "decode warmup");
+    config.projectAssemblyBlockCounts(1);
+    return config;
+}
+
+CacheConfig
+CacheConfigCreator::projectBlockCounts(const CacheConfig& config, uint32_t block_count_basis, bool validate_basis) {
+    if (validate_basis) {
+        RTP_LLM_CHECK_WITH_INFO(block_count_basis > 0, "rank-synchronized block count basis must be positive");
+        RTP_LLM_CHECK_WITH_INFO(config.block_count_basis_ > 0,
+                                "rank-local CacheConfig must have a positive block count basis");
+        RTP_LLM_CHECK_WITH_INFO(block_count_basis <= config.block_count_basis_,
+                                "rank-synchronized block count basis %u exceeds rank-local basis %u",
+                                block_count_basis,
+                                config.block_count_basis_);
+    }
+    CacheConfig result = config;
+    result.mtp_sub_configs_.clear();
+    result.mtp_sub_configs_.reserve(config.mtp_sub_configs_.size());
+    for (const auto& sub_config : config.mtp_sub_configs_) {
+        RTP_LLM_CHECK_WITH_INFO(sub_config != nullptr, "CacheConfig cannot project a null MTP module");
+        result.mtp_sub_configs_.push_back(
+            std::make_shared<const CacheConfig>(projectBlockCounts(*sub_config, block_count_basis, validate_basis)));
+    }
+    result.projectAssemblyBlockCounts(block_count_basis);
+    return result;
+}
+
+CacheConfig CacheConfigCreator::withRankSynchronizedBlockCountBasis(const CacheConfig& config,
+                                                                    uint32_t           block_count_basis) {
+    return projectBlockCounts(config, block_count_basis, /*validate_basis=*/true);
 }
 
 }  // namespace rtp_llm

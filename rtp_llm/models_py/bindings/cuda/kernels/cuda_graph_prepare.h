@@ -21,6 +21,12 @@ struct CudaGraphPrepareFillParams {
 
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t stream);
 
+// The descriptor storage is prepared by the caller during full prepare. This
+// variant keeps one launch for an arbitrary bounded region count.
+void invokeCudaGraphPrepareFillRegions(const CudaGraphPrepareFillRegion* regions,
+                                       int32_t                           region_count,
+                                       cudaStream_t                      stream);
+
 void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          const int32_t* block_ids,
                                          int32_t*       batch_indice,

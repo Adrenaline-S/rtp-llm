@@ -601,7 +601,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
 
-        if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+        if (engine_->resourceContext().cache_manager->cacheConfig().usesMla()) {
             load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -725,7 +725,7 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
             ClientContext          client_context;
             BroadcastLoadRequestPB load_request;
 
-            if (engine_->resourceContext().cache_manager->cacheConfig().use_mla) {
+            if (engine_->resourceContext().cache_manager->cacheConfig().usesMla()) {
                 load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
             } else {
                 load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
@@ -785,10 +785,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla             = cache_config.use_mla;
+    const bool   use_mla             = cache_config.usesMla();
     const bool   use_hybrid          = cache_config.groupNums() > 1;
-    const bool   use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
-    const auto&  spec                = cache_config.groups().front().layout.spec;
+    const bool   use_opaque_kv_store = cache_config.usesOpaqueKVCacheStore();
+    const auto&  spec                = cache_config.groups().front().spec;
     const size_t k_total_bytes       = spec->k_block_size_bytes();
     const size_t v_total_bytes       = spec->v_block_size_bytes();
 
@@ -850,8 +850,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return CacheGroupType::FULL;
     };
     auto cpMapperForConfig = [&](const CacheConfig& cfg) {
-        return CPSlotMapper(
-            load_context.prefill_cp_size - 1, load_context.prefill_cp_size, static_cast<int>(cfg.seq_size_per_block));
+        return CPSlotMapper(load_context.prefill_cp_size - 1,
+                            load_context.prefill_cp_size,
+                            static_cast<int>(cfg.cacheKeyBlockTokens()));
     };
     auto groupUsesCpSlice = [&](const CacheConfig& cfg, const std::string& tag) {
         if (load_context.prefill_cp_size <= 1) {
@@ -889,9 +890,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (!is_page_level_rr || !groupUsesCpSlice(cfg, tag) || load_context.prefill_cp_size <= 1) {
             return false;
         }
-        const auto group_tokens = cfg.group(tag).layout.seq_size_per_block;
+        const auto group_tokens = cfg.group(tag).seq_size_per_block;
         return group_tokens > 0
-               && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
+               && group_tokens == cfg.cacheKeyBlockTokens() * static_cast<size_t>(load_context.prefill_cp_size);
     };
     auto blockPositionsForLoad = [&](size_t             block_num,
                                      const CacheConfig& cfg,
@@ -1063,14 +1064,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
                     const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
 
-                    RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,
+                    RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.mainLayerCount(),
                                             "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
-                                                + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
+                                                + " cache_cfg=" + std::to_string(mtp_cache_cfg.mainLayerCount())
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
-                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
+                        const bool mtp_use_opaque_kv_store = mtp_cache_cfg.usesOpaqueKVCacheStore();
 
                         // Same multi-group iteration as the main path.
                         const std::vector<std::string> mtp_layer_tags =
@@ -1124,7 +1125,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 }
                                 auto cache_key = makeCacheKey(
                                     model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
-                                const bool mtp_use_mla = mtp_cache_cfg.use_mla;
+                                const bool mtp_use_mla = mtp_cache_cfg.usesMla();
                                 const bool mtp_use_kv_key_prefix =
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
                                 const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
@@ -1360,7 +1361,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

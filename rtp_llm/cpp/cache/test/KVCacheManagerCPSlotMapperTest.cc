@@ -28,6 +28,10 @@ static CacheConfig makeTestConfig(int block_num = 20, int seq_size_per_block = 4
         /*size_per_head=*/16);
 }
 
+static CacheConfig makeWarmupTestConfig(int seq_size_per_block = 4) {
+    return makeTestConfig(/*block_num=*/1, seq_size_per_block);
+}
+
 static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_size) {
     auto  ids       = std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_len + 100, block_size);
     auto  input_ids = torch::empty({(int64_t)seq_len}, torch::kInt32);
@@ -58,7 +62,7 @@ protected:
 
 // When kv_cache_sharded is false (default), cpSlotMapper() should return nullptr.
 TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
-    auto              config = makeTestConfig();
+    auto              config = makeWarmupTestConfig();
     ParallelismConfig par;
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
@@ -75,7 +79,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
 
 // When tp_size == 1, cpSlotMapper() should return nullptr even if kv_cache_sharded is true.
 TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
-    auto              config = makeTestConfig();
+    auto              config = makeWarmupTestConfig();
     ParallelismConfig par;
     par.tp_rank                            = 0;
     par.tp_size                            = 1;
@@ -93,7 +97,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
 // When kv_cache_sharded is true and tp_size > 1, cpSlotMapper() should return a valid mapper.
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 1;
@@ -117,7 +121,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
 
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -149,7 +153,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     MallocInfo info{resource, token_ids};
     auto       cp_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
     mgr->cp_slot_mapper_ = cp_mapper;
-    mgr->allocator_->setCPSlotMapper(cp_mapper);
+    mgr->coordinator_cache_manager_->setCPSlotMapper(cp_mapper);
 
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
@@ -169,7 +173,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
 // execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCount) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -200,7 +204,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
 // execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBlocks) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -225,12 +229,12 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     EXPECT_EQ(resource->blocksNum(0, kDefaultTag), 4);
 }
 
-// Allocator-level cp_slot_mapper should drive malloc sharding.
+// Coordinator-level cp_slot_mapper should drive malloc sharding.
 // DISABLED: needs multi-rank NCCL harness (KVCacheManager::allocateAndSync calls
 // execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
+TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_CoordinatorMapperControlsMalloc) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -253,7 +257,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
 
     MallocInfo info{resource, token_ids};
     mgr->cp_slot_mapper_ = explicit_mapper;
-    mgr->allocator_->setCPSlotMapper(explicit_mapper);
+    mgr->coordinator_cache_manager_->setCPSlotMapper(explicit_mapper);
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 

@@ -34,7 +34,7 @@ public:
                       int                     layer_num,
                       int64_t                 block_nums,
                       const FMHAConfig&       fmha_config);
-    bool support(torch_ext::PyAttentionInputs attn_inputs);
+    bool support() const;
 
     CKAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
     forward_param

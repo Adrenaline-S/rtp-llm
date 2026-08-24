@@ -53,8 +53,13 @@ std::string GptModelInputs::debugString(bool force) const {
     if (last_hidden_states.defined()) {
         debug_string << ", last_hidden_states: " << tb(last_hidden_states);
     }
-    if (!kv_cache_group_tags.empty()) {
-        debug_string << ", kv_cache_group_tags: " << combineStrings(kv_cache_group_tags);
+    if (kv_cache_block_table_plan.groupCount() != 0) {
+        std::vector<std::string> cache_group_tags;
+        cache_group_tags.reserve(kv_cache_block_table_plan.groupCount());
+        for (uint32_t ordinal = 0; ordinal < kv_cache_block_table_plan.groupCount(); ++ordinal) {
+            cache_group_tags.push_back(kv_cache_block_table_plan.group(ordinal).tag);
+        }
+        debug_string << ", kv_cache_group_tags: " << combineStrings(cache_group_tags);
     }
     if (kv_cache_kernel_block_id.defined()) {
         debug_string << ", kv_cache_kernel_block_id: " << tb(kv_cache_kernel_block_id);

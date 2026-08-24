@@ -4,18 +4,19 @@
 #include <vector>
 #include <cstdint>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 
 namespace rtp_llm {
 
-class LinearKVCacheGroup: public KVCacheGroup {
+class LinearCacheManager: public SingleTypeCacheManager {
 public:
-    LinearKVCacheGroup(const CacheGroup&                   cache_group,
+    LinearCacheManager(const CacheGroup&                   cache_group,
                        BlockPoolPtr                        block_pool,
                        int                                 linear_step      = 0,
                        SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(cache_group, std::move(block_pool), shared_cache, metrics_reporter), linear_step_(linear_step) {}
+        SingleTypeCacheManager(cache_group, std::move(block_pool), shared_cache, metrics_reporter),
+        linear_step_(linear_step) {}
 
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
     bool        malloc(GroupBlockToPoolBlockBinding& binding,
@@ -61,6 +62,6 @@ private:
     int linear_step_ = 0;
 };
 
-using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;
+using LinearCacheManagerPtr = std::shared_ptr<LinearCacheManager>;
 
 }  // namespace rtp_llm

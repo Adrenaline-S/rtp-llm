@@ -13,7 +13,7 @@ namespace rtp_llm {
 class XQAAttnOp {
 public:
     XQAAttnOp(const AttentionConfigs& attn_configs);
-    bool support(torch_ext::PyAttentionInputs attn_inputs);
+    bool support() const;
 
     ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 

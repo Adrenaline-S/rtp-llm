@@ -40,8 +40,8 @@ from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
     update_decode_metadata_in_place,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    as_attention_inputs_by_tag,
     primary_attention_inputs,
+    select_cache_group_attn_inputs,
 )
 
 
@@ -60,20 +60,16 @@ class DSv4DecodeFmhaImplConfig:
 
     # Phase 2 paged-decode wiring. When provided, the impl pre-allocates
     # per-tag block_table + slot_mapping buffers in the metadata and
-    # ``prepare`` populates them from the per-tag
-    # ``attn_inputs[tag].kv_cache_kernel_block_id_device``.
+    # ``prepare`` populates them from ordinal-indexed group alias views.
     #
     # ``paged_pool_specs[tag] =
     # (entries_per_block, tokens_per_block, max_blocks_per_req)``.
     # If empty, the legacy register_buffer-only path is used.
     paged_pool_specs: Dict[str, Tuple[int, int, int]] = field(default_factory=dict)
 
-    # Snapshot of ``kv_cache.group_tags`` (framework-owned group ordering, one
-    # cache tag per entry). Kept so ``prepare`` can key a single-group
-    # ``PyAttentionInputs`` without a live ``kv_cache`` (the CUDA-graph replay
-    # path doesn't hand one in). Static for the allocator's lifetime, so
-    # snapshot-at-construct is safe.
-    group_tags: List[str] = field(default_factory=list)
+    # Cold-bound semantic identity -> dense execution ordinal. Graph replay
+    # indexes group views directly and never rediscovers this relation.
+    group_bindings: Tuple[str, ...] = field(default_factory=tuple)
 
 
 class DSv4DecodeFmhaImpl:
@@ -133,11 +129,9 @@ class DSv4DecodeFmhaImpl:
         Then update the persistent metadata in place, including paged
         block_table snapshot when configured.
 
-        ``attn_inputs`` is whatever the caller holds in
-        ``PyModelInputs.attention_inputs``: a single ``PyAttentionInputs`` or
-        the ``{tag: PyAttentionInputs}`` mapping. C++
-        ``callPrepareCudaGraph`` hands the mapping straight to
-        ``prepare_cuda_graph`` for a non-dict impl like this one.
+        ``attn_inputs`` is either the common ``PyAttentionInputs`` during
+        metadata-only setup or the complete ``PyModelInputs`` during graph
+        replay, where its dense group views supply paged tables.
         """
         attn = primary_attention_inputs(attn_inputs)
         if attn is None:
@@ -154,15 +148,13 @@ class DSv4DecodeFmhaImpl:
         max_s = self.config.max_seq_len
         start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
 
-        # Phase 2: pull per-tag block_tables straight off the tagged attention
-        # inputs. Empty paged_pool_specs ⇒ skip (legacy path).
+        # DSV4's metadata API requires a tag-keyed dictionary, so translate
+        # the tag-keyed attention inputs here. Empty paged_pool_specs ⇒ skip.
         paged_block_tables: Optional[Dict[str, torch.Tensor]] = None
         if self._paged_entries_per_block:
-            by_tag = as_attention_inputs_by_tag(attn_inputs)
-            if len(by_tag) == 1 and len(self.config.group_tags) == 1:
-                # Single-group cache: C++ collapses the mapping to a bare
-                # PyAttentionInputs, so re-key with the snapshotted tag.
-                by_tag = {self.config.group_tags[0]: next(iter(by_tag.values()))}
+            by_tag = select_cache_group_attn_inputs(
+                attn_inputs, self.config.group_bindings
+            )
             paged_block_tables = {}
             for tag, tagged_inputs in by_tag.items():
                 if tag not in self.config.paged_pool_specs:

@@ -2,17 +2,17 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 
 namespace rtp_llm {
 
-class FullKVCacheGroup: public KVCacheGroup {
+class FullCacheManager: public SingleTypeCacheManager {
 public:
-    FullKVCacheGroup(const CacheGroup&                   cache_group,
+    FullCacheManager(const CacheGroup&                   cache_group,
                      BlockPoolPtr                        block_pool,
                      SharedBlockCache*                   shared_cache     = nullptr,
                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(cache_group, std::move(block_pool), shared_cache, metrics_reporter) {}
+        SingleTypeCacheManager(cache_group, std::move(block_pool), shared_cache, metrics_reporter) {}
 
     bool        malloc(GroupBlockToPoolBlockBinding& binding,
                        int                           seq_len,

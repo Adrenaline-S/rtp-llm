@@ -21,13 +21,14 @@ void KVCacheResource::initGroups(const CacheConfig& config) {
                                 group.tag.c_str());
     }
 
-    const auto& layers = config.layerMemberships();
+    const auto& layers = config.layers();
     layer_group_tags_.reserve(layers.size());
-    for (const auto& layer : layers) {
-        for (const auto& tag : layer.group_tags) {
-            config.groupForLayer(layer.layer_id, tag);
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
+        const auto& layer = layers[layer_id];
+        for (const auto& tag : layer) {
+            config.groupForLayer(static_cast<int>(layer_id), tag);
         }
-        layer_group_tags_.push_back(layer.group_tags);
+        layer_group_tags_.push_back(layer);
     }
 }
 

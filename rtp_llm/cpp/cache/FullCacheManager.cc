@@ -1,14 +1,14 @@
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+int FullCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     const int block_size = seqSizePerBlock();
     return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
 }
 
-int FullKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
+int FullCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                              const BlockIndicesType& current_block_indices,
                                              int                     remaining_tokens,
                                              int                     reserve_step,
@@ -19,7 +19,7 @@ int FullKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
         (seq_len + remaining_tokens + reserve_step + seqSizePerBlock() - 1) / seqSizePerBlock() - current_blocks, 0);
 }
 
-int FullKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
+int FullCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                          int  common_seq_len,
                                                          int  remaining_tokens,
                                                          int  reserve_step,
@@ -32,7 +32,7 @@ int FullKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
     return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
 }
 
-NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
+NeedBlocksInfo FullCacheManager::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     NeedBlocksInfo info;
     const int      common_slots        = needBlocksNum(common_seq_len, /*current_blocks=*/0);
@@ -43,7 +43,7 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(GroupBlockToPoolBlockBinding& binding,
+bool FullCacheManager::malloc(GroupBlockToPoolBlockBinding& binding,
                               int                           seq_len,
                               bool                          enable_reuse_cache,
                               int                           reserve_step,
@@ -75,7 +75,7 @@ bool FullKVCacheGroup::malloc(GroupBlockToPoolBlockBinding& binding,
     return true;
 }
 
-MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const {
+MatchResult FullCacheManager::matchPrefix(const CacheKeysType& cache_keys) const {
     MatchResult final_result;
 
     if (!shared_cache_) {
@@ -96,13 +96,13 @@ MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const
     return final_result;
 }
 
-void FullKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
+void FullCacheManager::insertIntoCache(const CacheKeysType&    cache_keys,
                                        const BlockIndicesType& block_indices,
                                        bool                    is_resident) {
-    KVCacheGroup::insertIntoCache(cache_keys, block_indices, is_resident);
+    SingleTypeCacheManager::insertIntoCache(cache_keys, block_indices, is_resident);
 }
 
-void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
+void FullCacheManager::free(const BlockIndicesType& block_indices) {
     if (block_indices.empty()) {
         return;
     }
@@ -111,7 +111,7 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
-void FullKVCacheGroup::reference(GroupBlockToPoolBlockBinding& binding, const BlockIndicesType& new_block_indices) {
+void FullCacheManager::reference(GroupBlockToPoolBlockBinding& binding, const BlockIndicesType& new_block_indices) {
     for (const auto block_idx : new_block_indices) {
         RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(block_idx), "FULL reference cannot append a missing pool block");
         binding.append(PoolBlockId{block_idx});
@@ -119,7 +119,7 @@ void FullKVCacheGroup::reference(GroupBlockToPoolBlockBinding& binding, const Bl
     block_pool_->requestReference(new_block_indices);
 }
 
-void FullKVCacheGroup::removeSkippedBlocks(GroupBlockToPoolBlockBinding& /*binding*/,
+void FullCacheManager::removeSkippedBlocks(GroupBlockToPoolBlockBinding& /*binding*/,
                                            bool /*enable_reuse_cache*/,
                                            int /*reserve_step*/) {}
 

@@ -284,7 +284,9 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
             cache_dtype=cache_dtype,
         )
         impl = PyFlashinferHybridPrefillImpl(
-            config.attn_configs, attn_inputs, config.parallelism_config
+            config.attn_configs,
+            attn_inputs,
+            config.parallelism_config,
         )
         self.assertFalse(impl.support_cuda_graph())
 

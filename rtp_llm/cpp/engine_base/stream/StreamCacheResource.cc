@@ -24,16 +24,19 @@ namespace {
 const CacheConfig& warmupCacheConfig() {
     static const auto config = []() {
         constexpr auto kWarmupCacheTag = "__warmup__";
-        auto           spec            = std::make_shared<MHAKVCacheSpec>();
-
-        CacheGroup group;
-        group.tag                              = kWarmupCacheTag;
-        group.layout.spec                      = std::move(spec);
-        group.policy                           = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                        = {0};
-        group.layout.seq_size_per_block        = 1;
-        group.layout.kernel_seq_size_per_block = 1;
-        return CacheConfigCreator::buildResolvedConfig({{std::move(group)}, {{0, {kWarmupCacheTag}}}});
+        ModelConfig    model_config;
+        model_config.num_layers                   = 1;
+        model_config.data_type                    = DataType::TYPE_FP16;
+        model_config.attn_config.head_num         = 1;
+        model_config.attn_config.kv_head_num      = 1;
+        model_config.attn_config.size_per_head    = 1;
+        model_config.attn_config.tokens_per_block = 1;
+        KVCacheSpecDesc desc;
+        desc.tag                         = kWarmupCacheTag;
+        desc.cache_type                  = KVCacheSpecType::MultiHeadAttention;
+        model_config.kv_cache_spec_descs = {{std::move(desc)}};
+        return CacheConfigCreator::createDecodeWarmupConfig(
+            model_config, ParallelismConfig{}, KVCacheConfig{}, /*gen_num_per_cycle=*/0);
     }();
     return config;
 }
@@ -572,7 +575,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     const bool disable_first_malloc_reuse =
-        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
+        resource_context_.cache_manager->cacheConfig().disablesDecodeFirstMallocDeviceReuse();
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 

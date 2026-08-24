@@ -151,10 +151,12 @@ class SparseMlaRoutingTest(TestCase):
 
     @staticmethod
     def _attention_inputs(tag: str):
+        block_table = torch.tensor([[3]], dtype=torch.int32)
         return SimpleNamespace(
             is_prefill=True,
             cache_store_inputs=SimpleNamespace(tag=tag),
             cache_store_writer=Mock(),
+            kv_cache_block_id=block_table,
         )
 
     def test_sparse_forward_routes_exact_caches_independent_of_order(self):
@@ -193,7 +195,9 @@ class SparseMlaRoutingTest(TestCase):
         self.assertIs(indexer_args[3], indexer_impl.fmha_params)
         self.assertIs(indexer_args[4], indexer_inputs)
         indexer_inputs.cache_store_writer.write.assert_called_once_with(
-            indexer_inputs.cache_store_inputs, self.indexer_cache
+            indexer_inputs.cache_store_inputs,
+            self.indexer_cache,
+            indexer_inputs.kv_cache_block_id,
         )
 
     def test_sparse_forward_rejects_missing_extra_and_wrong_routes(self):

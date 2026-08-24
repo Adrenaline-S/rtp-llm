@@ -19,18 +19,18 @@ CacheGroup makeResourceGroup(std::string tag, CacheGroupType type) {
     spec->seq_size_per_block = 8;
 
     CacheGroup group;
-    group.tag                              = std::move(tag);
-    group.layout.spec                      = std::move(spec);
-    group.policy                           = defaultCacheGroupPolicy(type);
-    group.layer_ids                        = {0};
-    group.layout.block_num                 = 16;
-    group.layout.seq_size_per_block        = 8;
-    group.layout.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    group.tag                       = std::move(tag);
+    group.spec                      = std::move(spec);
+    group.policy                    = defaultCacheGroupPolicy(type);
+    group.layer_ids                 = {0};
+    group.block_num                 = 16;
+    group.seq_size_per_block        = 8;
+    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
     return group;
 }
 
-CacheConfig makeResourceConfig(std::vector<CacheGroup> groups, std::vector<CacheLayerMembership> layers) {
-    return TestCacheConfigBuilder::withResolvedData({}, std::move(groups), std::move(layers));
+CacheConfig makeResourceConfig(std::vector<CacheGroup> groups, std::vector<CacheLayer> layers) {
+    return TestCacheConfigBuilder().setTopology(std::move(groups), std::move(layers)).build();
 }
 
 }  // namespace
@@ -76,7 +76,7 @@ TEST(KVCacheResourceTest, TagAccessKeepsSameLayerGroupsIndependent) {
     KVCacheResource resource;
     auto            config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
-        {{0, {"full", "linear"}}});
+        {{"full", "linear"}});
     resource.initGroups(config);
 
     resource.mutableBlockBindingForLayer(0, "full").append(poolBlockSnapshotForTest(BlockIndicesType{1, 2}));
@@ -90,7 +90,7 @@ TEST(KVCacheResourceTest, TagAccessKeepsSameLayerGroupsIndependent) {
 TEST(KVCacheResourceTest, BlocksByTagOwnsOneBlockTablePerTag) {
     auto linear = makeResourceGroup("linear", CacheGroupType::LINEAR);
     auto full   = makeResourceGroup("full", CacheGroupType::FULL);
-    auto config = makeResourceConfig({std::move(linear), std::move(full)}, {{0, {"full", "linear"}}});
+    auto config = makeResourceConfig({std::move(linear), std::move(full)}, {{"full", "linear"}});
 
     KVCacheResource resource;
     resource.initGroups(config);
@@ -112,7 +112,7 @@ TEST(KVCacheResourceTest, BlocksByTagOwnsOneBlockTablePerTag) {
 TEST(BatchKVCacheResourceTest, CheckValidatesEveryTagAcrossBatches) {
     auto config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
-        {{0, {"full", "linear"}}});
+        {{"full", "linear"}});
 
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
@@ -128,7 +128,7 @@ TEST(BatchKVCacheResourceTest, CheckValidatesEveryTagAcrossBatches) {
 TEST(BatchKVCacheResourceTest, CheckAllowsDifferentBlockCountsBetweenTags) {
     auto config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
-        {{0, {"full", "linear"}}});
+        {{"full", "linear"}});
 
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
@@ -144,10 +144,10 @@ TEST(BatchKVCacheResourceTest, CheckAllowsDifferentBlockCountsBetweenTags) {
 TEST(BatchKVCacheResourceTest, CheckRejectsDifferentTagSetsWithTheSameSize) {
     auto expected_config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
-        {{0, {"full", "linear"}}});
+        {{"full", "linear"}});
     auto different_config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("state", CacheGroupType::LINEAR)},
-        {{0, {"full", "state"}}});
+        {{"full", "state"}});
 
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
@@ -167,7 +167,7 @@ TEST(BatchKVCacheResourceTest, CheckRejectsDifferentTagSetsWithTheSameSize) {
 TEST(KVCacheResourceTest, UnknownTagIsRejectedWithoutMutatingStorage) {
     auto config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
-        {{0, {"full", "linear"}}});
+        {{"full", "linear"}});
 
     KVCacheResource missing;
     missing.initGroups(config);
@@ -180,7 +180,7 @@ TEST(KVCacheResourceTest, UnknownTagIsRejectedWithoutMutatingStorage) {
 TEST(KVCacheResourceTest, OwnsOnlyPerTagGroupPositionToPoolBlockBindings) {
     auto config = makeResourceConfig(
         {makeResourceGroup("full", CacheGroupType::FULL), makeResourceGroup("linear", CacheGroupType::LINEAR)},
-        {{0, {"full", "linear"}}});
+        {{"full", "linear"}});
 
     KVCacheResource resource;
     resource.initGroups(config);
@@ -195,7 +195,7 @@ TEST(KVCacheResourceTest, OwnsOnlyPerTagGroupPositionToPoolBlockBindings) {
 TEST(KVCacheResourceTest, TaggedStorageHasOneRecordPerConfigGroupNotPerLayer) {
     auto full      = makeResourceGroup("full", CacheGroupType::FULL);
     full.layer_ids = {0, 1, 2};
-    auto config    = makeResourceConfig({std::move(full)}, {{0, {"full"}}, {1, {"full"}}, {2, {"full"}}});
+    auto config    = makeResourceConfig({std::move(full)}, {{"full"}, {"full"}, {"full"}});
 
     KVCacheResource resource;
     resource.initGroups(config);
@@ -287,17 +287,6 @@ TEST(KVCacheResourceTest, AppendPopAndClearKeepTimelineAligned) {
     EXPECT_TRUE(resource.blockDependencies().empty());
 }
 
-TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
-    CacheConfig config;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 0;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 1u);
-
-    config.seq_size_per_block        = 8;
-    config.kernel_seq_size_per_block = 2;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 4u);
-}
-
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
@@ -356,7 +345,7 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
 }
 
 TEST(BatchKVCacheResourceTest, CopyOwnsTagMappedBlocksWhileMoveAndTimelineStateStayIntact) {
-    auto config = makeResourceConfig({makeResourceGroup("full", CacheGroupType::FULL)}, {{0, {"full"}}});
+    auto config = makeResourceConfig({makeResourceGroup("full", CacheGroupType::FULL)}, {{"full"}});
 
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);

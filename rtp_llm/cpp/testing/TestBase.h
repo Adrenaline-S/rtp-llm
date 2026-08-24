@@ -193,7 +193,7 @@ protected:
 
         auto max_seq_len                    = *std::max_element(input_lengths.begin(), input_lengths.end());
         max_seq_len                         = (max_seq_len == 0) ? 1 : max_seq_len;
-        const auto tokensPerBlock           = cache_config.seq_size_per_block;
+        const auto tokensPerBlock           = cache_config.cacheKeyBlockTokens();
         const auto batch_layer_kv_block_num = need_padding ? ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock) + 1 :
                                                              ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock);
         const auto batch_size               = input_lengths.size();
@@ -236,23 +236,24 @@ protected:
                 // [layernum, batch, 2, max_pad_seq, dim]
                 auto        max_pad_seq    = kvCache.sizes()[3];
                 auto        k_indexs       = indices;
-                const auto  max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
+                const auto  max_k_blocks   = max_pad_seq / cache_config.cacheKeyBlockTokens();
                 const auto  blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
                 const auto& sole_group     = cache_config.groups().front();
-                const auto  spec           = sole_group.layout.spec;
+                const auto  spec           = sole_group.spec;
                 const auto  local_kv_heads = cache_config.localKvHeadNum(sole_group.tag);
                 RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "local_head_num_kv must be positive");
-                const auto elems_per_kv_block   = spec->k_block_size();
-                const auto elems_per_head_block = static_cast<size_t>(local_kv_heads) * cache_config.seq_size_per_block;
+                const auto elems_per_kv_block = spec->k_block_size();
+                const auto elems_per_head_block =
+                    static_cast<size_t>(local_kv_heads) * cache_config.cacheKeyBlockTokens();
                 RTP_LLM_CHECK_WITH_INFO(elems_per_head_block > 0 && elems_per_kv_block % elems_per_head_block == 0,
                                         "invalid KV block layout: k_block_elems=%zu local_head_num_kv=%u seq=%zu",
                                         elems_per_kv_block,
                                         local_kv_heads,
-                                        static_cast<size_t>(cache_config.seq_size_per_block));
+                                        cache_config.cacheKeyBlockTokens());
                 const auto size_per_head = elems_per_kv_block / elems_per_head_block;
                 for (size_t k = 0; k < blocks_to_fill; ++k) {
-                    auto          block_start = k * cache_config.seq_size_per_block;
-                    auto          block_end   = block_start + cache_config.seq_size_per_block;
+                    auto          block_start = k * cache_config.cacheKeyBlockTokens();
+                    auto          block_end   = block_start + cache_config.cacheKeyBlockTokens();
                     torch::Tensor kblock, vblock;
                     if (need_padding) {
                         kblock = kvCache
@@ -278,7 +279,7 @@ protected:
                                         torch::indexing::Slice(block_start, block_end),
                                         torch::indexing::Slice()})
                                 .reshape(std::vector<int64_t>{2,
-                                                              static_cast<int64_t>(cache_config.seq_size_per_block),
+                                                              static_cast<int64_t>(cache_config.cacheKeyBlockTokens()),
                                                               static_cast<int64_t>(local_kv_heads),
                                                               static_cast<int64_t>(size_per_head)})
                                 .transpose(2, 1)
@@ -291,7 +292,7 @@ protected:
                                         1,
                                         torch::indexing::Slice(block_start, block_end),
                                         torch::indexing::Slice()})
-                                .reshape(std::vector<int64_t>{static_cast<int64_t>(cache_config.seq_size_per_block),
+                                .reshape(std::vector<int64_t>{static_cast<int64_t>(cache_config.cacheKeyBlockTokens()),
                                                               static_cast<int64_t>(local_kv_heads),
                                                               static_cast<int64_t>(size_per_head)})
                                 .transpose(1, 0)

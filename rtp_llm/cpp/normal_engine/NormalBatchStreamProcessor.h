@@ -34,8 +34,10 @@ public:
     // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
     // Read-only over streams: no stream->step() and no other fields.
     // Empty input returns an undefined tensor.
-    virtual absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                     TensorHolder&       host_holder) const;
+    virtual absl::StatusOr<PackedBlockTableSnapshot> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                                                TensorHolder&       host_holder,
+                                                                                bool include_pool_tables = false) const;
+    virtual CacheBlockTablePackingPlan               blockTablePackingPlan(const StreamGroups& stream_groups) const;
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,

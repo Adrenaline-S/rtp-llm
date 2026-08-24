@@ -7,6 +7,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import torch
@@ -165,7 +166,10 @@ class CudaGraphTestModelBuilder:
         # Initialize KV cache if requested
         if init_kv_cache:
             self._init_kv_cache(result, py_model_config)
-            model.kv_cache = result.kv_cache
+            # Standalone graph tests bypass the production C++ initializer.
+            # Invoke the common initialization boundary explicitly so cache
+            # group execution ordinals are cold-bound before the hot path.
+            GptModelBase.initialize(model, SimpleNamespace(kv_cache=result.kv_cache))
 
         return result
 

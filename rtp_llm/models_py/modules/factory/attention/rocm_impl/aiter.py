@@ -166,9 +166,7 @@ class FMHAParams(ParamsBase):
 
             self.max_seqlen_q = self.max_seq_len
             self.seq_lens = None
-            self.kv_cache_block_id_device = getattr(
-                attn_inputs, "kv_cache_kernel_block_id_device", None
-            )
+            self.kv_cache_block_id_device = attn_inputs.kv_cache_kernel_block_id_device
             self.prefix_lengths = prefix_lengths
             self.token_q_num = input_lengths.sum().item()
             self.token_kv_num = kv_lengths.sum().item()
@@ -179,12 +177,8 @@ class FMHAParams(ParamsBase):
         else:
             input_lengths = attn_inputs.input_lengths
             sequence_lengths = getattr(attn_inputs, "sequence_lengths", None)
-            kv_cache_block_id_device = getattr(
-                attn_inputs, "kv_cache_kernel_block_id_device", None
-            )
-
             self.sequence_lengths = sequence_lengths
-            self.kv_cache_block_id_device = kv_cache_block_id_device
+            self.kv_cache_block_id_device = attn_inputs.kv_cache_kernel_block_id_device
 
             if (
                 self.enable_cuda_graph
@@ -796,13 +790,11 @@ class AiterPrefillAttnOpPaged:
         return fmha_params
 
     def prepare_cuda_graph(
-        self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs
+        self,
+        fmha_params: FMHAParams,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
-        graph_block_table = getattr(
-            attn_inputs, "kv_cache_kernel_block_id_device", None
-        )
-        if graph_block_table is None:
-            graph_block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+        graph_block_table = attn_inputs.kv_cache_kernel_block_id_device
         self.graph_device = _infer_cuda_graph_device(
             attn_inputs, fmha_params, graph_block_table
         )
@@ -1119,9 +1111,7 @@ class AiterPrefillAttnOpTriton:
         )
 
         if self.enable_cuda_graph:
-            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-            if block_table is None:
-                block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            block_table = attn_inputs.kv_cache_kernel_block_id_device
             graph_device = _infer_cuda_graph_device(
                 attn_inputs, fmha_params, block_table
             )
@@ -1781,7 +1771,9 @@ class AiterPrefillImplPaged(FMHAImplBase):
             dst[src.numel() :].fill_(int(pad_value.item()))
 
     def _refresh_prefill_fmha_params_for_cuda_graph(
-        self, fmha_params: Any, attn_inputs: PyAttentionInputs
+        self,
+        fmha_params: Any,
+        attn_inputs: PyAttentionInputs,
     ) -> None:
         """Refresh graph-captured prefill metadata in-place.
 
@@ -1881,9 +1873,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
                 f"replay={fmha_params.token_q_num}"
             )
 
-        kv_block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-        if kv_block_id is None:
-            kv_block_id = getattr(attn_inputs, "kv_cache_block_id_device", None)
+        kv_block_id = attn_inputs.kv_cache_kernel_block_id_device
         if kv_block_id is None:
             raise ValueError(
                 "Aiter prefill CUDA graph replay requires kv cache block ids"
@@ -1897,7 +1887,8 @@ class AiterPrefillImplPaged(FMHAImplBase):
             if self.triton_fmha_params is None:
                 raise RuntimeError("Triton graph backend was not prepared at capture")
             self._refresh_prefill_fmha_params_for_cuda_graph(
-                self.triton_fmha_params, attn_inputs
+                self.triton_fmha_params,
+                attn_inputs,
             )
             self.triton_prefill_impl.prepare_cuda_graph(
                 self.triton_fmha_params, attn_inputs
@@ -1906,7 +1897,8 @@ class AiterPrefillImplPaged(FMHAImplBase):
             if self.fmha_params is None:
                 raise RuntimeError("Batch graph backend was not prepared at capture")
             self._refresh_prefill_fmha_params_for_cuda_graph(
-                self.fmha_params, attn_inputs
+                self.fmha_params,
+                attn_inputs,
             )
             self.batch_prefill_impl.prepare_cuda_graph(self.fmha_params, attn_inputs)
         else:

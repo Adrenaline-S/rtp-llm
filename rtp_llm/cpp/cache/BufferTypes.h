@@ -77,9 +77,9 @@ public:
                                 "GroupedCacheLayerLayout group count=%zu config count=%zu",
                                 groups_.size(),
                                 config.groups().size());
-        layer_group_tags_.reserve(config.layerMemberships().size());
-        for (const auto& layer : config.layerMemberships()) {
-            layer_group_tags_.push_back(layer.group_tags);
+        layer_group_tags_.reserve(config.layers().size());
+        for (const auto& layer : config.layers()) {
+            layer_group_tags_.push_back(layer);
         }
         for (const auto& group_config : config.groups()) {
             const auto it = groups_.find(group_config.tag);
@@ -90,9 +90,49 @@ public:
                                     group_config.tag.c_str(),
                                     it->second.size(),
                                     layer_group_tags_.size());
-            group_layouts_.emplace(group_config.tag, group_config.layout);
+            group_configs_.emplace(group_config.tag, group_config);
             group_types_.emplace(group_config.tag, group_config.policy.group_type);
         }
+    }
+
+    // Builds a local-layer execution view over buffers owned by a sealed root
+    // configuration. The target config supplies local group membership while
+    // global_layer_ids selects the corresponding backing buffers.
+    static GroupedCacheLayerLayout project(const GroupedCacheLayerLayout& source,
+                                           const CacheConfig&             target_config,
+                                           const std::vector<size_t>&     global_layer_ids) {
+        RTP_LLM_CHECK_WITH_INFO(target_config.mainLayerCount() == global_layer_ids.size(),
+                                "cache layout projection config layers=%u mapping size=%zu",
+                                target_config.mainLayerCount(),
+                                global_layer_ids.size());
+
+        GroupedCacheLayerLayout result;
+        result.layer_group_tags_.reserve(global_layer_ids.size());
+        for (size_t local = 0; local < global_layer_ids.size(); ++local) {
+            result.layer_group_tags_.push_back(target_config.groupTagsForLayer(static_cast<int>(local)));
+        }
+
+        for (const auto& target_group : target_config.groups()) {
+            CacheGroup local_group = target_group;
+            local_group.layer_ids.clear();
+            std::vector<BlockBufferPtrInfo> layers(global_layer_ids.size());
+            const auto&                     source_group = source.group(target_group.tag);
+            for (size_t local = 0; local < global_layer_ids.size(); ++local) {
+                const auto& tags = result.layer_group_tags_[local];
+                if (std::find(tags.begin(), tags.end(), target_group.tag) == tags.end()) {
+                    continue;
+                }
+                local_group.layer_ids.push_back(static_cast<int>(local));
+                const auto global = global_layer_ids[local];
+                if (source_group.hasLayer(global)) {
+                    layers[local] = source_group.at(global);
+                }
+            }
+            result.groups_.emplace(target_group.tag, CacheLayerLayout(std::move(layers)));
+            result.group_configs_.emplace(target_group.tag, std::move(local_group));
+            result.group_types_.emplace(target_group.tag, target_group.policy.group_type);
+        }
+        return result;
     }
 
     const CacheLayerLayout& group(std::string_view tag) const {
@@ -145,12 +185,11 @@ public:
         return layer_group_tags_.size();
     }
 
-    const CacheGroupLayout& groupLayout(std::string_view tag) const {
+    const CacheGroup& groupConfig(std::string_view tag) const {
         const std::string value(tag);
-        const auto        it = group_layouts_.find(value);
-        RTP_LLM_CHECK_WITH_INFO(it != group_layouts_.end(),
-                                "GroupedCacheLayerLayout missing group layout tag=%s",
-                                value.c_str());
+        const auto        it = group_configs_.find(value);
+        RTP_LLM_CHECK_WITH_INFO(
+            it != group_configs_.end(), "GroupedCacheLayerLayout missing group config tag=%s", value.c_str());
         return it->second;
     }
 
@@ -163,10 +202,10 @@ public:
     }
 
 private:
-    GroupLayouts                            groups_;
-    std::map<std::string, CacheGroupLayout> group_layouts_;
-    std::map<std::string, CacheGroupType>   group_types_;
-    std::vector<std::vector<std::string>>    layer_group_tags_;
+    GroupLayouts                          groups_;
+    std::map<std::string, CacheGroup>     group_configs_;
+    std::map<std::string, CacheGroupType> group_types_;
+    std::vector<std::vector<std::string>> layer_group_tags_;
 };
 
 struct KVCacheBuffer {

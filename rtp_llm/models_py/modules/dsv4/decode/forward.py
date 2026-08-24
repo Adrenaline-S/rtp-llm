@@ -19,7 +19,7 @@ decode impl.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import torch
 
@@ -176,18 +176,18 @@ def build_paged_pool_specs(
 
 def build_metadata_eager(
     v4_args: Any,
-    attn_inputs: Any,
+    model_inputs: Any,
     device: torch.device,
     paged_pool_specs: Dict[str, Tuple[int, int, int]],
+    cache_group_bindings: Sequence[str],
     kv_cache: Optional[Any] = None,
     fp8_kv_cache: bool = False,
 ) -> Optional[Any]:  # DSv4DecodeAttnMetadata | None
     """Build ``DSv4DecodeAttnMetadata`` inline from framework attn inputs.
 
-    ``attn_inputs`` is ``PyModelInputs.attention_inputs``: either a single
-    ``PyAttentionInputs`` or the ``{tag: PyAttentionInputs}`` mapping DSV4 gets
-    from the multi-group cache. Group-invariant fields are read off the primary
-    entry; block tables are collected per tag.
+    Group-invariant fields come from the single
+    ``PyModelInputs.attention_inputs`` object. Group tables come from dense
+    ordinal alias views and are translated to tags for the DSV4 backend.
 
     Only used on the eager path (``fmha_impl`` is None or not a
     ``DSv4DecodeFmhaImpl``). CUDA-graph capture has its own persistent
@@ -211,7 +211,7 @@ def build_metadata_eager(
     # MtpExecutor.cc:879-958) clears ``sequence_lengths`` and stashes the
     # prior decode positions into ``prefix_lengths``; ``input_lengths``
     # carries the uniform verify width = ``gen_num_per_cycle + 1``.
-    attn = primary_attention_inputs(attn_inputs, kv_cache)
+    attn = primary_attention_inputs(model_inputs, kv_cache)
     if attn is None:
         return None
     is_target_verify = bool(getattr(attn, "is_target_verify", False))
@@ -239,7 +239,7 @@ def build_metadata_eager(
         for tag, spec in paged_pool_specs.items():
             paged_tokens_per_block[tag] = int(spec[1])
         tagged_block_tables = build_block_tables_for_tags(
-            kv_cache, attn_inputs, paged_pool_specs.keys()
+            model_inputs, cache_group_bindings, paged_pool_specs.keys()
         )
         for tag, block_table in (tagged_block_tables or {}).items():
             paged_block_tables[tag] = block_table
@@ -380,6 +380,7 @@ def forward_decode(
     kv_cache: Optional[Any],
     v4_args: Any,
     inputs: Any,  # PyModelInputs
+    cache_group_bindings: Sequence[str],
     fmha_impl: Any = None,  # Optional[DSv4DecodeFmhaImpl]
     prepare_hidden_fn: Optional[Any] = None,
 ) -> Any:  # PyModelOutputs
@@ -422,9 +423,8 @@ def forward_decode(
     except ImportError:
         pass
 
-    # ``attention_inputs`` is a ``{tag: PyAttentionInputs}`` mapping for the
-    # multi-group DSV4 cache; keep the raw value for per-tag block-table
-    # lookups and derive the group-invariant view for scalar fields.
+    # Group routing remains on ``inputs`` for build_metadata_eager; derive the
+    # common attention input here for scalar fields.
     attn_inputs = inputs.attention_inputs
     attn = primary_attention_inputs(attn_inputs, kv_cache)
     # No nn.Parameter on V4Transformer anymore — pull device from a known-bound tensor.
@@ -445,9 +445,10 @@ def forward_decode(
         )
         meta = build_metadata_eager(
             v4_args,
-            attn_inputs,
+            inputs,
             param_dev,
             paged_specs,
+            cache_group_bindings,
             kv_cache=kv_cache,
             fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
         )

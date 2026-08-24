@@ -79,6 +79,10 @@ def _is_rocm() -> bool:
     return torch.cuda.is_available() and torch.version.hip is not None
 
 
+def _make_group_attn_inputs(attn_inputs):
+    return attn_inputs
+
+
 def _make_attn_configs(
     head_num: int, head_num_kv: int, head_dim: int, tokens_per_block: int = 16
 ):
@@ -725,7 +729,11 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         return inputs
 
     def _call_update(self, stub, attn_inputs):
-        stub._refresh_prefill_fmha_params_for_cuda_graph(stub.fmha_params, attn_inputs)
+        stub._refresh_prefill_fmha_params_for_cuda_graph(
+            stub.fmha_params,
+            attn_inputs,
+            attn_inputs.kv_cache_kernel_block_id_device,
+        )
 
     def test_rebuild_from_input_lengths_no_prefix(self):
         """Rebuild cu_seqlens from input_lengths, no prefix."""
@@ -857,7 +865,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         rope_impl = MagicMock()
         observed_pad_query = []
 
-        def prepare_rope(_):
+        def prepare_rope(_attn_inputs, _kv_cache_kernel_block_id_device):
             observed_pad_query.append(rope_impl.pad_query)
             return object()
 
@@ -869,9 +877,14 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             size_per_head=8,
             kernel_tokens_per_block=16,
         )
+        block_ids = torch.zeros(len(input_lengths), 4, dtype=torch.int32)
         attn_inputs = SimpleNamespace(
             is_cuda_graph=is_cuda_graph,
             input_lengths=torch.tensor(input_lengths, dtype=torch.int32),
+            kv_cache_block_id=block_ids,
+            kv_cache_block_id_device=block_ids,
+            kv_cache_kernel_block_id=block_ids,
+            kv_cache_kernel_block_id_device=block_ids,
         )
         module_path = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
         with patch(
@@ -883,7 +896,10 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         ), patch(
             f"{module_path}.common.create_write_cache_store_impl"
         ):
-            impl = AiterPrefillImplPaged(cfg, attn_inputs)
+            impl = AiterPrefillImplPaged(
+                cfg,
+                attn_inputs,
+            )
 
         return (
             impl,
@@ -909,12 +925,16 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
 
                 self.assertEqual(impl.backend, expected_backend)
                 if expected_backend == "triton":
-                    triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
+                    triton_impl.prepare.assert_called_once_with(
+                        impl.attn_inputs, impl.kv_cache_kernel_block_id_device
+                    )
                     batch_impl.prepare.assert_not_called()
                     self.assertIs(impl.triton_fmha_params, triton_params)
                     self.assertIsNone(impl.fmha_params)
                 else:
-                    batch_impl.prepare.assert_called_once_with(impl.attn_inputs)
+                    batch_impl.prepare.assert_called_once_with(
+                        impl.attn_inputs, impl.kv_cache_kernel_block_id_device
+                    )
                     triton_impl.prepare.assert_not_called()
                     self.assertIs(impl.fmha_params, batch_params)
                     self.assertIsNone(impl.triton_fmha_params)
@@ -925,7 +945,9 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         )
 
         batch_impl.prepare.assert_not_called()
-        triton_impl.prepare.assert_called_once_with(impl.attn_inputs)
+        triton_impl.prepare.assert_called_once_with(
+            impl.attn_inputs, impl.kv_cache_kernel_block_id_device
+        )
         self.assertIs(impl.triton_fmha_params, triton_params)
         self.assertIsNone(impl.fmha_params)
 
@@ -1020,18 +1042,24 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         calls = []
         fmha_params = object()
         triton_fmha_params = object()
-        attn_inputs = object()
+        block_ids = torch.zeros(2, 4, dtype=torch.int32)
+        attn_inputs = SimpleNamespace(
+            kv_cache_block_id=block_ids,
+            kv_cache_block_id_device=block_ids,
+            kv_cache_kernel_block_id=block_ids,
+            kv_cache_kernel_block_id_device=block_ids,
+        )
 
-        def prepare_batch(params, inputs):
+        def prepare_batch(params, inputs, _kv_cache_kernel_block_id_device):
             calls.append(("prepare_batch", params, inputs))
 
         def prepare_triton(params, inputs):
             calls.append(("prepare_triton", params, inputs))
 
-        def prepare_rope(inputs):
+        def prepare_rope(inputs, _kv_cache_kernel_block_id_device):
             calls.append(("prepare_rope", inputs))
 
-        def refresh(params, inputs):
+        def refresh(params, inputs, _kv_cache_kernel_block_id_device):
             calls.append(("refresh", params, inputs))
 
         stub = AiterPrefillImplPaged.__new__(AiterPrefillImplPaged)
@@ -1219,8 +1247,14 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
         # Replay refreshes metadata at the owning implementation layer before
         # the Triton operator derives its compact output indices.
         impl = AiterPrefillImplPaged.__new__(AiterPrefillImplPaged)
-        impl._refresh_prefill_fmha_params_for_cuda_graph(fmha_params, attn_inputs)
-        op.prepare_cuda_graph(fmha_params, attn_inputs)
+        impl._refresh_prefill_fmha_params_for_cuda_graph(
+            fmha_params, attn_inputs, attn_inputs.kv_cache_kernel_block_id_device
+        )
+        op.prepare_cuda_graph(
+            fmha_params,
+            attn_inputs,
+            attn_inputs.kv_cache_kernel_block_id_device,
+        )
 
         self.assertEqual(fmha_params.prefill_seqlen_k_int32.data_ptr(), prefill_ptr)
         self.assertEqual(fmha_params.cu_seqlens_q.cpu().tolist(), [0, 2, 3, 3])
@@ -1428,6 +1462,8 @@ class TestAiterPrefillTritonCudaGraphNumerics(unittest.TestCase):
         expected = eager_impl.forward(replay_qkv, eager_cache, layer_idx=0).clone()
 
         graph_cache = self._make_cache(cache_snapshot, kv_cache_dtype)
+        # Replay must reuse the capture-time view so the kernel keeps reading the
+        # same block-table storage that graph capture recorded.
         graph_impl = AiterPrefillImplPaged(cfg, capture_inputs)
         self.assertEqual(graph_impl.backend, "triton")
 
@@ -2459,7 +2495,7 @@ class TestAiterDecodeTritonNumerics(unittest.TestCase):
 
     def _make_shared_decode_inputs(
         self, sequence_lengths: List[int], block_table: torch.Tensor
-    ) -> PyAttentionInputs:
+    ):
         positions = torch.tensor(
             sequence_lengths, dtype=torch.int32, device=self.device
         )
@@ -2558,7 +2594,10 @@ class TestAiterDecodeTritonNumerics(unittest.TestCase):
         # The implementation writes the current K/V through the same writer and
         # then dispatches the one-token query to pa_decode_gluon.
         decode_inputs = self._make_shared_decode_inputs([prefix_length], block_table)
-        impl = AiterDecodeImplTriton(self.config, decode_inputs)
+        impl = AiterDecodeImplTriton(
+            self.config,
+            decode_inputs,
+        )
         actual = impl.forward(
             _pack_qkv(
                 query[prefix_length:],
@@ -2713,11 +2752,11 @@ class TestVLayoutContract(unittest.TestCase):
             accepts_fmha_config = False
             support = support_parallelism_config = staticmethod(lambda *_: True)
 
-            def __init__(self, *_):
+            def __init__(self, *_, **__):
                 raise RuntimeError("constructor failed")
 
         class WorkingImpl(BrokenImpl):
-            def __init__(self, *_):
+            def __init__(self, *_, **__):
                 pass
 
         _, inputs = self._make_case(128, 16)

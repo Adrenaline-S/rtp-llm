@@ -37,7 +37,8 @@ std::atomic<uint64_t> g_file_sequence{0};
     X(combo_tokens) X(input_lengths) X(sequence_lengths) X(lm_output_indexes) X(lm_output_lengths) X(prefix_lengths) \
     X(sequence_lengths_plus_1)                                                                                      \
     X(combo_tokens_type_ids) X(combo_position_ids) X(last_hidden_states) X(attention_mask)                           \
-    X(kv_cache_block_id) X(kv_cache_kernel_block_id) X(kv_cache_group_types) X(kv_cache_update_mapping)             \
+    X(kv_cache_block_id) X(kv_cache_block_id_device) X(kv_cache_kernel_block_id)                                   \
+    X(kv_cache_kernel_block_id_device) X(kv_cache_group_types) X(kv_cache_update_mapping)                           \
     X(text_tokens_mask) X(mm_features_locs) X(input_embeddings_locs)                                                 \
     X(request_id) X(request_pd_separation) X(cache_keys)
 // clang-format on
@@ -82,6 +83,12 @@ size_t estimateBytes(const GptModelInputs& inputs) {
 #define ADD_TENSOR_BYTES(field) addTensorBytes(bytes, inputs.field);
     MODEL_INPUT_TENSORS(ADD_TENSOR_BYTES)
 #undef ADD_TENSOR_BYTES
+    for (const auto& tensor : inputs.kv_cache_pool_valid_lengths) {
+        addTensorBytes(bytes, tensor);
+    }
+    for (const auto& tensor : inputs.kv_cache_kernel_valid_lengths) {
+        addTensorBytes(bytes, tensor);
+    }
     addTensorListBytes(bytes, inputs.multimodal_features);
     addTensorListBytes(bytes, inputs.mm_extra_input);
     addTensorListBytes(bytes, inputs.input_embeddings);
@@ -131,6 +138,13 @@ void addTensorList(c10::impl::GenericDict&                          payload,
     }
     payload.insert(name, std::move(values));
 }
+void addTensorVector(c10::impl::GenericDict&           payload,
+                     const char*                       name,
+                     const std::vector<torch::Tensor>& tensors,
+                     std::vector<c10::Device>&         devices,
+                     c10::impl::GenericDict&           float8_dtypes) {
+    addTensorList(payload, name, std::make_optional(tensors), devices, float8_dtypes);
+}
 c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
                                        ModelInputsModelRole      role,
                                        int64_t                   model_id,
@@ -147,13 +161,19 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("execution_stage", executionStage(inputs));
     payload.insert("model_id", model_id);
     payload.insert("trace_ids", inputs.trace_ids);
-    // Canonical sorted cache tags naming every group-dimension row of the block
-    // tables, kv_cache_group_types and kv_cache_update_mapping recorded below.
-    payload.insert("kv_cache_group_tags", inputs.kv_cache_group_tags);
+    std::vector<std::string> cache_group_tags;
+    cache_group_tags.reserve(inputs.kv_cache_block_table_plan.groupCount());
+    for (uint32_t ordinal = 0; ordinal < inputs.kv_cache_block_table_plan.groupCount(); ++ordinal) {
+        cache_group_tags.push_back(inputs.kv_cache_block_table_plan.group(ordinal).tag);
+    }
+    payload.insert("kv_cache_group_tags", cache_group_tags);
     c10::impl::GenericDict float8_dtypes(c10::StringType::get(), c10::StringType::get());
 #define ADD_TENSOR(field) addTensor(payload, #field, inputs.field, devices, float8_dtypes);
     MODEL_INPUT_TENSORS(ADD_TENSOR)
 #undef ADD_TENSOR
+    addTensorVector(payload, "kv_cache_pool_valid_lengths", inputs.kv_cache_pool_valid_lengths, devices, float8_dtypes);
+    addTensorVector(
+        payload, "kv_cache_kernel_valid_lengths", inputs.kv_cache_kernel_valid_lengths, devices, float8_dtypes);
     addTensorList(payload, "multimodal_features", inputs.multimodal_features, devices, float8_dtypes);
     addTensorList(payload, "mm_extra_input", inputs.mm_extra_input, devices, float8_dtypes);
     addTensorList(payload, "input_embeddings", inputs.input_embeddings, devices, float8_dtypes);

@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -168,7 +168,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const SpeculativeExecutionConfig&         sp_config,
                                  void*                                     register_buffer_addr,
                                  size_t                                    register_buffer_size,
-                                 std::shared_ptr<KVCacheAllocator>         allocator,
+                                 CoordinatorCacheManagerPtr                coordinator_cache_manager,
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
@@ -182,7 +182,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_size};
     init_params_  = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     group_policy_ = std::make_unique<remote_connector::FullLayerGroupPolicy>(
-        allocator, remote_connector::fullCacheTags(cache_config), std::vector<std::string>{});
+        coordinator_cache_manager, remote_connector::fullCacheTags(cache_config), std::vector<std::string>{});
 }
 
 void RemoteConnector::validateConfig(const CacheConfig& cache_config) {
@@ -208,8 +208,7 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
         const auto& cache_tag    = entry.first;
         const auto& config_group = init_params_->cache_config.group(cache_tag);
         const auto  group_block_size =
-            config_group.layer_ids.size()
-            * (config_group.layout.kv_block_stride_bytes + config_group.layout.kv_scale_stride_bytes);
+            config_group.layer_ids.size() * (config_group.kv_block_stride_bytes + config_group.kv_scale_stride_bytes);
         const auto& group    = entry.second;
         auto [iter, success] = location_spec_groups_ptr->insert({group.group_name, {}});
         assert(success);
@@ -273,12 +272,12 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     auto sdk_backend_configs_str = init_params_->kv_cache_config.reco_model_sdk_config;
     autil::legacy::FromJsonString(sdk_wrapper_config->sdk_backend_configs(), sdk_backend_configs_str);
 
-    uint32_t block_size = init_params_->cache_config.seq_size_per_block;
+    uint32_t block_size = init_params_->cache_config.cacheKeyBlockTokens();
 
     // ModelDeployment
     const auto& model_name   = init_params_->runtime_config.model_name;
-    const auto& dtype_str    = getDataTypeStr(init_params_->cache_config.dtype);  // TODO(zhoushipei.zsp) is this right?
-    bool        use_mla      = init_params_->cache_config.use_mla;
+    const auto& dtype_str    = getDataTypeStr(init_params_->cache_config.dtype());
+    bool        use_mla      = init_params_->cache_config.usesMla();
     int64_t     tp_size      = init_params_->parallelism_config.tp_size;
     int64_t     dp_size      = init_params_->parallelism_config.dp_size;
     int         fp8_kv_cache = init_params_->kv_cache_config.fp8_kv_cache;
@@ -652,7 +651,7 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
         broadcast_result->success(), RCS_ERROR, "Read failed for grpc status, trace_id [%s]", match_trace_id.c_str());
     // TODO : maybe not all locations are loaded successfuly
     helper.collector.remote_read_fail_qps  = false;
-    helper.collector.remote_read_token_num = new_reuse_block_num * init_params_->cache_config.seq_size_per_block;
+    helper.collector.remote_read_token_num = new_reuse_block_num * init_params_->cache_config.cacheKeyBlockTokens();
     async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
     resource->setRemoteReuseBlockNum(new_reuse_block_num);
 }

@@ -130,7 +130,9 @@ class MlaAttention(nn.Module):
             and attn_inputs.cache_store_writer is not None
         ):
             attn_inputs.cache_store_writer.write(
-                attn_inputs.cache_store_inputs, kv_cache
+                attn_inputs.cache_store_inputs,
+                kv_cache,
+                attn_inputs.kv_cache_block_id,
             )
         return topk_indices
 

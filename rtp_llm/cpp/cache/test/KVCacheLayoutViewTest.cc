@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {
@@ -22,7 +23,7 @@ namespace {
 
 static_assert(!std::is_constructible_v<GroupedCacheLayerLayout,
                                        GroupedCacheLayerLayout::GroupLayouts,
-                                       std::map<std::string, CacheGroupLayout>,
+                                       std::map<std::string, CacheGroup>,
                                        std::vector<std::vector<std::string>>>,
               "GroupedCacheLayerLayout metadata must be derived from CacheConfig");
 
@@ -68,26 +69,26 @@ private:
 };
 
 CacheGroup makeGroup(const std::string& tag,
-                    KVCacheSpecType    spec_type,
-                    CacheGroupType     group_type,
-                    size_t             physical_seq_size,
-                    size_t             kernel_seq_size,
-                    size_t             k_elems,
-                    size_t             v_elems,
-                    uint32_t           local_kv_heads = 1) {
+                     KVCacheSpecType    spec_type,
+                     CacheGroupType     group_type,
+                     size_t             physical_seq_size,
+                     size_t             kernel_seq_size,
+                     size_t             k_elems,
+                     size_t             v_elems,
+                     uint32_t           local_kv_heads = 1) {
     CacheGroup group;
     group.tag                       = tag;
-    group.layout.spec                      = std::make_shared<TestKVCacheSpec>(spec_type, physical_seq_size, k_elems, v_elems);
+    group.spec                      = std::make_shared<TestKVCacheSpec>(spec_type, physical_seq_size, k_elems, v_elems);
     group.policy.group_type         = group_type;
     group.layer_ids                 = {0};
-    group.layout.block_num                 = 4;
-    group.layout.local_kv_head_num         = local_kv_heads;
-    group.layout.seq_size_per_block        = physical_seq_size;
-    group.layout.kernel_seq_size_per_block = kernel_seq_size;
+    group.block_num                 = 4;
+    group.local_kv_head_num         = local_kv_heads;
+    group.seq_size_per_block        = physical_seq_size;
+    group.kernel_seq_size_per_block = kernel_seq_size;
     return group;
 }
 
-GroupedCacheLayerLayout makeLayout(std::vector<CacheGroup>          groups,
+GroupedCacheLayerLayout makeLayout(std::vector<CacheGroup>         groups,
                                    std::vector<std::string>        layer_tags,
                                    std::vector<BlockBufferPtrInfo> buffers) {
     EXPECT_EQ(groups.size(), buffers.size());
@@ -96,12 +97,11 @@ GroupedCacheLayerLayout makeLayout(std::vector<CacheGroup>          groups,
     for (const auto& group : groups) {
         group_tags.push_back(group.tag);
     }
-    auto config = CacheConfigCreator::buildResolvedConfig({std::move(groups), {{0, std::move(layer_tags)}}});
+    auto config = test::TestCacheConfigBuilder().setTopology(std::move(groups), {std::move(layer_tags)}).build();
     GroupedCacheLayerLayout::GroupLayouts layouts;
-    size_t buffer_ordinal = 0;
+    size_t                                buffer_ordinal = 0;
     for (const auto& tag : group_tags) {
-        layouts.emplace(tag,
-                        CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[buffer_ordinal++])}));
+        layouts.emplace(tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[buffer_ordinal++])}));
     }
     return GroupedCacheLayerLayout(config, std::move(layouts));
 }
@@ -114,26 +114,26 @@ CacheConfig createSparseIndexerCacheConfig() {
     model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
 
     KVCacheSpecDesc indexer_desc;
-    indexer_desc.tag              = "indexer_kv";
-    indexer_desc.cache_type       = KVCacheSpecType::OpaqueKV;
-    indexer_desc.entry_dtype      = DataType::TYPE_UINT8;
-    indexer_desc.entry_elems      = 132;
-    indexer_desc.entry_count_mode = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
-    indexer_desc.compression_ratio = 1;
+    indexer_desc.tag                 = "indexer_kv";
+    indexer_desc.cache_type          = KVCacheSpecType::OpaqueKV;
+    indexer_desc.entry_dtype         = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems         = 132;
+    indexer_desc.entry_count_mode    = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    indexer_desc.compression_ratio   = 1;
     model_config.kv_cache_spec_descs = {{indexer_desc}};
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.seq_size_per_block        = 512;
     kv_cache_config.kernel_seq_size_per_block = 64;
     kv_cache_config.test_block_num            = 3;
-    return CacheConfigCreator::createConfig(
+    return CacheConfigCreator::createRankLocalConfig(
         model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
 }
 
 GroupedCacheLayerLayout makeIndexerLayout(const CacheConfig& config, torch::Tensor physical_storage) {
     GroupedCacheLayerLayout::GroupLayouts layouts;
     for (const auto& group : config.groups()) {
-        std::vector<BlockBufferPtrInfo> layers(config.layerMemberships().size());
+        std::vector<BlockBufferPtrInfo> layers(config.layers().size());
         if (group.tag == "indexer_kv") {
             layers[0].kv_addr = std::move(physical_storage);
         }
@@ -170,14 +170,15 @@ CacheConfig createFp8SparseMlaCacheConfig() {
     kv_cache_config.seq_size_per_block        = 512;
     kv_cache_config.kernel_seq_size_per_block = 64;
     kv_cache_config.test_block_num            = 2;
-    return CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+    return CacheConfigCreator::createRankLocalConfig(
+        model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
 }
 
 GroupedCacheLayerLayout
 makeFp8SparseMlaLayout(const CacheConfig& config, torch::Tensor mla_storage, torch::Tensor compressed_storage) {
     GroupedCacheLayerLayout::GroupLayouts layouts;
     for (const auto& group : config.groups()) {
-        std::vector<BlockBufferPtrInfo> layers(config.layerMemberships().size());
+        std::vector<BlockBufferPtrInfo> layers(config.layers().size());
         if (group.tag == "default") {
             layers[0].kv_addr = std::move(mla_storage);
         } else if (group.tag == "indexer_kv") {
@@ -260,20 +261,19 @@ TEST(KVCacheLayoutViewTest, SparseIndexerSpecOwnsPhysicalBlockAndOpaqueViewPrese
     constexpr int64_t kPhysicalBlockBytes     = kPhysicalTokensPerBlock * kEntryBytes;
     constexpr int64_t kBlocksPerPhysicalBlock = kPhysicalTokensPerBlock / kKernelTokensPerBlock;
 
-    const auto config = createSparseIndexerCacheConfig();
+    const auto  config = createSparseIndexerCacheConfig();
     const auto& group  = config.group("indexer_kv");
-    const auto* spec   = dynamic_cast<const CompressedKVCacheSpec*>(group.layout.spec.get());
+    const auto* spec   = dynamic_cast<const CompressedKVCacheSpec*>(group.spec.get());
     ASSERT_NE(spec, nullptr);
     EXPECT_EQ(spec->block_payload_bytes(), kPhysicalBlockBytes);
     EXPECT_EQ(spec->block_size_bytes(), kPhysicalBlockBytes);
-    EXPECT_EQ(group.layout.seq_size_per_block, kPhysicalTokensPerBlock);
-    EXPECT_EQ(group.layout.kernel_seq_size_per_block, kKernelTokensPerBlock);
-    EXPECT_EQ(group.layout.kv_block_stride_bytes, kPhysicalBlockBytes);
+    EXPECT_EQ(group.seq_size_per_block, kPhysicalTokensPerBlock);
+    EXPECT_EQ(group.kernel_seq_size_per_block, kKernelTokensPerBlock);
+    EXPECT_EQ(group.kv_block_stride_bytes, kPhysicalBlockBytes);
 
-    const auto physical =
-        torch::arange(kPhysicalBlocks * static_cast<int64_t>(group.layout.kv_block_stride_bytes),
-                      torch::TensorOptions().dtype(torch::kUInt8))
-            .reshape({kPhysicalBlocks, static_cast<int64_t>(group.layout.kv_block_stride_bytes)});
+    const auto physical = torch::arange(kPhysicalBlocks * static_cast<int64_t>(group.kv_block_stride_bytes),
+                                        torch::TensorOptions().dtype(torch::kUInt8))
+                              .reshape({kPhysicalBlocks, static_cast<int64_t>(group.kv_block_stride_bytes)});
     torch_ext::KVCache cache(makeIndexerLayout(config, physical));
     const auto         layer = cache.getLayerCache(0, "indexer_kv");
     EXPECT_EQ(layer.seq_size_per_block, kKernelTokensPerBlock);
@@ -299,13 +299,13 @@ TEST(KVCacheLayoutViewTest, Fp8MlaAndCompressedSpecsOwnPhysicalBlocksWhileViewsP
     const auto& mla_group        = config.group("default");
     const auto& compressed_group = config.group("indexer_kv");
 
-    ASSERT_EQ(mla_group.layout.spec->type, KVCacheSpecType::MultiHeadLatentAttention);
-    EXPECT_EQ(mla_group.layout.spec->block_size_bytes(), kMlaPhysicalBytes);
-    EXPECT_EQ(mla_group.layout.kv_block_stride_bytes, kMlaPhysicalBytes);
-    ASSERT_EQ(compressed_group.layout.spec->type, KVCacheSpecType::OpaqueKV);
-    EXPECT_EQ(compressed_group.layout.spec->block_payload_bytes(), kCompressedPhysicalBytes);
-    EXPECT_EQ(compressed_group.layout.spec->block_size_bytes(), kCompressedPhysicalBytes);
-    EXPECT_EQ(compressed_group.layout.kv_block_stride_bytes, kCompressedPhysicalBytes);
+    ASSERT_EQ(mla_group.spec->type, KVCacheSpecType::MultiHeadLatentAttention);
+    EXPECT_EQ(mla_group.spec->block_size_bytes(), kMlaPhysicalBytes);
+    EXPECT_EQ(mla_group.kv_block_stride_bytes, kMlaPhysicalBytes);
+    ASSERT_EQ(compressed_group.spec->type, KVCacheSpecType::OpaqueKV);
+    EXPECT_EQ(compressed_group.spec->block_payload_bytes(), kCompressedPhysicalBytes);
+    EXPECT_EQ(compressed_group.spec->block_size_bytes(), kCompressedPhysicalBytes);
+    EXPECT_EQ(compressed_group.kv_block_stride_bytes, kCompressedPhysicalBytes);
 
     const auto mla_storage =
         torch::arange(kPhysicalBlocks * kMlaPhysicalBytes, torch::TensorOptions().dtype(torch::kInt64))
@@ -352,15 +352,15 @@ TEST(KVCacheLayoutViewTest, Fp8MhaSpecAndScaleStridesOwnPhysicalBlock) {
     kv_cache_config.kernel_seq_size_per_block = 64;
     kv_cache_config.test_block_num            = 2;
     const auto config =
-        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+        CacheConfigCreator::createRankLocalConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
     const auto& group = config.group("default");
 
     constexpr size_t kPhysicalKvBytes    = 2 * 2 * 8 * 512;
     constexpr size_t kPhysicalScaleBytes = 2 * 2 * sizeof(float) * 512;
-    EXPECT_EQ(group.layout.spec->block_size_bytes(), kPhysicalKvBytes);
-    EXPECT_EQ(group.layout.spec->scale_block_size_bytes(), kPhysicalScaleBytes);
-    EXPECT_EQ(group.layout.kv_block_stride_bytes, kPhysicalKvBytes);
-    EXPECT_EQ(group.layout.kv_scale_stride_bytes, kPhysicalScaleBytes);
+    EXPECT_EQ(group.spec->block_size_bytes(), kPhysicalKvBytes);
+    EXPECT_EQ(group.spec->scale_block_size_bytes(), kPhysicalScaleBytes);
+    EXPECT_EQ(group.kv_block_stride_bytes, kPhysicalKvBytes);
+    EXPECT_EQ(group.kv_scale_stride_bytes, kPhysicalScaleBytes);
 }
 
 TEST(KVCacheLayoutViewTest, Dsv4Fp8CompressedPhysicalBlocksPreserveAlignedKernelPageGeometry) {
@@ -401,21 +401,21 @@ TEST(KVCacheLayoutViewTest, Dsv4Fp8CompressedPhysicalBlocksPreserveAlignedKernel
     kv_cache_config.kernel_seq_size_per_block = kKernelTokensPerBlock;
     kv_cache_config.test_block_num            = 1;
     const auto config =
-        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+        CacheConfigCreator::createRankLocalConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
     const auto& csa_group = config.group("csa_kv");
     const auto& hca_group = config.group("hca_kv");
 
-    ASSERT_EQ(csa_group.layout.spec->block_payload_bytes(), kCsaKernelPayloadBytes * kKernelPagesPerBlock);
-    ASSERT_EQ(csa_group.layout.kv_block_stride_bytes, kCsaKernelStrideBytes * kKernelPagesPerBlock);
-    ASSERT_EQ(hca_group.layout.spec->block_payload_bytes(), kHcaKernelPayloadBytes * kKernelPagesPerBlock);
-    ASSERT_EQ(hca_group.layout.kv_block_stride_bytes, kHcaKernelStrideBytes * kKernelPagesPerBlock);
+    ASSERT_EQ(csa_group.spec->block_payload_bytes(), kCsaKernelPayloadBytes * kKernelPagesPerBlock);
+    ASSERT_EQ(csa_group.kv_block_stride_bytes, kCsaKernelStrideBytes * kKernelPagesPerBlock);
+    ASSERT_EQ(hca_group.spec->block_payload_bytes(), kHcaKernelPayloadBytes * kKernelPagesPerBlock);
+    ASSERT_EQ(hca_group.kv_block_stride_bytes, kHcaKernelStrideBytes * kKernelPagesPerBlock);
 
-    const auto csa_storage = torch::arange(csa_group.layout.kv_block_stride_bytes, torch::TensorOptions().dtype(torch::kInt64))
+    const auto csa_storage = torch::arange(csa_group.kv_block_stride_bytes, torch::TensorOptions().dtype(torch::kInt64))
                                  .to(torch::kUInt8)
-                                 .reshape({1, static_cast<int64_t>(csa_group.layout.kv_block_stride_bytes)});
-    const auto hca_storage = torch::arange(hca_group.layout.kv_block_stride_bytes, torch::TensorOptions().dtype(torch::kInt64))
+                                 .reshape({1, static_cast<int64_t>(csa_group.kv_block_stride_bytes)});
+    const auto hca_storage = torch::arange(hca_group.kv_block_stride_bytes, torch::TensorOptions().dtype(torch::kInt64))
                                  .to(torch::kUInt8)
-                                 .reshape({1, static_cast<int64_t>(hca_group.layout.kv_block_stride_bytes)});
+                                 .reshape({1, static_cast<int64_t>(hca_group.kv_block_stride_bytes)});
     GroupedCacheLayerLayout::GroupLayouts layouts;
     for (const auto& group : config.groups()) {
         BlockBufferPtrInfo buffer;
@@ -485,8 +485,8 @@ TEST(KVCacheLayoutViewTest, ModelCacheTagsAreSortedAndBindingIgnoresDeclarationO
     const auto csa       = torch::zeros({2, 64}, torch::TensorOptions().dtype(torch::kFloat16));
     const auto swa       = torch::ones({2, 64}, torch::TensorOptions().dtype(torch::kFloat16));
     const auto makeCache = [&](bool reversed) {
-        auto csa_group = makeGroup("csa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL, 8, 8, 32, 32);
-        auto swa_group = makeGroup("swa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA, 8, 8, 32, 32);
+        auto csa_group   = makeGroup("csa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL, 8, 8, 32, 32);
+        auto swa_group   = makeGroup("swa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA, 8, 8, 32, 32);
         auto placeholder = makeGroup("indexer_kv", KVCacheSpecType::OpaqueState, CacheGroupType::FULL, 1, 1, 1, 0);
         if (reversed) {
             return torch_ext::KVCache(makeLayout({std::move(placeholder), std::move(swa_group), std::move(csa_group)},
@@ -511,10 +511,8 @@ TEST(KVCacheLayoutViewTest, ModelCacheTagsAreSortedAndBindingIgnoresDeclarationO
         }
         std::sort(enumerated_tags.begin(), enumerated_tags.end());
         EXPECT_EQ(enumerated_tags, (std::vector<std::string>{"csa_kv", "swa_kv"})) << "reversed=" << reversed;
-        EXPECT_EQ(cache.getLayerCache(0, "csa_kv").kv_cache_base.data_ptr(), csa.data_ptr())
-            << "reversed=" << reversed;
-        EXPECT_EQ(cache.getLayerCache(0, "swa_kv").kv_cache_base.data_ptr(), swa.data_ptr())
-            << "reversed=" << reversed;
+        EXPECT_EQ(cache.getLayerCache(0, "csa_kv").kv_cache_base.data_ptr(), csa.data_ptr()) << "reversed=" << reversed;
+        EXPECT_EQ(cache.getLayerCache(0, "swa_kv").kv_cache_base.data_ptr(), swa.data_ptr()) << "reversed=" << reversed;
         EXPECT_ANY_THROW(cache.getLayerCache(0, "indexer_kv")) << "reversed=" << reversed;
     }
 }

@@ -39,6 +39,7 @@ class PCPAllGatherOverlapAttnOp:
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
+        kv_cache_kernel_block_id: Optional[torch.Tensor] = None,
         backend: str = "auto",  # "auto", "fa2", or "fa3"
         causal: bool = True,
         kv_layout: str = "NHD",  # "NHD" or "HND"
@@ -55,6 +56,7 @@ class PCPAllGatherOverlapAttnOp:
         """
         super().__init__()
         self.attn_inputs = attn_inputs
+        self.kv_cache_kernel_block_id = kv_cache_kernel_block_id
         self.attn_configs = attn_configs
         self.num_qo_heads = attn_configs.head_num
         self.num_kv_heads = attn_configs.kv_head_num
@@ -132,7 +134,7 @@ class PCPAllGatherOverlapAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            self.kv_cache_kernel_block_id,
             self.attn_configs.kernel_tokens_per_block,
         )
 

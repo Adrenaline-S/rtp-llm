@@ -82,9 +82,9 @@ def get_mla_impl(
             continue
 
         instance = impl(
-            attn_configs,
-            attn_inputs,
-            weight.weights,
+            attn_configs=attn_configs,
+            attn_inputs=attn_inputs,
+            weights=weight.weights,
             cos_sin_cache=cos_sin_cache,
             fmha_config=fmha_config,
             quant_config=quant_config,
@@ -191,7 +191,12 @@ def get_fmha_impl(
             continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
-            instance = impl(attn_configs, attn_inputs, parallelism_config, **kwargs)
+            instance = impl(
+                attn_configs,
+                attn_inputs,
+                parallelism_config,
+                **kwargs,
+            )
         except Exception as e:
             # ROCm validation predicts the selected cache layout, so falling back
             # after construction could select a reader with a different layout.

@@ -11,10 +11,10 @@ This module owns two things:
    These constants replace the old int ``attn_type`` ids that mirrored the
    deleted C++ ``KVCacheRegionName`` enum.
 
-2. Generic ``tag -> block_table`` helpers shared between prefill and decode,
-   plus the normalizers that turn ``PyModelInputs.attention_inputs`` (which is
-   *either* a single ``PyAttentionInputs`` *or* a ``{tag: PyAttentionInputs}``
-   mapping) into something callers can index by tag.
+2. Generic ``tag -> block_table`` helpers shared between prefill and decode.
+   They translate the dense ordinal-indexed alias views only for DSV4 backend
+   APIs that still require tag-keyed dictionaries; common request metadata
+   remains in the single ``PyModelInputs.attention_inputs`` object.
 
 Path-specific forward helpers live in :mod:`prefill.forward` /
 :mod:`decode.forward`.
@@ -22,8 +22,7 @@ Path-specific forward helpers live in :mod:`prefill.forward` /
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 import torch
 
@@ -70,48 +69,24 @@ def kv_tag_for_compress_ratio(ratio: int) -> Optional[str]:
     return None
 
 
-def group_tags(kv_cache: Optional[Any]) -> List[str]:
-    """Framework cache group tags in canonical sorted order (``[]`` when absent).
-
-    The list is a set of semantic identities; a position in it never identifies a
-    cache group.
-    """
-    if kv_cache is None:
-        return []
-    tags = getattr(kv_cache, "group_tags", None)
-    if not tags:
-        return []
-    return [str(tag) for tag in tags]
-
-
-def as_attention_inputs_by_tag(
-    attention_inputs: Any,
-    kv_cache: Optional[Any] = None,
+def select_cache_group_attn_inputs(
+    model_inputs: Any, cache_tags: Sequence[str]
 ) -> Dict[str, Any]:
-    """Normalize ``attention_inputs`` into a ``{tag: PyAttentionInputs}`` dict.
-
-    ``attention_inputs`` may be
-
-    * a ``{tag: PyAttentionInputs}`` mapping — the multi-group case, which is
-      what ``PyModelInputs.attention_inputs`` returns for DSV4 and what C++
-      ``callPrepareCudaGraph`` hands to ``prepare_cuda_graph``;
-    * a single ``PyAttentionInputs`` — the common/single-group fast path. It is
-      keyed by the model's only group tag when ``kv_cache`` exposes exactly one,
-      otherwise by ``"default"``;
-    * a ``PyModelInputs`` — unwrapped first;
-    * ``None`` — yields ``{}``.
-    """
-    if attention_inputs is None:
+    """Select this backend's per-tag attention inputs from the model inputs."""
+    if model_inputs is None:
         return {}
-    if hasattr(attention_inputs, "attention_inputs"):
-        attention_inputs = attention_inputs.attention_inputs
-        if attention_inputs is None:
-            return {}
-    if isinstance(attention_inputs, Mapping):
-        return {str(tag): value for tag, value in attention_inputs.items()}
-    tags = group_tags(kv_cache)
-    tag = tags[0] if len(tags) == 1 else DEFAULT_TAG
-    return {tag: attention_inputs}
+    group_attn_inputs = getattr(model_inputs, "cache_group_attn_inputs", None)
+    if not group_attn_inputs:
+        return {}
+    result: Dict[str, Any] = {}
+    for tag in cache_tags:
+        if tag not in group_attn_inputs:
+            raise RuntimeError(
+                f"cache tag {tag!r} has no attention inputs; "
+                f"available tags: {sorted(group_attn_inputs)}"
+            )
+        result[tag] = group_attn_inputs[tag]
+    return result
 
 
 def primary_attention_inputs(
@@ -120,12 +95,10 @@ def primary_attention_inputs(
 ) -> Optional[Any]:
     """Return the per-forward inputs carrying the group-invariant fields.
 
-    Every tagged entry is a copy of the same common ``PyAttentionInputs``
-    (``PyWrappedModel::setupKVCacheForAttentionInputs`` clones it per group and
-    only overwrites the block-table fields), so any entry is a valid source for
+    The framework publishes exactly one ``PyAttentionInputs`` carrying
     ``cu_seqlens`` / ``input_lengths`` / ``sequence_lengths`` /
     ``prefix_lengths`` / ``cache_store_inputs`` / ``context_parallel_info``.
-    Only block tables are group-local — read those through
+    Only block tables are group-local alias views — read those through
     :func:`build_block_tables` / :func:`build_block_tables_batched`.
     """
     if attention_inputs is None:
@@ -134,16 +107,7 @@ def primary_attention_inputs(
         attention_inputs = attention_inputs.attention_inputs
         if attention_inputs is None:
             return None
-    if not isinstance(attention_inputs, Mapping):
-        return attention_inputs
-    if not attention_inputs:
-        return None
-    # Prefer a known DSV4 tag so repeated reads are stable across steps
-    # regardless of mapping iteration order; fall back to first entry.
-    for tag in DSV4_TAGS:
-        if tag in attention_inputs:
-            return attention_inputs[tag]
-    return next(iter(attention_inputs.values()))
+    return attention_inputs
 
 
 def _block_table_for_tag(tagged_inputs: Any) -> Optional[torch.Tensor]:
@@ -156,12 +120,12 @@ def _block_table_for_tag(tagged_inputs: Any) -> Optional[torch.Tensor]:
 
 
 def _build_block_tables(
-    attention_inputs: Any,
-    kv_cache: Optional[Any],
+    model_inputs: Any,
+    group_bindings: Sequence[str],
     batch_slice: Optional[slice],
     keep_tags: Optional[Iterable[str]] = None,
 ) -> Optional[Dict[str, torch.Tensor]]:
-    by_tag = as_attention_inputs_by_tag(attention_inputs, kv_cache)
+    by_tag = select_cache_group_attn_inputs(model_inputs, group_bindings)
     if not by_tag:
         return None
     wanted = None if keep_tags is None else set(keep_tags)
@@ -179,17 +143,15 @@ def _build_block_tables(
 
 
 def build_block_tables(
-    kv_cache: Optional[Any],
-    attention_inputs: Any,
+    model_inputs: Any,
+    group_bindings: Sequence[str],
     batch_offset: int = 0,
 ) -> Optional[Dict[str, torch.Tensor]]:
     """Build the per-tag block-table dict for one prefill request.
 
-    The framework hands each cache group its own ``PyAttentionInputs`` copy via
-    ``PyModelInputs.attention_inputs`` (a ``{tag: inputs}`` mapping), each
-    carrying that group's kernel-granularity block table in
-    ``kv_cache_kernel_block_id_device``. This helper collects them into a dict
-    keyed by cache tag.
+    The framework hands each cache group a tag-keyed zero-copy attention-inputs
+    entry in ``PyModelInputs.cache_group_attn_inputs``. This helper translates the
+    selected kernel tables into the tag-keyed dictionary required by DSV4 kernels.
 
     The ``batch_offset`` arg slices out a single-request row
     ``[batch_offset : batch_offset + 1]`` so the returned block table is
@@ -200,15 +162,15 @@ def build_block_tables(
     disabled / missing framework state).
     """
     return _build_block_tables(
-        attention_inputs,
-        kv_cache,
+        model_inputs,
+        group_bindings,
         slice(batch_offset, batch_offset + 1),
     )
 
 
 def build_block_tables_batched(
-    kv_cache: Optional[Any],
-    attention_inputs: Any,
+    model_inputs: Any,
+    group_bindings: Sequence[str],
 ) -> Optional[Dict[str, torch.Tensor]]:
     """Build the per-tag block-table dict for an entire prefill batch.
 
@@ -220,13 +182,13 @@ def build_block_tables_batched(
     Returns ``None`` when no block tables are available (warmup / paged-KV
     disabled / missing framework state).
     """
-    return _build_block_tables(attention_inputs, kv_cache, None)
+    return _build_block_tables(model_inputs, group_bindings, None)
 
 
 def build_block_tables_for_tags(
-    kv_cache: Optional[Any],
-    attention_inputs: Any,
+    model_inputs: Any,
+    group_bindings: Sequence[str],
     tags: Iterable[str],
 ) -> Optional[Dict[str, torch.Tensor]]:
     """Batched block tables restricted to ``tags`` (decode's paged-pool set)."""
-    return _build_block_tables(attention_inputs, kv_cache, None, keep_tags=tags)
+    return _build_block_tables(model_inputs, group_bindings, None, keep_tags=tags)

@@ -116,7 +116,7 @@ class DSv4DecodeAttnMetadata:
     # ------------------------------------------------------------------
 
     # Per-tag framework block_table: [max_B, max_blocks_per_req] int32.
-    # Source: ``attention_inputs[tag].kv_cache_kernel_block_id_device``.
+    # Source: the matching ordinal execution view's device kernel table.
     # Keys are cache tags ("csa_kv" ... "swa_kv") from
     # :mod:`rtp_llm.models_py.modules.dsv4.kv_cache_utils`; only pools that the
     # model actually uses are present.
@@ -536,14 +536,14 @@ def update_decode_metadata_in_place(
     # otherwise — the write op honors that via ``mask_negative=True``).
     # ------------------------------------------------------------------
     if paged_block_tables is not None and paged_pool_entries_per_block is not None:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
+            compute_kv_pool_slot_mapping,
+        )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
             HCA_KV,
             INDEXER_KV,
             SWA_KV,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
-            compute_kv_pool_slot_mapping,
         )
 
         # Snapshot block_table content into the metadata's stable buffer
@@ -785,14 +785,14 @@ def build_decode_metadata(
     pool_block_tables: Dict[str, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[str, torch.Tensor] = {}
     if paged_block_tables and paged_pool_entries_per_block:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
+            compute_kv_pool_slot_mapping,
+        )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
             HCA_KV,
             INDEXER_KV,
             SWA_KV,
-        )
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
-            compute_kv_pool_slot_mapping,
         )
 
         # Snapshot block tables (clone so downstream writes can't surprise

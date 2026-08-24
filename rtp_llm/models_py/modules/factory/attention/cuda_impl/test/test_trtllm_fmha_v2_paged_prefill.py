@@ -45,6 +45,7 @@ class TestTRTLLMFMHAv2PagedPrefillOpBF16(TRTLLMFMHAv2TestBase):
 
     def run_correctness_test(self, *args, **kwargs):
         kwargs.setdefault("use_packed_kv_cache", True)
+        kwargs.setdefault("requires_kernel_block_table", True)
         if self.kv_cache_dtype == KvCacheDataType.FP8:
             kwargs.setdefault("rtol", 4e-2)
             kwargs.setdefault("atol", 4e-2)
@@ -292,12 +293,14 @@ class TestTRTLLMFMHAv2PagedPrefillOpBF16(TRTLLMFMHAv2TestBase):
                 graph_cache.kv_cache_base.copy_(cache_snapshot)
 
                 expect_impl = FlashInferTRTLLMFMHAv2PagedPrefillImpl(
-                    attn_configs, replay_inputs
+                    attn_configs,
+                    replay_inputs,
                 )
                 expect_output = expect_impl.forward(replay_qkv, expect_cache, 0).clone()
 
                 graph_impl = FlashInferTRTLLMFMHAv2PagedPrefillImpl(
-                    attn_configs, capture_inputs
+                    attn_configs,
+                    capture_inputs,
                 )
                 self.assertTrue(graph_impl.support_cuda_graph())
 
@@ -505,7 +508,10 @@ class TestTRTLLMFMHAv2PagedPrefillOpBF16(TRTLLMFMHAv2TestBase):
         self._write_kv_cache(prefix_qkv, attn_inputs, prefix_lengths, kv_cache)
         kv_cache.kv_cache_base = kv_cache.kv_cache_base.flatten(1)
 
-        impl = FlashInferTRTLLMFMHAv2PagedPrefillImpl(attn_configs, attn_inputs)
+        impl = FlashInferTRTLLMFMHAv2PagedPrefillImpl(
+            attn_configs,
+            attn_inputs,
+        )
         actual = impl.forward(qkv_new.clone(), kv_cache, layer_idx=0)
 
         expected_full = compute_pytorch_prefill_reference(

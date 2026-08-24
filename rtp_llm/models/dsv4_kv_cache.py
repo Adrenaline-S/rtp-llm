@@ -12,11 +12,12 @@ of independent pools selected by its ``compress_ratios`` entry:
   0  (SWA)    ``swa_kv``
   ==========  ====================================================
 
-C++ turns the resulting per-layer desc lists into the cache topology through
-``CacheConfigCreator`` (``validateHybridPoolDescs`` ->
-``buildLayerSpecsFromDescs`` -> ``populateGroupsFromLayerSpecs`` ->
-``setupIndependentPoolSizes``), which is only reached when
-``hybrid_attention_config.enable_independent_kv_cache_pools`` is set.
+C++ lowers the resulting per-layer desc lists through the sealed
+``CacheConfigCreator`` lifecycle.  Rank-local creation publishes complete
+topology, geometry, and capacity together; decode warmup uses the same lowering
+through ``createDecodeWarmupConfig`` and publishes a one-block basis.  This path
+is selected when ``hybrid_attention_config.enable_independent_kv_cache_pools``
+is set.
 
 This module is the production twin of
 ``rtp_llm/cpp/cache/test/CacheConfigTestUtils.h`` (``makeDsv4Desc`` /
@@ -270,13 +271,11 @@ def resolve_dsv4_tokens_per_block(
 ) -> Optional[int]:
     """Return the physical block size DSv4 should run with, or None to keep.
 
-    ``CacheConfigCreator::createHybridAttentionPoolConfig`` takes
+    The sealed rank-local and decode-warmup creator paths take
     ``kv_cache_config.seq_size_per_block`` only when it differs from the
-    framework default of 64, otherwise it falls back to
-    ``attn_config.tokens_per_block``; and ``createBasicConfig`` (the warm-up
-    path) zeroes ``seq_size_per_block`` entirely, so ``attn_config`` is the only
-    channel that reaches both paths.  Promote the default to 256, but leave an
-    explicit ``--seq_size_per_block`` alone so the two paths stay in agreement.
+    framework default of 64; otherwise both fall back to
+    ``attn_config.tokens_per_block``. Promote the default to 256, but leave an
+    explicit ``--seq_size_per_block`` alone so both paths stay in agreement.
     """
     if tokens_per_block == framework_default:
         return DSV4_TOKENS_PER_BLOCK

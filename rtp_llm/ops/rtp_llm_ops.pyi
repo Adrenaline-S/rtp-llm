@@ -55,10 +55,16 @@ class XQAAttnOp:
         params: XQAParams,
     ) -> torch.Tensor: ...
     def prepare(
-        self, attn_inputs: libth_transformer.PyAttentionInputs
+        self,
+        sequence_lengths: torch.Tensor,
+        kv_cache_kernel_block_id_device: torch.Tensor,
     ) -> XQAParams: ...
+    def support(self) -> bool: ...
     def update(
-        self, params: XQAParams, attn_inputs: libth_transformer.PyAttentionInputs
+        self,
+        params: XQAParams,
+        sequence_lengths: torch.Tensor,
+        kv_cache_kernel_block_id_device: torch.Tensor,
     ) -> None: ...
     def update_kv_cache_offset(
         self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor

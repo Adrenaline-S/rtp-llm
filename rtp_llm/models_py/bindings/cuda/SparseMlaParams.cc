@@ -416,24 +416,27 @@ void SparseMlaParams::fillCpPlanParams(const torch::Tensor&        padding_mask,
     refreshCpBuffer(kv_restore_count, total_ids_count, batch_size);
 }
 
-void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
-                                 int                          seq_size_per_block,
-                                 bool                         forbid_realloc) {
-    auto input_lengths_host    = toHostContiguousI32(attn_inputs.input_lengths);
-    auto prefix_lengths_host   = toHostContiguousI32(attn_inputs.prefix_lengths);
-    auto sequence_lengths_host = toHostContiguousI32(attn_inputs.sequence_lengths);
+void SparseMlaParams::fillParams(const torch::Tensor& input_lengths,
+                                 const torch::Tensor& prefix_lengths,
+                                 const torch::Tensor& sequence_lengths,
+                                 const torch::Tensor& kv_cache_kernel_block_id,
+                                 bool                 is_prefill,
+                                 int                  seq_size_per_block,
+                                 bool                 forbid_realloc) {
+    auto input_lengths_host    = toHostContiguousI32(input_lengths);
+    auto prefix_lengths_host   = toHostContiguousI32(prefix_lengths);
+    auto sequence_lengths_host = toHostContiguousI32(sequence_lengths);
 
     // Step 1: Call base class fillParams to fill shared parameters
     FlashInferMlaAttnParams::fillParams(prefix_lengths_host,
                                         sequence_lengths_host,
                                         input_lengths_host,
-                                        attn_inputs.kv_cache_kernel_block_id,
+                                        kv_cache_kernel_block_id,
                                         seq_size_per_block,
                                         forbid_realloc);
 
     // Step 2: Fill IndexerParams-specific parameters
-    bool is_prefill = attn_inputs.is_prefill;
-    int  batch_size = is_prefill ? input_lengths_host.size(0) : sequence_lengths_host.size(0);
+    int batch_size = is_prefill ? input_lengths_host.size(0) : sequence_lengths_host.size(0);
 
     // Now we can directly access base class positions_h, batch_indice_h, kvlen_d, etc.
 
@@ -503,11 +506,27 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def(pybind11::init<>())
         .def(
             "fill_params",
-            [](rtp_llm::SparseMlaParams&    self,
-               torch_ext::PyAttentionInputs attn_inputs,
-               int                          seq_size_per_block,
-               bool forbid_realloc) { self.fillParams(attn_inputs, seq_size_per_block, forbid_realloc); },
-            pybind11::arg("attention_inputs"),
+            [](rtp_llm::SparseMlaParams& self,
+               const torch::Tensor&      input_lengths,
+               const torch::Tensor&      prefix_lengths,
+               const torch::Tensor&      sequence_lengths,
+               const torch::Tensor&      kv_cache_kernel_block_id,
+               bool                      is_prefill,
+               int                       seq_size_per_block,
+               bool                      forbid_realloc) {
+                self.fillParams(input_lengths,
+                                prefix_lengths,
+                                sequence_lengths,
+                                kv_cache_kernel_block_id,
+                                is_prefill,
+                                seq_size_per_block,
+                                forbid_realloc);
+            },
+            pybind11::arg("input_lengths"),
+            pybind11::arg("prefix_lengths"),
+            pybind11::arg("sequence_lengths"),
+            pybind11::arg("kv_cache_kernel_block_id"),
+            pybind11::arg("is_prefill"),
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc") = false)
         .def_readonly("expanded_seq_lens", &SparseMlaParams::expanded_seq_lens)
@@ -551,12 +570,26 @@ void registerPySparseMlaParams(pybind11::module& m) {
 
     m.def(
         "prepare_sparse_mla_params",
-        [](torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block) {
+        [](const torch::Tensor& input_lengths,
+           const torch::Tensor& prefix_lengths,
+           const torch::Tensor& sequence_lengths,
+           const torch::Tensor& kv_cache_kernel_block_id,
+           bool                 is_prefill,
+           int                  seq_size_per_block) {
             auto params = std::make_shared<rtp_llm::SparseMlaParams>();
-            params->fillParams(attn_inputs, seq_size_per_block);
+            params->fillParams(input_lengths,
+                               prefix_lengths,
+                               sequence_lengths,
+                               kv_cache_kernel_block_id,
+                               is_prefill,
+                               seq_size_per_block);
             return params;
         },
-        pybind11::arg("attention_inputs"),
+        pybind11::arg("input_lengths"),
+        pybind11::arg("prefix_lengths"),
+        pybind11::arg("sequence_lengths"),
+        pybind11::arg("kv_cache_kernel_block_id"),
+        pybind11::arg("is_prefill"),
         pybind11::arg("seq_size_per_block"));
 }
 

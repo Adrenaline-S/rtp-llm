@@ -55,9 +55,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_
 from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     SWA_KV,
-    as_attention_inputs_by_tag,
     build_block_tables_for_tags,
     primary_attention_inputs,
+    select_cache_group_attn_inputs,
 )
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.models_py.modules.factory.attention.common import (
@@ -116,7 +116,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         markov_rank = getattr(model_config, "dspark_markov_rank", None)
         if noise_token_id is None or int(noise_token_id) < 0:
             raise ValueError(
-                "DeepSeekV4DSparkModel requires a non-negative " "dspark_noise_token_id"
+                "DeepSeekV4DSparkModel requires a non-negative dspark_noise_token_id"
             )
         if not target_layer_ids:
             raise ValueError("DeepSeekV4DSparkModel requires dspark_target_layer_ids")
@@ -231,21 +231,29 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # Framework/paged-cache metadata helpers
     # ------------------------------------------------------------------
 
-    def _swa_block_table(self, attention_inputs: Any, batch_size: int) -> torch.Tensor:
+    def _swa_block_table(
+        self, model_inputs: PyModelInputs, batch_size: int
+    ) -> torch.Tensor:
         """SWA_KV kernel block table for this forward, sliced to ``batch_size``.
 
-        ``attention_inputs`` is ``PyModelInputs.attention_inputs``: a
-        ``{tag: PyAttentionInputs}`` mapping for the multi-group DSV4 cache, or
-        a single ``PyAttentionInputs`` when the cache collapses to one group.
+        Group-local tables come from the dense ordinal execution views on
+        ``PyModelInputs`` and are translated to tags by the DSV4 helper.
         """
         block_tables = build_block_tables_for_tags(
-            self.kv_cache, attention_inputs, (SWA_KV,)
+            model_inputs, self._dsv4_cache_group_bindings, (SWA_KV,)
         )
         table = (block_tables or {}).get(SWA_KV)
         if table is None:
             raise RuntimeError(
                 "DSpark could not find the %s KV block table; available tags=%r"
-                % (SWA_KV, list(as_attention_inputs_by_tag(attention_inputs)))
+                % (
+                    SWA_KV,
+                    list(
+                        select_cache_group_attn_inputs(
+                            model_inputs, self._dsv4_cache_group_bindings
+                        )
+                    ),
+                )
             )
         if int(table.shape[0]) < batch_size:
             raise RuntimeError(
@@ -582,10 +590,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         if batch_size == 0 or int(main_x.shape[0]) == 0:
             return
         attention_inputs = inputs.attention_inputs
-        block_table = self._swa_block_table(attention_inputs, batch_size)
+        block_table = self._swa_block_table(inputs, batch_size)
         tokens_per_block = int(require_pool_tokens_per_block(self.kv_cache, tag=SWA_KV))
         write_cache_store_impl = create_write_cache_store_impl(
-            primary_attention_inputs(attention_inputs, self.kv_cache), self.kv_cache
+            primary_attention_inputs(attention_inputs, self.kv_cache),
+            self.kv_cache,
+            cache_group_attn_inputs=inputs.cache_group_attn_inputs,
         )
         gathered_req_ids: Optional[torch.Tensor] = None
         gathered_positions: Optional[torch.Tensor] = None
@@ -712,15 +722,17 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 hidden,
                 attn_metadata=None,
                 input_ids=query_ids,
-                attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
-                    layer_idx,
-                    x_pre,
-                    query_positions,
-                    prefix_lengths,
-                    active_requests,
-                    block_table,
-                    tokens_per_block,
-                    graph_metadata,
+                attn_fn=lambda x_pre, layer_idx=layer_idx: (
+                    self._forward_dspark_attention(
+                        layer_idx,
+                        x_pre,
+                        query_positions,
+                        prefix_lengths,
+                        active_requests,
+                        block_table,
+                        tokens_per_block,
+                        graph_metadata,
+                    )
                 ),
             )
 
@@ -742,9 +754,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         batch_size = int(query_ids.shape[0])
         attention_inputs = inputs.attention_inputs
         block_table = (
-            self._swa_block_table(attention_inputs, batch_size)
-            if batch_size > 0
-            else None
+            self._swa_block_table(inputs, batch_size) if batch_size > 0 else None
         )
         tokens_per_block = int(require_pool_tokens_per_block(self.kv_cache, tag=SWA_KV))
 

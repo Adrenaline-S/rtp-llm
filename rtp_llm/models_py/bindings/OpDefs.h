@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 #include "rtp_llm/cpp/cache/BufferTypes.h"
@@ -33,19 +34,22 @@ struct LayerKVCache {
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
     std::string   tag                = "default";
+    uint32_t      execution_ordinal  = 0;
 
     LayerKVCache() = default;
 
     LayerKVCache(torch::Tensor kv_cache_base,
                  int           seq_size_per_block,
-                 int           layer_id      = -1,
-                 std::string   tag           = "default",
-                 torch::Tensor kv_scale_base = {}):
+                 int           layer_id          = -1,
+                 std::string   tag               = "default",
+                 torch::Tensor kv_scale_base     = {},
+                 uint32_t      execution_ordinal = 0):
         kv_cache_base(std::move(kv_cache_base)),
         kv_scale_base(std::move(kv_scale_base)),
         seq_size_per_block(seq_size_per_block),
         layer_id(layer_id),
-        tag(std::move(tag)) {}
+        tag(std::move(tag)),
+        execution_ordinal(execution_ordinal) {}
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -53,49 +57,49 @@ struct LayerKVCache {
 class KVCache {
 public:
     explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout):
-        grouped_layout_(std::move(grouped_layout)), group_tags_(buildSortedGroupTags(grouped_layout_)) {}
+        grouped_layout_(std::move(grouped_layout)), group_tags_(buildSortedGroupTags(grouped_layout_)) {
+        layer_caches_.resize(layerCount());
+        for (size_t layer = 0; layer < layerCount(); ++layer) {
+            const auto& tags   = grouped_layout_.groupTagsForLayer(static_cast<int>(layer));
+            auto&       caches = layer_caches_[layer];
+            caches.reserve(tags.size());
+            for (const auto& tag : tags) {
+                const auto& group_layout = grouped_layout_.group(tag);
+                if (group_layout.empty() || !group_layout.hasLayer(layer)) {
+                    continue;
+                }
+                const auto ordinal = static_cast<uint32_t>(std::lower_bound(group_tags_.begin(), group_tags_.end(), tag)
+                                                           - group_tags_.begin());
+                RTP_LLM_CHECK_WITH_INFO(ordinal < group_tags_.size() && group_tags_[ordinal] == tag,
+                                        "layer cache tag=%s has no execution ordinal",
+                                        tag.c_str());
+                caches.push_back(makeLayerCache(
+                    static_cast<int>(layer), tag, grouped_layout_.groupConfig(tag), group_layout.at(layer), ordinal));
+            }
+        }
+    }
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
-        const auto& tags = grouped_layout_.groupTagsForLayer(layer_id);
-        RTP_LLM_CHECK_WITH_INFO(tags.size() == 1,
-                                "layer=%d requires exactly one cache group, got %zu",
-                                layer_id,
-                                tags.size());
-        return getLayerCache(layer_id, tags.front());
+        const auto& caches = layer_caches_[static_cast<size_t>(layer_id)];
+        RTP_LLM_CHECK_WITH_INFO(
+            caches.size() == 1, "layer=%d requires exactly one cache group, got %zu", layer_id, caches.size());
+        return caches.front();
     }
 
     LayerKVCache getLayerCache(int layer_id, const std::string& tag) const {
         validateLayer(layer_id);
-        const auto& tags = grouped_layout_.groupTagsForLayer(layer_id);
-        RTP_LLM_CHECK_WITH_INFO(std::find(tags.begin(), tags.end(), tag) != tags.end(),
-                                "layer=%d does not own cache tag=%s",
-                                layer_id,
-                                tag.c_str());
-        const auto& group        = grouped_layout_.groupLayout(tag);
-        const auto& group_layout = grouped_layout_.group(tag);
-        const auto  layer        = static_cast<size_t>(layer_id);
-        if (group_layout.empty() || !group_layout.hasLayer(layer)) {
-            throw std::runtime_error("Layer " + std::to_string(layer_id) + " has no KV cache tensor for tag " + tag);
+        for (const auto& cache : layer_caches_[static_cast<size_t>(layer_id)]) {
+            if (cache.tag == tag) {
+                return cache;
+            }
         }
-        return makeLayerCache(layer_id, tag, group, group_layout.at(layer));
+        throw std::runtime_error("Layer " + std::to_string(layer_id) + " has no KV cache tensor for tag " + tag);
     }
 
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
         validateLayer(layer_id);
-        const auto  layer = static_cast<size_t>(layer_id);
-        const auto& tags  = grouped_layout_.groupTagsForLayer(layer_id);
-
-        std::vector<LayerKVCache> layer_caches;
-        layer_caches.reserve(tags.size());
-        for (const auto& tag : tags) {
-            const auto& group_layout = grouped_layout_.group(tag);
-            if (group_layout.empty() || !group_layout.hasLayer(layer)) {
-                continue;
-            }
-            layer_caches.push_back(getLayerCache(layer_id, tag));
-        }
-        return layer_caches;
+        return layer_caches_[static_cast<size_t>(layer_id)];
     }
 
     // Canonical (sorted unique) tag order. Callers must treat this as a set of
@@ -109,11 +113,11 @@ public:
     }
 
     int getSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.groupLayout(tag).seq_size_per_block);
+        return static_cast<int>(grouped_layout_.groupConfig(tag).seq_size_per_block);
     }
 
     int getKernelSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.groupLayout(tag).kernel_seq_size_per_block);
+        return static_cast<int>(grouped_layout_.groupConfig(tag).kernel_seq_size_per_block);
     }
 
 private:
@@ -131,16 +135,6 @@ private:
         if (layer_id < 0 || static_cast<size_t>(layer_id) >= layerCount()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(layer_id));
         }
-    }
-
-    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::CacheGroupLayout& group) {
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
-                                    && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
-                                "invalid block subdivision for tag=%s physical=%zu kernel=%zu",
-                                "<projected>",
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
-        return static_cast<int64_t>(group.seq_size_per_block / group.kernel_seq_size_per_block);
     }
 
     static torch::Tensor reshapeMlaTensor(const torch::Tensor& tensor,
@@ -169,21 +163,20 @@ private:
         return tensor.view({kernel_block_num, kernel_seq_size, tensor.numel() / page_elements});
     }
 
-    LayerKVCache
-    makeLayerCache(int                                layer_id,
-                   const std::string&                 tag,
-                   const rtp_llm::CacheGroupLayout&   group,
-                   const rtp_llm::BlockBufferPtrInfo& buffers) const {
-        RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.defined(),
-                                "KV cache tensor must be defined for layer=%d tag=%s",
-                                layer_id,
-                                tag.c_str());
+    LayerKVCache makeLayerCache(int                                layer_id,
+                                const std::string&                 tag,
+                                const rtp_llm::CacheGroup&         group,
+                                const rtp_llm::BlockBufferPtrInfo& buffers,
+                                uint32_t                           execution_ordinal) const {
+        RTP_LLM_CHECK_WITH_INFO(
+            buffers.kv_addr.defined(), "KV cache tensor must be defined for layer=%d tag=%s", layer_id, tag.c_str());
 
         LayerKVCache result(buffers.kv_addr,
                             static_cast<int>(group.seq_size_per_block),
                             layer_id,
                             tag,
-                            buffers.kv_scale_addr);
+                            buffers.kv_scale_addr,
+                            execution_ordinal);
 
         const auto spec_type = group.spec->type;
         if (grouped_layout_.groupType(tag) == rtp_llm::CacheGroupType::SWA
@@ -193,7 +186,7 @@ private:
         }
 
         const int64_t physical_block_num  = buffers.kv_addr.size(0);
-        const int64_t blocks_per_physical = kernelBlocksPerPhysicalBlock(group);
+        const int64_t blocks_per_physical = static_cast<int64_t>(group.kernelBlocksPerPoolBlock());
         const int64_t kernel_block_num    = physical_block_num * blocks_per_physical;
         const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernel_seq_size_per_block);
         result.seq_size_per_block         = static_cast<int>(kernel_seq_size);
@@ -235,12 +228,8 @@ private:
         }
 
         if (spec_type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention) {
-            result.kv_cache_base = reshapeMlaTensor(buffers.kv_addr,
-                                                    physical_block_num,
-                                                    kernel_block_num,
-                                                    kernel_seq_size,
-                                                    "MLA KV cache tensor",
-                                                    tag);
+            result.kv_cache_base = reshapeMlaTensor(
+                buffers.kv_addr, physical_block_num, kernel_block_num, kernel_seq_size, "MLA KV cache tensor", tag);
             result.kv_scale_base = reshapeMlaTensor(buffers.kv_scale_addr,
                                                     physical_block_num,
                                                     kernel_block_num,
@@ -262,6 +251,7 @@ private:
 
     const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
     const std::vector<std::string>         group_tags_;
+    std::vector<std::vector<LayerKVCache>> layer_caches_;
 };
 
 struct PyModelInitResources {
@@ -312,8 +302,12 @@ struct PyAttentionInputs {
     torch::Tensor kv_cache_kernel_block_id_device;
     // Group-local physical block IDs dedicated for cache store.
     // Shape: [batch, max_blocks].
-    torch::Tensor    kv_cache_block_id;
-    torch::Tensor    kv_cache_block_id_device;
+    torch::Tensor kv_cache_block_id;
+    torch::Tensor kv_cache_block_id_device;
+    // Per-group valid lengths (host int32, one entry per batch row). Empty for the
+    // base attn_inputs and for cache-free models; populated on each per-group copy.
+    torch::Tensor    pool_valid_lengths;
+    torch::Tensor    kernel_valid_lengths;
     caffe2::TypeMeta dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
     // cu_seqlens_device lives on CUDA device; cu_seqlens is its pinned-memory CPU mirror
@@ -342,6 +336,10 @@ struct PyAttentionInputs {
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
+    // Optional graph-runner-owned workspace shared by every cache-free ragged
+    // prefill capture key. Undefined for eager, decode, and paged attention.
+    torch::Tensor cuda_graph_shared_workspace;
+
     std::optional<PyContextParallelParams> context_parallel_info;
 
     // Headwise attention config (Python dict or None).
@@ -367,23 +365,15 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> mm_extra_input;
 };
 
-using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
-
 struct PyModelInputs {
-    torch::Tensor      input_ids;
-    torch::Tensor      input_hiddens;
-    torch::Tensor      combo_position_ids;
-    PyEmbeddingInputs  embedding_inputs;
-    PyMultimodalInputs multimodal_inputs;
-    // C++ common/single-group fast path. Python sees this field through a
-    // property which returns either this object or attention_inputs_by_tag.
-    PyAttentionInputs    attention_inputs;
-    AttentionInputsByTag attention_inputs_by_tag;
-    BertEmbeddingInputs  bert_embedding_inputs;
-
-    bool hasAttentionInputsByTag() const {
-        return !attention_inputs_by_tag.empty();
-    }
+    torch::Tensor                            input_ids;
+    torch::Tensor                            input_hiddens;
+    torch::Tensor                            combo_position_ids;
+    PyEmbeddingInputs                        embedding_inputs;
+    PyMultimodalInputs                       multimodal_inputs;
+    PyAttentionInputs                        attention_inputs;
+    std::map<std::string, PyAttentionInputs> cache_group_attn_inputs;
+    BertEmbeddingInputs                      bert_embedding_inputs;
 };
 
 struct PyModelOutputs {

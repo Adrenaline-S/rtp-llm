@@ -11,7 +11,7 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -29,24 +29,24 @@ constexpr std::string_view kTinyLinearTag = "linear";
 constexpr std::string_view kTinyFullTag   = "full1";
 
 static CacheConfig makeTinyHybridConfig() {
-    auto config                      = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+    auto config = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
                                                  /*block_num=*/10,
                                                  /*tokens_per_block=*/4,
                                                  rtp_llm::DataType::TYPE_FP16,
                                                  /*group_layer_num=*/2,
                                                  /*local_head_num_kv=*/1,
                                                  /*size_per_head=*/1);
-    config.kernel_seq_size_per_block = 2;
-    return config;
+    return TestCacheConfigBuilder::rebuildForTest(std::move(config)).setKernelBlockTokens(2).build();
 }
 
 static CacheConfig makeReorderedTinyHybridConfig() {
     auto config = makeTinyHybridConfig();
     auto groups = config.groups();
-    auto layers = config.layerMemberships();
+    auto layers = config.layers();
     std::reverse(groups.begin(), groups.end());
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, std::move(groups), std::move(layers));
-    return config;
+    return TestCacheConfigBuilder::rebuildForTest(std::move(config))
+        .setTopology(std::move(groups), std::move(layers))
+        .build();
 }
 
 static ModelConfig makeTinyModelConfig(uint32_t num_layers) {
@@ -148,15 +148,13 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig(SpeculativeType    sp
     sp_cfg.type              = sp_type;
     sp_cfg.gen_num_per_cycle = gen_num;
 
-    return CacheConfigCreator::createSpConfig(score_model_cfg,
-                                              propose_model_cfg,
-                                              parallelism_cfg,
-                                              runtime_cfg,
-                                              kv_cache_cfg,
-                                              sp_cfg,
-                                              /*warm_up_result=*/std::nullopt,
-                                              /*is_mtp=*/true,
-                                              /*is_eagle=*/sp_type == SP_TYPE_EAGLE);
+    return CacheConfigCreator::createRankLocalSpeculativeConfig(score_model_cfg,
+                                                                propose_model_cfg,
+                                                                parallelism_cfg,
+                                                                runtime_cfg,
+                                                                kv_cache_cfg,
+                                                                sp_cfg,
+                                                                /*warm_up_result=*/std::nullopt);
 }
 
 static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
@@ -184,7 +182,7 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
     return res;
 }
 
-static int estimateBatchPeakForSingleSequence(const KVCacheAllocator&        allocator,
+static int estimateBatchPeakForSingleSequence(const CoordinatorCacheManager& allocator,
                                               const BatchKVCacheResourcePtr& batch_resource,
                                               int                            seq_len,
                                               int                            remaining_tokens,
@@ -240,7 +238,7 @@ static size_t countValidBlocks(const BlockIndicesType& blocks) {
     return n;
 }
 
-class HybridPoolKVCacheAllocatorHybridPathTest: public ::testing::Test {
+class CoordinatorCacheManagerMultiGroupTest: public ::testing::Test {
 protected:
     void SetUp() override {
         rtp_llm::initLogger();
@@ -248,45 +246,43 @@ protected:
     }
 };
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigAllowsOnlyFullGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigAllowsOnlyFullGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE});
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config       = CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
     ASSERT_EQ(cache_config.groupNums(), 1);
     EXPECT_EQ(cache_config.group("full").policy.group_type, CacheGroupType::FULL);
     EXPECT_EQ(cache_config.group("full").tag, "full");
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigRejectsMultipleFullGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigRejectsMultipleFullGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescsWithTags(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE}, {"full", "full1"});
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
     try {
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+        CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
         FAIL() << "expected multiple full groups to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("multiple full attention cache groups"), std::string::npos);
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigKeepsModelTokensPerBlock) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigKeepsModelTokensPerBlock) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE});
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
 
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
-    EXPECT_EQ(cache_config.seq_size_per_block, 4);
+    auto cache_config = CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
+    EXPECT_EQ(cache_config.cacheKeyBlockTokens(), 4);
     ASSERT_EQ(cache_config.groupNums(), 1);
-    EXPECT_EQ(cache_config.soleGroupForLayer(0).layout.spec->seq_size_per_block, 4);
+    EXPECT_EQ(cache_config.soleGroupForLayer(0).spec->seq_size_per_block, 4);
 }
 
 TEST(HybridCacheConfigTest, LinearSpecRejectsHeadsNotDivisibleByAttentionTp) {
@@ -332,7 +328,7 @@ TEST(HybridCacheConfigTest, LinearSpecUsesTensorParallelLocalHeadsForBlockSizes)
     EXPECT_EQ(spec->block_size(), 160u);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigRejectsOnlyLinearGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigRejectsOnlyLinearGroups) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::LINEAR, HybridAttentionType::LINEAR});
     cfg.linear_attention_config.linear_conv_kernel_dim = 2;
@@ -344,14 +340,14 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigRejectsOnlyLi
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
     try {
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+        CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
         FAIL() << "expected a linear-only hybrid config to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("exactly one FULL MHA/MLA cache group"), std::string::npos);
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateSingleConfigRejectsLinearDescriptor) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateSingleConfigRejectsLinearDescriptor) {
     auto cfg                                            = makeTinyModelConfig(/*num_layers=*/1);
     cfg.hybrid_attention_config.enable_hybrid_attention = false;
     cfg.kv_cache_spec_descs = {{KVCacheSpecDesc{"linear", KVCacheSpecType::LinearAttention}}};
@@ -364,44 +360,50 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateSingleConfigRejectsLinear
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
     try {
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+        CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
         FAIL() << "expected a linear-only single config to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("exactly one FULL MHA/MLA cache group"), std::string::npos);
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, TopologyRejectsSpecPolicyTypeMismatch) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, TopologyRejectsSpecPolicyTypeMismatch) {
     auto config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     auto groups      = config.groups();
-    auto layers      = config.layerMemberships();
+    auto layers      = config.layers();
     groups[0].policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    EXPECT_THROW(rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, std::move(groups), std::move(layers)),
+    EXPECT_THROW(TestCacheConfigBuilder::rebuildForTest(std::move(config))
+                     .setTopology(std::move(groups), std::move(layers))
+                     .build(),
                  std::runtime_error);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, TopologyRejectsGroupLayerMissingForwardGid) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, TopologyRejectsGroupLayerMissingForwardGid) {
     auto config = makeTinyHybridConfig();
     auto groups = config.groups();
-    auto layers = config.layerMemberships();
+    auto layers = config.layers();
     groups[0].layer_ids.push_back(2);
 
-    EXPECT_THROW(rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, std::move(groups), std::move(layers)),
+    EXPECT_THROW(TestCacheConfigBuilder::rebuildForTest(std::move(config))
+                     .setTopology(std::move(groups), std::move(layers))
+                     .build(),
                  std::runtime_error);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, TopologyRejectsMissingLayerTagMapping) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, TopologyRejectsMissingLayerTagMapping) {
     auto config = makeTinyHybridConfig();
     auto groups = config.groups();
-    auto layers = config.layerMemberships();
-    layers[0].group_tags.clear();
+    auto layers = config.layers();
+    layers[0].clear();
 
-    EXPECT_THROW(rtp_llm::test::TestCacheConfigBuilder::setResolvedData(config, std::move(groups), std::move(layers)),
+    EXPECT_THROW(TestCacheConfigBuilder::rebuildForTest(std::move(config))
+                     .setTopology(std::move(groups), std::move(layers))
+                     .build(),
                  std::runtime_error);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest,
+TEST_F(CoordinatorCacheManagerMultiGroupTest,
        CreateHybridConfigUsesOneModelDeclaredHomogeneousLinearTagAndKeepsFullFirst) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/8);
     setHybridLayerDescsWithTags(cfg,
@@ -422,8 +424,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest,
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto cache_config       = CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
 
     std::vector<std::string>    expected_tags{"full", "linear"};
     std::vector<CacheGroupType> expected_types{CacheGroupType::FULL, CacheGroupType::LINEAR};
@@ -439,7 +440,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest,
     EXPECT_EQ(cache_config.group("linear").layer_ids, expected_linear);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigKeepsExplicitPhysicallyHeterogeneousLinearTags) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigKeepsExplicitPhysicallyHeterogeneousLinearTags) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/4);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -456,19 +457,18 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigKeepsExplicit
     cfg.kv_cache_spec_descs[1][0].dtype                = DataType::TYPE_FP32;
 
     ParallelismConfig parallelism_cfg;
-    auto              config =
-        CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    auto              config = CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0);
 
-    ASSERT_TRUE(config.use_independent_block_pools);
+    ASSERT_TRUE(config.usesIndependentBlockPools());
     ASSERT_EQ(config.groupNums(), 3);
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"full", "recurrent_state", "convolution_state"}));
     EXPECT_TRUE(config.group("recurrent_state").policy.enable_prefix_reuse);
     EXPECT_TRUE(config.group("convolution_state").policy.enable_prefix_reuse);
-    EXPECT_EQ(config.group("recurrent_state").layout.spec->memoryLayoutDType(), DataType::TYPE_FP16);
-    EXPECT_EQ(config.group("convolution_state").layout.spec->memoryLayoutDType(), DataType::TYPE_FP32);
+    EXPECT_EQ(config.group("recurrent_state").spec->memoryLayoutDType(), DataType::TYPE_FP16);
+    EXPECT_EQ(config.group("convolution_state").spec->memoryLayoutDType(), DataType::TYPE_FP32);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigRejectsDifferentLayoutsUnderOneLinearTag) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateHybridConfigRejectsDifferentLayoutsUnderOneLinearTag) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/4);
     setHybridLayerDescsWithTags(cfg,
                                 {HybridAttentionType::LINEAR,
@@ -485,19 +485,18 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateHybridConfigRejectsDiffer
     cfg.kv_cache_spec_descs[1][0].dtype                = DataType::TYPE_BF16;
 
     ParallelismConfig parallelism_cfg;
-    EXPECT_THROW(
-        (void)CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0),
-        std::runtime_error);
+    EXPECT_THROW((void)CacheConfigCreator::createDecodeWarmupConfig(cfg, parallelism_cfg, KVCacheConfig{}, 0),
+                 std::runtime_error);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, InitAndAddressLookupSmoke) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, InitAndAddressLookupSmoke) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->seqSizePerBlock(), 4);
-    EXPECT_EQ(allocator->totalBlocksNum(), (config.block_num - 1) * config.groupNums());
-    EXPECT_EQ(allocator->freeBlocksNum(), (config.block_num - 1) * config.groupNums());
+    EXPECT_EQ(allocator->totalBlocksNum(), (config.blockCountBasis() - 1) * config.groupNums());
+    EXPECT_EQ(allocator->freeBlocksNum(), (config.blockCountBasis() - 1) * config.groupNums());
 
     // Should be able to fetch address for any global layer and non-zero block id.
     auto addr0 = allocator->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
@@ -506,9 +505,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, InitAndAddressLookupSmoke) {
     EXPECT_NE(addr3.kv_addr, nullptr);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, ConvertToGlobalLayerIdHybridNoMtp) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, ConvertToGlobalLayerIdHybridNoMtp) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
 
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/0), 0u);
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/3), 3u);
@@ -520,9 +519,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, ConvertToGlobalLayerIdHybridNoM
               std::numeric_limits<uint32_t>::max());
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, ConvertToGlobalLayerIdHybridWithMtpSubConfigs) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, ConvertToGlobalLayerIdHybridWithMtpSubConfigs) {
     auto config    = makeTinyHybridMtpConfigByCreateSpConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
 
     ASSERT_EQ(config.mtpModuleCount(), 2u);
     for (size_t mtp_id = 0; mtp_id < config.mtpModuleCount(); ++mtp_id) {
@@ -544,7 +543,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, ConvertToGlobalLayerIdHybridWit
               std::numeric_limits<uint32_t>::max());
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EagleMapsSoleDefaultFullDraftGroupToUniqueFullTargetGroup) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, EagleMapsSoleDefaultFullDraftGroupToUniqueFullTargetGroup) {
     auto config = makeTinyHybridMtpConfigByCreateSpConfig(SP_TYPE_EAGLE, "default");
 
     ASSERT_EQ(config.mtpModuleCount(), 1u);
@@ -555,14 +554,14 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EagleMapsSoleDefaultFullDraftGr
     EXPECT_EQ(sub_config.groupForLayer(0, "full").tag, full_tag);
     EXPECT_EQ(sub_config.group(full_tag).layer_ids, std::vector<int>({0}));
     EXPECT_EQ(sub_config.group(full_tag).tag, "full");
-    EXPECT_EQ(sub_config.group(full_tag).layout.spec->type, KVCacheSpecType::MultiHeadAttention);
+    EXPECT_EQ(sub_config.group(full_tag).spec->type, KVCacheSpecType::MultiHeadAttention);
 
     const std::string linear_tag = "linear";
     EXPECT_TRUE(sub_config.group(linear_tag).layer_ids.empty());
 
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
-    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    auto allocator = manager->coordinator_cache_manager_;
     ASSERT_NE(allocator, nullptr);
     EXPECT_EQ(allocator->blockPool("full")->config_.memory_layouts.size(), 2u);
     EXPECT_EQ(allocator->blockPool("linear")->config_.memory_layouts.size(), 1u);
@@ -571,7 +570,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EagleMapsSoleDefaultFullDraftGr
     EXPECT_TRUE(layout.group("linear").empty());
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpMapsDefaultFullDraftGroupForEveryModule) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MtpMapsDefaultFullDraftGroupForEveryModule) {
     auto config = makeTinyHybridMtpConfigByCreateSpConfig(SP_TYPE_MTP, "default", /*gen_num=*/2);
 
     ASSERT_EQ(config.mtpModuleCount(), 2u);
@@ -588,13 +587,13 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpMapsDefaultFullDraftGroupFor
 
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
-    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    auto allocator = manager->coordinator_cache_manager_;
     ASSERT_NE(allocator, nullptr);
     EXPECT_EQ(allocator->blockPool("full")->config_.memory_layouts.size(), 3u);
     EXPECT_EQ(allocator->blockPool("linear")->config_.memory_layouts.size(), 1u);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateSpConfigPreservesQwenPackingAlignmentForFullMtpLayers) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, CreateSpConfigPreservesQwenPackingAlignmentForFullMtpLayers) {
     auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/8);
     auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
 
@@ -625,18 +624,16 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateSpConfigPreservesQwenPack
     sp_cfg.gen_num_per_cycle = 2;
 
     CacheConfig config;
-    ASSERT_NO_THROW(config = CacheConfigCreator::createSpConfig(score_model_cfg,
-                                                                propose_model_cfg,
-                                                                parallelism_cfg,
-                                                                runtime_cfg,
-                                                                kv_cache_cfg,
-                                                                sp_cfg,
-                                                                /*warm_up_result=*/std::nullopt,
-                                                                /*is_mtp=*/true,
-                                                                /*is_eagle=*/false));
+    ASSERT_NO_THROW(config = CacheConfigCreator::createRankLocalSpeculativeConfig(score_model_cfg,
+                                                                                  propose_model_cfg,
+                                                                                  parallelism_cfg,
+                                                                                  runtime_cfg,
+                                                                                  kv_cache_cfg,
+                                                                                  sp_cfg,
+                                                                                  /*warm_up_result=*/std::nullopt));
 
     EXPECT_EQ(groupTagSet(config), (std::set<std::string>{"full", "linear"}));
-    EXPECT_EQ(config.group_layer_num, 2);
+    EXPECT_EQ(config.sharedPoolLayoutLayerCount(), 2);
     ASSERT_EQ(config.mtpModuleCount(), 2u);
 
     const std::string full_tag   = "full";
@@ -653,7 +650,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, CreateSpConfigPreservesQwenPack
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpAliasesCompatibleDefaultMlaGroup) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpAliasesCompatibleDefaultMlaGroup) {
     auto main_config    = makeSingleLayerCacheConfig(makeResolvedMlaSpec(DataType::TYPE_FP16,
                                                                       /*kv_lora_rank=*/1,
                                                                       /*rope_head_dim=*/1,
@@ -669,50 +666,50 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpAliasesCompatibleDefaul
                                                      CacheGroupType::FULL,
                                                      "default");
 
-    const auto sub_config = rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-        main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/1);
-    ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(groupTagSet(*sub_config), (std::set<std::string>{"full"}));
-    EXPECT_EQ(sub_config->group("full").layout.spec->type, KVCacheSpecType::MultiHeadLatentAttention);
-    EXPECT_EQ(sub_config->group("full").tag, "full");
-    EXPECT_EQ(sub_config->group("full").layer_ids, std::vector<int>({0}));
+    main_config = TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+                      .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
+                      .build();
+    const auto& sub_config = main_config.mtpModule(0);
+    EXPECT_EQ(groupTagSet(sub_config), (std::set<std::string>{"full"}));
+    EXPECT_EQ(sub_config.group("full").spec->type, KVCacheSpecType::MultiHeadLatentAttention);
+    EXPECT_EQ(sub_config.group("full").tag, "full");
+    EXPECT_EQ(sub_config.group("full").layer_ids, std::vector<int>({0}));
     EXPECT_EQ(main_config.group("full").layer_ids, std::vector<int>({0, 1}));
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
-    CacheConfig main_config;
-    main_config.layer_num       = 2;
-    main_config.layer_all_num   = 2;
-    main_config.group_layer_num = 1;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
-        main_config,
-        {makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1)},
-        {{0}, {1}},
-        {CacheGroupType::FULL, CacheGroupType::FULL},
-        {"full0", "full1"});
-    main_config.layer_to_block_stride_bytes.assign(3, 1);
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
+    auto main_builder = TestCacheConfigBuilder::makeBase(2, 0, 1, 1, DataType::TYPE_INVALID);
+    auto main_config  = main_builder.setSharedPoolLayoutLayerCount(1)
+                           .setGroupedSpecs({makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1),
+                                             makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1)},
+                                            {{0}, {1}},
+                                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                                            {"full0", "full1"})
+                           .build();
 
     auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
 
     try {
-        rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-            main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/2);
+        TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2)
+            .build();
         FAIL() << "expected an ambiguous default FULL group mapping to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("ambiguous default FULL group mapping"), std::string::npos);
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpDoesNotAliasDefaultFullGroupToLinearTarget) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpDoesNotAliasDefaultFullGroupToLinearTarget) {
     auto main_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
 
     try {
-        rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-            main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/1);
+        TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
+            .build();
         FAIL() << "expected a default FULL group without a compatible target to be rejected";
     } catch (const std::runtime_error& e) {
         const std::string message = e.what();
@@ -721,11 +718,12 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpDoesNotAliasDefaultFull
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpRejectsIncompatibleDefaultFullGroupAlias) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsIncompatibleDefaultFullGroupAlias) {
     const auto expect_no_compatible_alias = [](CacheConfig target_config, const CacheConfig& propose_config) {
         try {
-            rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-                target_config, propose_config, /*module_index=*/0, /*main_layer_num=*/1);
+            TestCacheConfigBuilder::rebuildForTest(std::move(target_config))
+                .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
+                .build();
             FAIL() << "expected an incompatible default FULL group alias to be rejected";
         } catch (const std::runtime_error& e) {
             const std::string message = e.what();
@@ -775,22 +773,21 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpRejectsIncompatibleDefa
     auto target_with_different_policy = target;
     auto target_policy                = target_with_different_policy.soleGroupForLayer(0).policy;
     target_policy.explicit_block_num  = 2;
-    rtp_llm::test::TestCacheConfigBuilder::setGroupPolicies(target_with_different_policy, {target_policy});
+    target_with_different_policy      = TestCacheConfigBuilder::rebuildForTest(std::move(target_with_different_policy))
+                                       .setGroupPolicies({target_policy})
+                                       .build();
     expect_no_compatible_alias(target_with_different_policy, compatible_propose);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpPrefersExactDefaultGroupMatch) {
-    CacheConfig main_config;
-    main_config.layer_num       = 2;
-    main_config.layer_all_num   = 2;
-    main_config.group_layer_num = 1;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
-        main_config,
-        {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
-        {{0}, {1}},
-        {CacheGroupType::FULL, CacheGroupType::FULL},
-        {"default", "aux"});
-    main_config.layer_to_block_stride_bytes.assign(3, 1);
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpPrefersExactDefaultGroupMatch) {
+    auto main_builder = TestCacheConfigBuilder::makeBase(2, 0, 1, 1, DataType::TYPE_INVALID);
+    auto main_config  = main_builder.setSharedPoolLayoutLayerCount(1)
+                           .setGroupedSpecs({makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1),
+                                             makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
+                                            {{0}, {1}},
+                                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                                            {"default", "aux"})
+                           .build();
 
     auto propose_config = makeSingleLayerCacheConfig(makeMhaSpec("default",
                                                                  /*tokens_per_block=*/4,
@@ -800,19 +797,20 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpPrefersExactDefaultGrou
                                                      CacheGroupType::FULL,
                                                      "default");
 
-    const auto sub_config = rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-        main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/2);
-    ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(groupTagSet(*sub_config), (std::set<std::string>{"default", "aux"}));
+    main_config = TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+                      .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2)
+                      .build();
+    const auto& sub_config = main_config.mtpModule(0);
+    EXPECT_EQ(groupTagSet(sub_config), (std::set<std::string>{"default", "aux"}));
     const std::string default_tag = "default";
     const std::string aux_tag     = "aux";
-    EXPECT_EQ(sub_config->group(default_tag).layer_ids, std::vector<int>({0}));
-    EXPECT_TRUE(sub_config->group(aux_tag).layer_ids.empty());
+    EXPECT_EQ(sub_config.group(default_tag).layer_ids, std::vector<int>({0}));
+    EXPECT_TRUE(sub_config.group(aux_tag).layer_ids.empty());
     EXPECT_EQ(main_config.group(default_tag).layer_ids, std::vector<int>({0, 2}));
     EXPECT_EQ(main_config.group(aux_tag).layer_ids, std::vector<int>({1}));
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpDoesNotAliasDefaultLinearProposeGroup) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpDoesNotAliasDefaultLinearProposeGroup) {
     auto main_config = makeSingleLayerCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL,
@@ -824,33 +822,37 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpDoesNotAliasDefaultLine
         "default");
 
     try {
-        rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-            main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/1);
+        TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
+            .build();
         FAIL() << "expected a default Linear propose group not to use the FULL alias";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer 0"), std::string::npos);
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpAliasErrorIdentifiesSourceAndTargetTags) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpAliasErrorIdentifiesSourceAndTargetTags) {
     auto main_config = makeSingleGroupCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL,
         /*layer_num=*/2,
         /*block_num=*/4,
         "full");
-    main_config.group_layer_num = 2;
-    auto propose_config         = makeSimpleMhaCacheConfig(
+    main_config =
+        TestCacheConfigBuilder::rebuildForTest(std::move(main_config)).setSharedPoolLayoutLayerCount(2).build();
+    auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, DataType::TYPE_FP16);
     auto propose_groups         = propose_config.groups();
-    auto propose_layers         = propose_config.layerMemberships();
+    auto propose_layers         = propose_config.layers();
     propose_groups[0].layer_ids = {1, 0};
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
-        propose_config, std::move(propose_groups), std::move(propose_layers));
+    propose_config              = TestCacheConfigBuilder::rebuildForTest(std::move(propose_config))
+                         .setTopology(std::move(propose_groups), std::move(propose_layers))
+                         .build();
 
     try {
-        rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-            main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/2);
+        TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2)
+            .build();
         FAIL() << "expected reordered aliased source layers to be rejected";
     } catch (const std::runtime_error& e) {
         const std::string message = e.what();
@@ -859,88 +861,85 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpAliasErrorIdentifiesSou
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpDoesNotAliasMultiGroupProposeConfig) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpDoesNotAliasMultiGroupProposeConfig) {
     auto main_config = makeSingleLayerCacheConfig(
         makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
         CacheGroupType::FULL,
         "full");
 
-    CacheConfig propose_config;
-    propose_config.layer_num       = 1;
-    propose_config.layer_all_num   = 1;
-    propose_config.group_layer_num = 1;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
-        propose_config,
-        {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
-        {{0}, {0}},
-        {CacheGroupType::FULL, CacheGroupType::FULL},
-        {"default", "aux"});
-    propose_config.layer_to_block_stride_bytes = {1};
+    auto propose_builder = TestCacheConfigBuilder::makeBase(1, 0, 1, 1, DataType::TYPE_INVALID);
+    auto propose_config  = propose_builder.setSharedPoolLayoutLayerCount(1)
+                              .setGroupedSpecs({makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1),
+                                                makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
+                                               {{0}, {0}},
+                                               {CacheGroupType::FULL, CacheGroupType::FULL},
+                                               {"default", "aux"})
+                              .build();
 
     try {
-        rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-            main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/1);
+        TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+            .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1)
+            .build();
         FAIL() << "expected a multi-group propose config not to use the default alias";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer 0"), std::string::npos);
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpRejectsShortTargetGroup) {
-    CacheConfig main_config;
-    main_config.layer_num       = 5;
-    main_config.layer_all_num   = 5;
-    main_config.group_layer_num = 3;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
-        main_config,
-        {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
-        {{0, 1, 2}, {3, 4}},
-        {CacheGroupType::FULL, CacheGroupType::LINEAR},
-        {"full", "linear"});
-    main_config.layer_to_block_stride_bytes.assign(6, 1);
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsShortTargetGroup) {
+    auto main_builder = TestCacheConfigBuilder::makeBase(5, 0, 1, 1, DataType::TYPE_INVALID);
+    auto main_config  = main_builder.setSharedPoolLayoutLayerCount(3)
+                           .setGroupedSpecs({makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1),
+                                             makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
+                                            {{0, 1, 2}, {3, 4}},
+                                            {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                                            {"full", "linear"})
+                           .build();
 
     auto propose_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    EXPECT_THROW(rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-                     main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/5),
+    EXPECT_THROW(TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+                     .addComposedMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/5)
+                     .build(),
                  std::runtime_error);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MergeMtpRejectsPartialOrReorderedSourceGroup) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MergeMtpRejectsPartialOrReorderedSourceGroup) {
     auto main_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    main_config.group_layer_num = 2;
-    main_config.layer_to_block_stride_bytes.assign(4, 1);
+    main_config =
+        TestCacheConfigBuilder::rebuildForTest(std::move(main_config)).setSharedPoolLayoutLayerCount(2).build();
 
-    CacheConfig partial_source;
-    partial_source.layer_num     = 2;
-    partial_source.layer_all_num = 2;
-    rtp_llm::test::TestCacheConfigBuilder::fromGroupedSpecs(
-        partial_source,
-        {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
-        {{0}, {1}},
-        {CacheGroupType::FULL, CacheGroupType::FULL},
-        {"default", "aux"});
-    partial_source.layer_to_block_stride_bytes.assign(2, 1);
-    EXPECT_THROW(rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-                     main_config, partial_source, /*module_index=*/0, /*main_layer_num=*/2),
+    auto partial_builder = TestCacheConfigBuilder::makeBase(2, 0, 1, 1, DataType::TYPE_INVALID);
+    auto partial_source  = partial_builder
+                              .setGroupedSpecs({makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1),
+                                                makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
+                                               {{0}, {1}},
+                                               {CacheGroupType::FULL, CacheGroupType::FULL},
+                                               {"default", "aux"})
+                              .build();
+    EXPECT_THROW(TestCacheConfigBuilder::rebuildForTest(main_config)
+                     .addComposedMTPModule(partial_source, /*module_index=*/0, /*main_layer_num=*/2)
+                     .build(),
                  std::runtime_error);
 
     auto reordered_source = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     auto reordered_groups         = reordered_source.groups();
-    auto reordered_layers         = reordered_source.layerMemberships();
+    auto reordered_layers         = reordered_source.layers();
     reordered_groups[0].layer_ids = {1, 0};
-    rtp_llm::test::TestCacheConfigBuilder::setResolvedData(
-        reordered_source, std::move(reordered_groups), std::move(reordered_layers));
-    EXPECT_THROW(rtp_llm::test::TestCacheConfigBuilder::mergeMTPModule(
-                     main_config, reordered_source, /*module_index=*/0, /*main_layer_num=*/2),
+    reordered_source              = TestCacheConfigBuilder::rebuildForTest(std::move(reordered_source))
+                           .setTopology(std::move(reordered_groups), std::move(reordered_layers))
+                           .build();
+    EXPECT_THROW(TestCacheConfigBuilder::rebuildForTest(std::move(main_config))
+                     .addComposedMTPModule(reordered_source, /*module_index=*/0, /*main_layer_num=*/2)
+                     .build(),
                  std::runtime_error);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpPhysicalSlotsDoNotAliasMainSlots) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MtpPhysicalSlotsDoNotAliasMainSlots) {
     auto config    = makeTinyHybridMtpConfigByCreateSpConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const auto main0 = allocator->convertIndexToAddr(/*layer_id=*/2, /*block_id=*/1);
@@ -958,7 +957,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpPhysicalSlotsDoNotAliasMainS
     EXPECT_NE(mtp0.kv_addr, mtp1.kv_addr);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpLayoutProjectionRecountsActiveLayersAndKeepsEmptyPlaceholder) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, MtpLayoutProjectionRecountsActiveLayersAndKeepsEmptyPlaceholder) {
     auto config  = makeTinyHybridMtpConfigByCreateSpConfig();
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
@@ -972,9 +971,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpLayoutProjectionRecountsActi
     EXPECT_TRUE(layout.at("full", 0).kv_addr.defined());
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReuseFlag) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReuseFlag) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // batch=2, seq_len=12 (3 slots), reserve_step=2
@@ -1009,9 +1008,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, GetNeedBlocksUsesGroupGetNeedBl
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, JointReuseUsesFullPrefixAndLinearTailOnly) {
     auto config       = makeTinyHybridConfig();
-    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -1055,9 +1054,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, JointReuseUsesFullPrefixAndLine
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));  // allocated tail for common length
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, DisableReuseKeepsOnlyLinearTailOnInitMalloc) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
@@ -1079,9 +1078,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, DisableReuseKeepsOnlyLinearTail
     EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesOnlyLinearTail) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, DisableDeviceCacheSkipsReuseMatchAndAllocatesOnlyLinearTail) {
     auto config       = makeTinyHybridConfig();
-    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -1127,9 +1126,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, DisableDeviceCacheSkipsReuseMat
     EXPECT_EQ(countValidBlocks(linear_out), 1u);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockForksSharedBlocksAcrossGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, UpdateKVBlockForksSharedBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     const size_t free_before   = allocator->freeBlocksNum();
@@ -1187,9 +1186,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockForksSharedBlocksA
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     const size_t free_before   = allocator->freeBlocksNum();
@@ -1243,9 +1242,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockCopyLastBlockAcros
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReservationFailureLeavesResourceUnchanged) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, UpdateKVBlockReservationFailureLeavesResourceUnchanged) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     const size_t free_before   = allocator->freeBlocksNum();
@@ -1285,9 +1284,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReservationFailure
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReorderedTopologyPreservesTagPayloadPairing) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, UpdateKVBlockReorderedTopologyPreservesTagPayloadPairing) {
     auto config    = makeReorderedTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     const auto linear_pool   = allocator->blockPool(kTinyLinearTag);
@@ -1318,9 +1317,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReorderedTopologyP
     allocator->free(FreeInfo{batch_res, nullptr});
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReorderedTopologyRollsBackEarlierTagOnFailure) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, UpdateKVBlockReorderedTopologyRollsBackEarlierTagOnFailure) {
     auto config    = makeReorderedTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     const auto linear_pool   = allocator->blockPool(kTinyLinearTag);
@@ -1353,9 +1352,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReorderedTopologyR
     full_pool->requestFree(BlockIndicesType(full_blocks.begin() + 1, full_blocks.end()));
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReusesDroppedBatchCapacityTransactionally) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, UpdateKVBlockReusesDroppedBatchCapacityTransactionally) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     const size_t free_before   = allocator->freeBlocksNum();
@@ -1392,9 +1391,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockReusesDroppedBatch
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockTransfersAndFreesPoolBlockZeroWithoutLeakingRefs) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, UpdateKVBlockTransfersAndFreesPoolBlockZeroWithoutLeakingRefs) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     const size_t free_before = allocator->freeBlocksNum();
@@ -1463,9 +1462,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, UpdateKVBlockTransfersAndFreesP
         << "both explicitly-owned block-zero identities must be released exactly once";
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, IncrDecrKVCacheRefReferencesOnlyMatchedPresentBlocksAcrossGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, IncrDecrKVCacheRefReferencesOnlyMatchedPresentBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
 
     const size_t free_before   = allocator->freeBlocksNum();
@@ -1515,9 +1514,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, IncrDecrKVCacheRefReferencesOnl
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, InsertIntoCacheInsertsOnlyFullBlocks) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     auto config       = makeTinyHybridConfig();
-    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -1550,12 +1549,12 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, InsertIntoCacheInsertsOnlyFullB
     EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(102, "linear")));
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
     auto config = makeTinyHybridConfig();
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_TRUE(config.group(kTinyLinearTag).policy.enable_prefix_reuse);
 
-    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -1582,13 +1581,13 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, DefaultHybridLinearPrefixReuseS
     EXPECT_EQ(result.reuse_len, 12);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    KVCacheAllocator* base = allocator.get();
-    auto              buf0 = base->convertIndexToBuffer(/*layer_id=*/0, /*block_id=*/1);
+    CoordinatorCacheManager* base = allocator.get();
+    auto                     buf0 = base->convertIndexToBuffer(/*layer_id=*/0, /*block_id=*/1);
     ASSERT_FALSE(buf0.empty());
     EXPECT_NE(buf0[0].addr, nullptr);
 
@@ -1600,13 +1599,13 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, ConvertIndexToBufferAndAllLayer
     ASSERT_FALSE(full_buf.empty());
     EXPECT_NE(linear_buf[0].addr, nullptr);
     EXPECT_NE(full_buf[0].addr, nullptr);
-    EXPECT_EQ(linear_buf[0].size_bytes, config.group(linear_tag).layout.kv_block_stride_bytes);
-    EXPECT_EQ(full_buf[0].size_bytes, config.group(full_tag).layout.kv_block_stride_bytes);
-    EXPECT_LT(linear_buf[0].size_bytes, config.kv_block_stride_bytes);
+    EXPECT_EQ(linear_buf[0].size_bytes, config.group(linear_tag).kv_block_stride_bytes);
+    EXPECT_EQ(full_buf[0].size_bytes, config.group(full_tag).kv_block_stride_bytes);
+    EXPECT_LT(linear_buf[0].size_bytes, config.sharedPoolKvBlockStrideBytes());
 
     auto layout = allocator->allLayerCacheBase();
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
-    ASSERT_EQ(layout.layerCount(), static_cast<size_t>(config.layer_num));
+    ASSERT_EQ(layout.layerCount(), config.mainLayerCount());
     for (size_t i = 0; i < layout.layerCount(); ++i) {
         for (const auto& tag : layout.groupTagsForLayer(static_cast<int>(i))) {
             EXPECT_TRUE(layout.group(tag).hasLayer(i));
@@ -1614,11 +1613,12 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, ConvertIndexToBufferAndAllLayer
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
     auto config = makeTinyHybridConfig();
-    config      = CacheConfigCreator::finalizeBlockNums(
-        config, /*global_block_num=*/6, RuntimeConfig{});  // five usable blocks per group
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    config      = TestCacheConfigBuilder::rebuildForTest(std::move(config))
+                 .setProjectedBlockCountBasis(6)
+                 .build();  // five usable blocks per group
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const auto linear_pool = allocator->blockPool("linear");
@@ -1671,10 +1671,10 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, IncrMallocRollbackFreesPartiall
 // With step=2 and reuse_blocks_len=3, the reused linear tail lands at pos 2, which is NOT
 // a step hit ((2+1)%2==1). Without sparse cleanup, that slot must survive so that
 // causal_conv1d can still read it by prefix_length.
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
-    auto config       = makeTinyHybridConfig();
-    config            = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/16, RuntimeConfig{});
-    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+TEST_F(CoordinatorCacheManagerMultiGroupTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
+    auto config    = makeTinyHybridConfig();
+    config         = TestCacheConfigBuilder::rebuildForTest(std::move(config)).setProjectedBlockCountBasis(16).build();
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -1714,10 +1714,10 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, PrefillInitSkipsSparseCleanupAn
 // The allocator is invoked on an already-populated resource, so malloc() dispatches directly
 // to incrMalloc(). Sparse cleanup must prune non-step blocks while preserving step hits and
 // the configured active tail slot.
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
     auto config    = makeTinyHybridConfig();
-    config         = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/16, RuntimeConfig{});
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    config         = TestCacheConfigBuilder::rebuildForTest(std::move(config)).setProjectedBlockCountBasis(16).build();
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const auto linear_pool = allocator->blockPool("linear");
@@ -1762,13 +1762,13 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, DecodeIncrMallocAppliesSparseCl
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimatePeakNeedBlocks) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, EstimatePeakNeedBlocks) {
     // Config: layers [0,1] belong to the linear group, [2,3] to the full group. seq_size_per_block=4.
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    const int blk = config.seq_size_per_block;  // 4
+    const int blk = config.cacheKeyBlockTokens();  // 4
 
     // New resource (cur_slots=0 for both groups):
     // reuse disabled: full=ceil(108/4)=27, linear tail peak=3 => total=30.
@@ -1783,7 +1783,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimatePeakNeedBlocks) {
     EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, new_res, 8, 100, 3, /*enable_reuse_cache=*/true), 45);
 
     // Allocate blocks to simulate running decode (seqLen=8 → 2 slots per group)
-    auto       token_ids = makeCompleteTokenIds(1, /*seq_length=*/8, config.seq_size_per_block);
+    auto       token_ids = makeCompleteTokenIds(1, /*seq_length=*/8, config.cacheKeyBlockTokens());
     MallocInfo mi{new_res, token_ids};
     auto       result = allocator->malloc(mi);
     ASSERT_TRUE(result.success);
@@ -1813,7 +1813,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimatePeakNeedBlocks) {
               std::max(expect_full_large - full_slots, 0) + expect_linear_large);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimatePeakNeedBlocksUsesLinearActiveTailPolicy) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, EstimatePeakNeedBlocksUsesLinearActiveTailPolicy) {
     auto                          config = makeTinyHybridConfig();
     std::vector<CacheGroupPolicy> policies;
     for (const auto& group : config.groups()) {
@@ -1822,9 +1822,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimatePeakNeedBlocksUsesLinea
     ASSERT_EQ(policies.size(), 2u);
     ASSERT_EQ(policies[0].group_type, CacheGroupType::LINEAR);
     policies[0].active_tail_blocks = 4;
-    rtp_llm::test::TestCacheConfigBuilder::setGroupPolicies(config, policies);
+    config = TestCacheConfigBuilder::rebuildForTest(std::move(config)).setGroupPolicies(policies).build();
 
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto resource = makeBatchResource(/*batch_size=*/1, config, /*keys=*/{});
@@ -1840,9 +1840,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimatePeakNeedBlocksUsesLinea
               12);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
     auto config    = makeTinyHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto resource = makeBatchResource(/*batch_size=*/2, config, /*keys=*/{});
@@ -1913,13 +1913,13 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimateBatchPeakNeedBlocksAcco
               0);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, FreshUnalignedMultiSequencePeakFitsIndependentPools) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, FreshUnalignedMultiSequencePeakFitsIndependentPools) {
     for (const bool reuse_cache : {false, true}) {
         SCOPED_TRACE(reuse_cache ? "reuse enabled" : "reuse disabled");
 
-        auto config    = makeTinyHybridConfig();
-        config         = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/7, RuntimeConfig{});
-        auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+        auto config = makeTinyHybridConfig();
+        config      = TestCacheConfigBuilder::rebuildForTest(std::move(config)).setProjectedBlockCountBasis(7).build();
+        auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
         ASSERT_TRUE(allocator->init());
 
         auto resource = makeBatchResource(/*batch_size=*/2, config, /*keys=*/{});
@@ -1948,7 +1948,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, FreshUnalignedMultiSequencePeak
                   10);
 
         auto token_ids = makeCompleteTokenIds(
-            /*batch_size=*/2, /*seq_length=*/5, /*seq_size_per_block=*/config.seq_size_per_block);
+            /*batch_size=*/2, /*seq_length=*/5, /*seq_size_per_block=*/config.cacheKeyBlockTokens());
         MallocInfo info{resource, token_ids};
         info.enable_device_cache          = false;
         info.reuse_cache                  = reuse_cache;
@@ -1961,16 +1961,16 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, FreshUnalignedMultiSequencePeak
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimatedPeakCoversDecodeMallocAndSparseCleanup) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, EstimatedPeakCoversDecodeMallocAndSparseCleanup) {
     auto config    = makeTinyHybridConfig();
-    config         = CacheConfigCreator::finalizeBlockNums(config, /*global_block_num=*/28, RuntimeConfig{});
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    config         = TestCacheConfigBuilder::rebuildForTest(std::move(config)).setProjectedBlockCountBasis(28).build();
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1,
                                           /*seq_length=*/8,
-                                          /*seq_size_per_block=*/config.seq_size_per_block);
+                                          /*seq_size_per_block=*/config.cacheKeyBlockTokens());
 
     MallocInfo info{batch_res, token_ids};
     info.enable_device_cache          = false;
@@ -2002,15 +2002,15 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EstimatedPeakCoversDecodeMalloc
     EXPECT_EQ(allocator->freeBlocksNum(), 28);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, FreshReusePeakCoversThreeBoundaryDecodeWithIndependentPools) {
+TEST_F(CoordinatorCacheManagerMultiGroupTest, FreshReusePeakCoversThreeBoundaryDecodeWithIndependentPools) {
     auto config    = makeTinyHybridConfig();  // 9 usable blocks, seq_size_per_block=4, linear_step=2.
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1,
                                           /*seq_length=*/8,
-                                          /*seq_size_per_block=*/config.seq_size_per_block);
+                                          /*seq_size_per_block=*/config.cacheKeyBlockTokens());
 
     // seq_len 8 -> 17 crosses the slot boundaries at 9, 13 and 17. Full peaks at 5 blocks and linear peaks at 4.
     ASSERT_EQ(allocator->freeBlocksNum(), 18);

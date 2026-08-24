@@ -2,6 +2,7 @@
 
 #include "ATen/core/TensorBody.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <torch/version.h>
@@ -13,8 +14,6 @@ namespace rtp_llm {
 // Debug utilities for printing tensor information
 void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
 void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs);
-// Copy common attention metadata to every tag while retaining each tag's block tables.
-void refreshTaggedAttentionInputs(torch_ext::PyModelInputs& inputs);
 
 }  // namespace rtp_llm
 
@@ -36,7 +35,7 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id = inputs.attention_inputs.kv_cache_kernel_block_id;
         py_model_inputs_.attention_inputs.kv_cache_block_id_device = inputs.attention_inputs.kv_cache_block_id_device;
         py_model_inputs_.attention_inputs.kv_cache_block_id        = inputs.attention_inputs.kv_cache_block_id;
-        py_model_inputs_.attention_inputs_by_tag                   = inputs.attention_inputs_by_tag;
+        py_model_inputs_.cache_group_attn_inputs                   = inputs.cache_group_attn_inputs;
         py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.attention_inputs.prefix_lengths_device    = inputs.attention_inputs.prefix_lengths_device;
         py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;
@@ -62,6 +61,8 @@ public:
         py_model_inputs_.attention_inputs.decode_cu_seqlens        = inputs.attention_inputs.decode_cu_seqlens;
         py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device =
             inputs.attention_inputs.sequence_lengths_plus_1_device;
+        py_model_inputs_.attention_inputs.cuda_graph_shared_workspace =
+            inputs.attention_inputs.cuda_graph_shared_workspace;
     }
 
 public:
@@ -79,8 +80,9 @@ public:
         (void)keep_graph;
     }
 #endif
-    at::cuda::CUDAGraph graph_;
-    CaptureMemoryHold   mem_hold_;
+    at::cuda::CUDAGraph                           graph_;
+    CaptureMemoryHold                             mem_hold_;
+    std::vector<rtp_llm::BlockTableRefreshRegion> kernel_block_table_refresh_regions_;
 };
 
 class CudaGraphStreamLife {
