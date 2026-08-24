@@ -458,7 +458,12 @@ class CPAttnTestBase(unittest.TestCase):
             )
             self._extra_patches(stack)
 
-            op = self.OP_CLASS(attn_cfg, attn_inputs, par_cfg)
+            op = self.OP_CLASS(
+                attn_cfg,
+                attn_inputs,
+                par_cfg,
+                attn_inputs.kv_cache_kernel_block_id,
+            )
             params = op.prepare(attn_inputs)
             output = op.forward(qkv, kv_cache, params)
 
@@ -611,7 +616,12 @@ class CPAttnTestBase(unittest.TestCase):
             )
             self._extra_patches(stack)
 
-            op = self.OP_CLASS(attn_cfg, attn_inputs, par_cfg)
+            op = self.OP_CLASS(
+                attn_cfg,
+                attn_inputs,
+                par_cfg,
+                attn_inputs.kv_cache_kernel_block_id,
+            )
             params = op.prepare(attn_inputs)
             output = op.forward(qkv, kv_cache, params)
 

@@ -425,7 +425,12 @@ class TestXQABatchDecode(unittest.TestCase):
             )
             # Prepare fmha_params with scale parameters
             if kv_dtype == "fp8":
-                xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
+                xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(
+                    attn_inputs,
+                    q_scale=q_scale * k_scale * sm_scale,
+                    kv_scale=v_scale / o_scale,
+                    o_scale=o_scale,
+                )
             else:
                 xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
             xqa_impl.attn_inputs = attn_inputs

@@ -54,8 +54,9 @@ class TestCudaGraphPrefill(unittest.TestCase):
 
         def tracked_prepare_fmha_impl(inputs, is_cuda_graph: bool = False):
             impl = original_prepare_fmha_impl(inputs, is_cuda_graph)
-            if is_cuda_graph and hasattr(impl, "fmha_impl"):
-                workspace = impl.fmha_impl.g_workspace_buffer
+            if is_cuda_graph:
+                workspace = inputs.attention_inputs.cuda_graph_shared_workspace
+                self.assertIsNotNone(workspace)
                 self.graph_workspace_records.append(
                     (workspace.data_ptr(), workspace.numel())
                 )
