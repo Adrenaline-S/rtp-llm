@@ -7,6 +7,7 @@
 #include <string>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -85,7 +86,6 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
                             type_sz);
 
     auto spec                = std::make_shared<TestKVCacheSpec>();
-    spec->tag                = "default";
     spec->type               = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
                                                                               KVCacheSpecType::MultiHeadLatentAttention;
     spec->seq_size_per_block = seq_size_per_block;
@@ -112,23 +112,15 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     test_spec->k_scale_bytes = k_scale_stride_bytes;
     test_spec->v_scale_bytes = v_scale_stride_bytes;
 
-    rtp_llm::CacheConfig cache_config;
-    cache_config.layer_num             = kLayerNum;
-    cache_config.layer_all_num         = kLayerNum;
-    cache_config.block_num             = kBlockNum;
-    cache_config.dtype                 = dtype;
-    cache_config.seq_size_per_block    = seq_size_per_block;
-    cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
-    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
-
+    auto builder = rtp_llm::test::TestCacheConfigBuilder::makeBase(
+        kLayerNum, kBlockNum, seq_size_per_block, seq_size_per_block, dtype);
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    auto groups                 = cache_config.topology().groups();
-    groups[0].local_kv_head_num = test_spec->local_kv_head_num;
-    cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+    auto cache_config = builder.setGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"})
+                            .setGroupLocalKVHeadNums({test_spec->local_kv_head_num})
+                            .build();
 
-    return BlockPoolConfigHelper::createConfig(cache_config);
+    return BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
 }
 
 inline void createDevice() {

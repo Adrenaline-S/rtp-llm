@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -120,7 +121,6 @@ protected:
                                 type_sz);
 
         auto spec                = std::make_shared<TestKVCacheSpec>();
-        spec->tag                = "default";
         spec->type               = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
                                                                                   KVCacheSpecType::MultiHeadLatentAttention;
         spec->seq_size_per_block = seq_size_per_block;
@@ -142,16 +142,11 @@ protected:
                                           /*k_block_stride_bytes=*/k_block_bytes,
                                           /*v_block_stride_bytes=*/v_block_bytes);
 
-        rtp_llm::CacheConfig cache_config;
-        cache_config.layer_num             = layer_num;
-        cache_config.layer_all_num         = layer_num;
-        cache_config.block_num             = block_num;
-        cache_config.dtype                 = rtp_llm::DataType::TYPE_INT8;
-        cache_config.seq_size_per_block    = 1;
-        cache_config.kv_block_stride_bytes = spec->block_size_bytes();
-        initializeSingleGroup(cache_config, spec);
+        auto builder =
+            rtp_llm::test::TestCacheConfigBuilder::makeBase(layer_num, block_num, 1, 1, rtp_llm::DataType::TYPE_INT8);
+        auto cache_config = initializeSingleGroup(std::move(builder), spec);
 
-        auto pool_cfg   = BlockPoolConfigHelper::createConfig(cache_config);
+        auto pool_cfg   = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
         auto layout_cfg = pool_cfg.memory_layouts[0];
 
         layout_cfg.enable_kv_scale          = false;
@@ -164,15 +159,15 @@ protected:
         return layout_cfg;
     }
 
-    static void initializeSingleGroup(rtp_llm::CacheConfig& cache_config, const KVCacheSpecPtr& spec) {
-        std::vector<int> layer_ids(cache_config.layer_num);
+    static CacheConfig initializeSingleGroup(rtp_llm::test::TestCacheConfigBuilder builder,
+                                             const KVCacheSpecPtr&                 spec) {
+        std::vector<int> layer_ids(builder.mainLayerCount());
         std::iota(layer_ids.begin(), layer_ids.end(), 0);
-        cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        builder.setGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
         if (auto test_spec = std::dynamic_pointer_cast<TestKVCacheSpec>(spec)) {
-            auto groups                 = cache_config.topology().groups();
-            groups[0].local_kv_head_num = test_spec->local_kv_head_num;
-            cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+            builder.setGroupLocalKVHeadNums({test_spec->local_kv_head_num});
         }
+        return builder.build();
     }
 
     static MemoryLayoutConfig createTestConfig(size_t k_block_bytes = 512, size_t v_block_bytes = 512) {
@@ -245,17 +240,10 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     auto test_spec           = std::dynamic_pointer_cast<TestKVCacheSpec>(spec);
     test_spec->k_scale_bytes = 2 * 4 * sizeof(float);
     test_spec->v_scale_bytes = 2 * 4 * sizeof(float);
-    rtp_llm::CacheConfig cache_config;
-    cache_config.layer_num             = 4;
-    cache_config.layer_all_num         = 4;
-    cache_config.block_num             = 8;
-    cache_config.dtype                 = rtp_llm::DataType::TYPE_INT8;
-    cache_config.seq_size_per_block    = 4;
-    cache_config.kv_block_stride_bytes = spec->block_size_bytes();
-    cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    initializeSingleGroup(cache_config, spec);
+    auto builder      = rtp_llm::test::TestCacheConfigBuilder::makeBase(4, 8, 4, 4, rtp_llm::DataType::TYPE_INT8);
+    auto cache_config = initializeSingleGroup(std::move(builder), spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto  kv_cache_tensor = torch::zeros({static_cast<int64_t>(config.kv_block_pool_size_bytes)}, torch::kInt8);
@@ -404,23 +392,16 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesByteView) {
     // Regression test: splitKVPartition uses byte offsets; when dtype element size > 1 (e.g. FP16),
     // partitioned slicing must use byte-view tensors.
-    auto                 spec = createTestKvCacheSpec(/*layer_num=*/4,
+    auto spec         = createTestKvCacheSpec(/*layer_num=*/4,
                                       /*dtype=*/rtp_llm::DataType::TYPE_FP16,
                                       /*local_head_num_kv=*/8,
                                       /*seq_size_per_block=*/64,
                                       /*k_block_stride_bytes=*/1024,
                                       /*v_block_stride_bytes=*/1024);
-    rtp_llm::CacheConfig cache_config;
-    cache_config.layer_num                 = 4;
-    cache_config.layer_all_num             = 4;
-    cache_config.block_num                 = 8;
-    cache_config.dtype                     = rtp_llm::DataType::TYPE_FP16;
-    cache_config.seq_size_per_block        = 64;
-    cache_config.kernel_seq_size_per_block = 64;
-    cache_config.kv_block_stride_bytes     = spec->block_size_bytes();
-    initializeSingleGroup(cache_config, spec);
+    auto builder      = rtp_llm::test::TestCacheConfigBuilder::makeBase(4, 8, 64, 64, rtp_llm::DataType::TYPE_FP16);
+    auto cache_config = initializeSingleGroup(std::move(builder), spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
     auto config   = pool_cfg.memory_layouts[0];
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
@@ -485,18 +466,10 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale)
     auto test_spec           = std::dynamic_pointer_cast<TestKVCacheSpec>(spec);
     test_spec->k_scale_bytes = 8 * 64 * sizeof(float);
     test_spec->v_scale_bytes = 8 * 64 * sizeof(float);
-    rtp_llm::CacheConfig cache_config;
-    cache_config.layer_num                 = 4;
-    cache_config.layer_all_num             = 4;
-    cache_config.block_num                 = 8;
-    cache_config.dtype                     = rtp_llm::DataType::TYPE_INT8;
-    cache_config.seq_size_per_block        = 64;
-    cache_config.kernel_seq_size_per_block = 64;
-    cache_config.kv_block_stride_bytes     = spec->block_size_bytes();
-    cache_config.kv_scale_stride_bytes     = spec->scale_block_size_bytes();
-    initializeSingleGroup(cache_config, spec);
+    auto builder      = rtp_llm::test::TestCacheConfigBuilder::makeBase(4, 8, 64, 64, rtp_llm::DataType::TYPE_INT8);
+    auto cache_config = initializeSingleGroup(std::move(builder), spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
@@ -654,17 +627,10 @@ TEST_F(MemoryLayoutStrategyTest, BlockPoolConfigPropagatesKernelBlockSplitButKee
                                       /*k_block_stride_bytes=*/64,
                                       /*v_block_stride_bytes=*/64);
 
-    rtp_llm::CacheConfig cache_config;
-    cache_config.layer_num                 = 2;
-    cache_config.layer_all_num             = 2;
-    cache_config.block_num                 = 4;
-    cache_config.dtype                     = rtp_llm::DataType::TYPE_INT8;
-    cache_config.seq_size_per_block        = 4;
-    cache_config.kernel_seq_size_per_block = 2;
-    cache_config.kv_block_stride_bytes     = spec->block_size_bytes();
-    initializeSingleGroup(cache_config, spec);
+    auto builder      = rtp_llm::test::TestCacheConfigBuilder::makeBase(2, 4, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_config = initializeSingleGroup(std::move(builder), spec);
 
-    auto pool_config = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_config = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
     ASSERT_EQ(pool_config.memory_layouts.size(), 1u);
     auto layout_config = pool_config.memory_layouts[0];
     EXPECT_EQ(layout_config.kernel_blocks_per_kv_block, 2u);
@@ -677,7 +643,7 @@ TEST_F(MemoryLayoutStrategyTest, BlockPoolConfigPropagatesKernelBlockSplitButKee
 
     auto layer_tensors = strategy->getLayerCacheTensors();
     ASSERT_EQ(layer_tensors.size(), 2u);
-    EXPECT_EQ(layer_tensors[0].size(0), static_cast<int64_t>(cache_config.block_num));
+    EXPECT_EQ(layer_tensors[0].size(0), static_cast<int64_t>(cache_config.blockCountBasis()));
     EXPECT_EQ(static_cast<size_t>(layer_tensors[0].stride(0) * layer_tensors[0].element_size()),
               layout_config.kv_block_stride_bytes);
 }
@@ -706,6 +672,25 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferUsesPhysicalStrideWithKerne
     const auto addr0 = reinterpret_cast<uintptr_t>(block0[0].addr);
     const auto addr1 = reinterpret_cast<uintptr_t>(block1[0].addr);
     EXPECT_EQ(addr1 - addr0, ctx.config.kv_block_stride_bytes);
+}
+
+TEST_F(MemoryLayoutStrategyTest, PoolBlockSegmentsUsePhysicalPoolIdentityAndSpecStride) {
+    auto config                       = createTestConfig(/*layer_num=*/2, /*block_num=*/4, 64, 64);
+    config.kernel_blocks_per_kv_block = 4;
+    auto ctx                          = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Arange);
+
+    MemoryLayoutStrategy strategy;
+    torch::Tensor        empty_scale;
+    ASSERT_TRUE(strategy.init(ctx.config, ctx.kv_cache_buffer, empty_scale, ctx.cache_ptr));
+
+    const auto block0 = strategy.segments(PoolBlockId{0}, /*layer_id=*/1);
+    const auto block1 = strategy.segments(PoolBlockId{1}, /*layer_id=*/1);
+    ASSERT_TRUE(block0.kv.defined());
+    ASSERT_TRUE(block1.kv.defined());
+    EXPECT_FALSE(block0.scale.defined());
+    EXPECT_EQ(static_cast<size_t>(block0.kv.nbytes()), ctx.config.kv_block_stride_bytes);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(block1.kv.data_ptr()) - reinterpret_cast<uintptr_t>(block0.kv.data_ptr()),
+              ctx.config.kv_block_stride_bytes);
 }
 
 // Layout Comparison Test

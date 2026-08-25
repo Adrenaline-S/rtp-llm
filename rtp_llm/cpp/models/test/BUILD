@@ -32,6 +32,19 @@ test_deps = [
 ] + torch_deps() + cuda13_torch_link_deps
 
 cc_test(
+    name = "cache_block_table_packing_test",
+    srcs = ["CacheBlockTablePackingTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/models:models",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
     name = "model_data_test",
     srcs = [
         "ModelDataTest.cc",
@@ -72,6 +85,7 @@ cc_library(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/utils:core_utils",
@@ -97,5 +111,17 @@ py_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
+    name = "cache_group_attention_inputs_test",
+    srcs = ["CacheGroupAttentionInputsTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/models:cache_group_attention_inputs",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
     exec_properties = {"gpu": "H20"},
 )

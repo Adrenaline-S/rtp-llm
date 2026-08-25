@@ -10,6 +10,7 @@
 #include "c10/core/DeviceType.h"
 #include "c10/core/TensorOptions.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 
@@ -39,7 +40,7 @@ public:
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_group_tags_(graph_params.kv_cache_group_tags),
+        kv_cache_block_table_groups_(graph_params.kv_cache_block_table_groups),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
@@ -84,7 +85,7 @@ public:
     void           prepareAttentionInputs(const PyModelInputs& inputs,
                                           CudaGraphState&      state,
                                           bool                 skip_forward_event_sync = false) override;
-    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void           updateKVCacheKernelBlockTableValues(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
@@ -94,8 +95,13 @@ public:
     void           initCapture() override;
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
-    static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
-    static CudaGraphRunner* createForDecode(py::object py_instance, GraphParams params);
+    static CudaGraphRunner*           createForPrefill(py::object py_instance, GraphParams params);
+    static CudaGraphRunner*           createForDecode(py::object py_instance, GraphParams params);
+    std::vector<torch::Tensor>        kernelValidLengthsForTest(const CudaGraphState& state) const;
+    std::vector<int64_t>              packedCachePointersForTest(const CudaGraphState& state) const;
+    std::vector<int64_t>              packedCacheNumelForTest(const CudaGraphState& state) const;
+    std::vector<std::vector<int64_t>> packedCacheDescriptorsForTest(const CudaGraphState& state) const;
+    std::vector<torch::Tensor>        kernelTablesForTest(const CudaGraphState& state) const;
 
 private:
     // Common capture logic for both prefill and decode
@@ -140,6 +146,7 @@ private:
                                                      size_t&               copy_numel) const;
     bool                    canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
+    void                    initBlockTableRefreshRegions(GraphInstance& instance);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
@@ -175,9 +182,9 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string>      kv_cache_group_tags_;
-    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
-    mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
+    std::vector<GraphCacheBlockTableGroup> kv_cache_block_table_groups_;
+    int                                    position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    mutable std::atomic<uint64_t>          combo_position_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

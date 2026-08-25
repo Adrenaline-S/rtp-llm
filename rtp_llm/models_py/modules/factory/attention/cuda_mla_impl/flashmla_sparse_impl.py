@@ -423,7 +423,13 @@ class SparseMlaImpl(MlaImplBase):
 
         # Fill parameters - one call fills all parameters (base and derived)
         self.fmha_params.fill_params(
-            attn_inputs, self.seq_size_per_block, forbid_realloc
+            attn_inputs.input_lengths,
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.kv_cache_kernel_block_id,
+            attn_inputs.is_prefill,
+            self.seq_size_per_block,
+            forbid_realloc,
         )
         # Plan for processing
         self.fmha_impl.plan(

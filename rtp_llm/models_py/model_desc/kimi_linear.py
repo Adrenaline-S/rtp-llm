@@ -18,7 +18,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
     get_group_tags_for_layers,
     get_primary_attention_inputs,
-    select_attention_inputs_for_layer,
+    select_cache_group_attn_inputs_for_layer,
     select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.model_desc.generic_moe import DecodeLayerOutput, GenericMoeLayer
@@ -148,6 +148,8 @@ class KimiLinearKDABase(nn.Module):
         forget_gate: torch.Tensor,
         beta: torch.Tensor,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
+        pool_block_table: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         attn_meta: KimiLinearMetadata,
     ) -> torch.Tensor:
@@ -177,6 +179,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         metadata: Optional[CausalConv1dMetadata] = None,
     ) -> torch.Tensor:
         cu_seqlen_without_padding = attn_inputs.cu_seqlens_device
@@ -191,7 +194,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             bias=None,
             conv_states=conv_states,
             query_start_loc=cu_seqlen_without_padding,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=block_table,
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
@@ -206,6 +209,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
     ) -> torch.Tensor:
         # Compute gate: [T, local_H*D] -> [1, T, local_H, D]
         g = forget_gate.view(
@@ -233,7 +237,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             )
             load_initial_state_from_block_map(
                 attn_inputs.prefix_lengths_device,
-                attn_inputs.kv_cache_kernel_block_id_device,
+                block_table,
                 ssm_states,
                 initial_states,
                 seq_size_per_block,
@@ -295,7 +299,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 final_state,
                 attn_inputs.prefix_lengths_device,
                 cu_seqlens_without_padding,
-                attn_inputs.kv_cache_kernel_block_id_device,
+                block_table,
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
@@ -309,6 +313,8 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         forget_gate: torch.Tensor,
         beta: torch.Tensor,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
+        pool_block_table: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         attn_meta: KimiLinearMetadata,
     ) -> torch.Tensor:
@@ -324,6 +330,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             kv_cache_tensor,
             seq_size_per_block,
             attn_inputs,
+            block_table,
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
         attn_out = self._fla(
@@ -333,6 +340,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             kv_cache_tensor,
             seq_size_per_block,
             attn_inputs,
+            block_table,
         )
         cache_store_inputs = attn_inputs.cache_store_inputs
         cache_store_writer = attn_inputs.cache_store_writer
@@ -341,7 +349,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             and cache_store_inputs is not None
             and cache_store_writer is not None
         ):
-            cache_store_writer.write(cache_store_inputs, kv_cache)
+            cache_store_writer.write(cache_store_inputs, kv_cache, pool_block_table)
         return attn_out
 
 
@@ -352,6 +360,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         kv_cache_tensor: torch.Tensor,
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         is_target_verify: bool,
     ) -> torch.Tensor:
         conv_states = self._get_conv_states(kv_cache_tensor)
@@ -368,7 +377,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             bias=None,
             activation="silu",
             cache_seqlens=None,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=block_table,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
         )
@@ -383,6 +392,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         kv_cache_tensor: torch.Tensor,
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         is_target_verify: bool,
     ) -> torch.Tensor:
         batch, seq = self._get_bs_from_attention_input(
@@ -429,7 +439,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             inplace_final_state=True,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=block_table,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
         )
@@ -445,6 +455,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         forget_gate: torch.Tensor,
         beta: torch.Tensor,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         attn_meta: KimiLinearMetadata,
     ) -> torch.Tensor:
@@ -462,6 +473,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             kv_cache_tensor,
             kv_cache.seq_size_per_block,
             attn_inputs,
+            block_table,
             is_target_verify,
         )
 
@@ -472,6 +484,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             kv_cache_tensor,
             kv_cache.seq_size_per_block,
             attn_inputs,
+            block_table,
             is_target_verify,
         )
         return attn_out
@@ -611,6 +624,7 @@ class KimiLinearKDA(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
+        group_view: PyAttentionInputs,
         attn_meta: KimiLinearMetadata,
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
@@ -633,6 +647,8 @@ class KimiLinearKDA(nn.Module):
                 forget_gate,
                 beta_input,
                 attention_inputs,
+                group_view.kv_cache_kernel_block_id_device,
+                group_view.kv_cache_block_id,
                 kv_cache,
                 attn_meta,
             )
@@ -642,6 +658,7 @@ class KimiLinearKDA(nn.Module):
                 forget_gate,
                 beta_input,
                 attention_inputs,
+                group_view.kv_cache_kernel_block_id_device,
                 kv_cache,
                 attn_meta,
             )
@@ -746,6 +763,7 @@ class KimiLinearDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
+        group_view: Optional[PyAttentionInputs] = None,
         attn_meta: KimiLinearMetadata = KimiLinearMetadata(),
     ) -> DecodeLayerOutput:
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
@@ -753,11 +771,13 @@ class KimiLinearDecoderLayer(nn.Module):
 
         # Self Attention (KDA or MLA)
         if self.layer_type == HybridAttentionType.LINEAR:
+            assert group_view is not None, "group_view is required"
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 fmha_impl=fmha_impl,
                 kv_cache=kv_cache,
                 attention_inputs=attention_inputs,
+                group_view=group_view,
                 attn_meta=attn_meta,
             )
         else:
@@ -857,7 +877,7 @@ class KimiLinearModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
 
         for i, decoder_layer in enumerate(self.layers):
-            layer_attention_inputs = select_attention_inputs_for_layer(
+            layer_group_attn_inputs = select_cache_group_attn_inputs_for_layer(
                 inputs, self.kv_cache, i
             )
             layer_fmha_impl = (
@@ -870,7 +890,8 @@ class KimiLinearModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=layer_attention_inputs,
+                attention_inputs=attention_inputs,
+                group_view=layer_group_attn_inputs,
                 attn_meta=attn_meta,
             )
             hidden_states = output.hidden_states

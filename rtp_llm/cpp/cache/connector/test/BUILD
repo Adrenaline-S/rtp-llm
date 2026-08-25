@@ -42,7 +42,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/test/mock:mock_coordinator_cache_manager_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     ],
     env = {},
@@ -62,4 +62,15 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+)
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test, the terminal
+# source gate that rejects positional cache group routing in this package.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
 )

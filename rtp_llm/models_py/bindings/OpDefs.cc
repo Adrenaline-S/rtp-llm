@@ -26,35 +26,38 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
-        .def(
-            pybind11::init([](torch::Tensor    kv_cache_base,
-                              int              seq_size_per_block,
-                              int              layer_id,
-                              int              group_id,
-                              std::string      tag,
-                              pybind11::object kv_scale_base) {
-                torch::Tensor scale;
-                if (!kv_scale_base.is_none()) {
-                    scale = kv_scale_base.cast<torch::Tensor>();
-                }
-                return LayerKVCache(
-                    std::move(kv_cache_base), seq_size_per_block, layer_id, group_id, std::move(tag), std::move(scale));
-            }),
-            pybind11::arg("kv_cache_base"),
-            pybind11::arg("seq_size_per_block"),
-            pybind11::arg("layer_id")      = -1,
-            pybind11::arg("group_id")      = -1,
-            pybind11::arg("tag")           = "default",
-            pybind11::arg("kv_scale_base") = pybind11::none())
+        .def(pybind11::init([](torch::Tensor    kv_cache_base,
+                               int              seq_size_per_block,
+                               int              layer_id,
+                               std::string      tag,
+                               pybind11::object kv_scale_base,
+                               uint32_t         execution_ordinal) {
+                 torch::Tensor scale;
+                 if (!kv_scale_base.is_none()) {
+                     scale = kv_scale_base.cast<torch::Tensor>();
+                 }
+                 return LayerKVCache(std::move(kv_cache_base),
+                                     seq_size_per_block,
+                                     layer_id,
+                                     std::move(tag),
+                                     std::move(scale),
+                                     execution_ordinal);
+             }),
+             pybind11::arg("kv_cache_base"),
+             pybind11::arg("seq_size_per_block"),
+             pybind11::arg("layer_id")          = -1,
+             pybind11::arg("tag")               = "default",
+             pybind11::arg("kv_scale_base")     = pybind11::none(),
+             pybind11::arg("execution_ordinal") = 0)
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
-        .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
-        .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
+        .def_readonly("tag", &LayerKVCache::tag, "Cache group tag")
+        .def_readonly("execution_ordinal", &LayerKVCache::execution_ordinal, "Cache group execution ordinal");
 
     pybind11::class_<KVCache>(m, "KVCache")
-        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology group id order")
+        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in canonical sorted order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
@@ -143,6 +146,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id", &PyAttentionInputs::kv_cache_block_id)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
+        .def_readwrite("pool_valid_lengths", &PyAttentionInputs::pool_valid_lengths)
+        .def_readwrite("kernel_valid_lengths", &PyAttentionInputs::kernel_valid_lengths)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("cu_seqlens_device", &PyAttentionInputs::cu_seqlens_device)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
@@ -163,6 +168,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
+        .def_readwrite("cuda_graph_shared_workspace", &PyAttentionInputs::cuda_graph_shared_workspace)
         .def("__copy__", [](const PyAttentionInputs& self) { return PyAttentionInputs(self); });
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
@@ -201,68 +207,40 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init([](torch::Tensor       input_ids,
-                               torch::Tensor       input_hiddens,
-                               torch::Tensor       combo_position_ids,
-                               PyEmbeddingInputs   embedding_inputs,
-                               PyMultimodalInputs  multimodal_inputs,
-                               pybind11::object    attention_inputs,
-                               BertEmbeddingInputs bert_embedding_inputs) {
+        .def(pybind11::init([](torch::Tensor                            input_ids,
+                               torch::Tensor                            input_hiddens,
+                               torch::Tensor                            combo_position_ids,
+                               PyEmbeddingInputs                        embedding_inputs,
+                               PyMultimodalInputs                       multimodal_inputs,
+                               PyAttentionInputs                        attention_inputs,
+                               std::map<std::string, PyAttentionInputs> cache_group_attn_inputs,
+                               BertEmbeddingInputs                      bert_embedding_inputs) {
                  PyModelInputs result;
-                 result.input_ids             = std::move(input_ids);
-                 result.input_hiddens         = std::move(input_hiddens);
-                 result.combo_position_ids    = std::move(combo_position_ids);
-                 result.embedding_inputs      = std::move(embedding_inputs);
-                 result.multimodal_inputs     = std::move(multimodal_inputs);
-                 result.bert_embedding_inputs = std::move(bert_embedding_inputs);
-                 if (pybind11::isinstance<PyAttentionInputs>(attention_inputs)) {
-                     result.attention_inputs = attention_inputs.cast<PyAttentionInputs>();
-                 } else {
-                     result.attention_inputs_by_tag = attention_inputs.cast<AttentionInputsByTag>();
-                     RTP_LLM_CHECK_WITH_INFO(!result.attention_inputs_by_tag.empty(),
-                                             "attention_inputs tag map must not be empty");
-                     result.attention_inputs = result.attention_inputs_by_tag.begin()->second;
-                 }
+                 result.input_ids               = std::move(input_ids);
+                 result.input_hiddens           = std::move(input_hiddens);
+                 result.combo_position_ids      = std::move(combo_position_ids);
+                 result.embedding_inputs        = std::move(embedding_inputs);
+                 result.multimodal_inputs       = std::move(multimodal_inputs);
+                 result.bert_embedding_inputs   = std::move(bert_embedding_inputs);
+                 result.attention_inputs        = std::move(attention_inputs);
+                 result.cache_group_attn_inputs = std::move(cache_group_attn_inputs);
                  return result;
              }),
-             pybind11::arg("input_ids")             = torch::empty(0),
-             pybind11::arg("input_hiddens")         = torch::empty(0),
-             pybind11::arg("combo_position_ids")    = torch::empty(0),
-             pybind11::arg("embedding_inputs")      = PyEmbeddingInputs(),
-             pybind11::arg("multimodal_inputs")     = PyMultimodalInputs(),
-             pybind11::arg("attention_inputs")      = PyAttentionInputs(),
-             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
+             pybind11::arg("input_ids")               = torch::empty(0),
+             pybind11::arg("input_hiddens")           = torch::empty(0),
+             pybind11::arg("combo_position_ids")      = torch::empty(0),
+             pybind11::arg("embedding_inputs")        = PyEmbeddingInputs(),
+             pybind11::arg("multimodal_inputs")       = PyMultimodalInputs(),
+             pybind11::arg("attention_inputs")        = PyAttentionInputs(),
+             pybind11::arg("cache_group_attn_inputs") = std::map<std::string, PyAttentionInputs>{},
+             pybind11::arg("bert_embedding_inputs")   = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
         .def_readwrite("embedding_inputs", &PyModelInputs::embedding_inputs, "Embedding inputs structure")
         .def_readwrite("multimodal_inputs", &PyModelInputs::multimodal_inputs, "Multimodal inputs structure")
-        .def_property(
-            "attention_inputs",
-            [](PyModelInputs& self) -> pybind11::object {
-                if (!self.attention_inputs_by_tag.empty()) {
-                    pybind11::dict result;
-                    for (auto& [tag, inputs] : self.attention_inputs_by_tag) {
-                        result[pybind11::str(tag)] = pybind11::cast(
-                            &inputs, pybind11::return_value_policy::reference_internal, pybind11::cast(&self));
-                    }
-                    return std::move(result);
-                }
-                return pybind11::cast(
-                    &self.attention_inputs, pybind11::return_value_policy::reference_internal, pybind11::cast(&self));
-            },
-            [](PyModelInputs& self, pybind11::object value) {
-                if (pybind11::isinstance<PyAttentionInputs>(value)) {
-                    self.attention_inputs        = value.cast<PyAttentionInputs>();
-                    self.attention_inputs_by_tag = {};
-                    return;
-                }
-                auto by_tag = value.cast<AttentionInputsByTag>();
-                RTP_LLM_CHECK_WITH_INFO(!by_tag.empty(), "attention_inputs tag map must not be empty");
-                self.attention_inputs        = by_tag.begin()->second;
-                self.attention_inputs_by_tag = std::move(by_tag);
-            },
-            "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
+        .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs)
+        .def_readwrite("cache_group_attn_inputs", &PyModelInputs::cache_group_attn_inputs)
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
 

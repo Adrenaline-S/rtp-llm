@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -20,6 +22,37 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+// Boundary adapter: decode the packed kv_cache_update_mapping tensor back into
+// tagged records. The first column is the adapter-local group_ordinal the
+// gatherer produced from the canonical sorted tag order (see
+// rtp_llm/cpp/cache/CacheGroupTagOrder.h); it is resolved to a tag here and
+// never reaches the cache layer.
+std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor& mapping, const CacheConfig& cache_config) {
+    RTP_LLM_CHECK_WITH_INFO(mapping.device().is_cpu() && mapping.scalar_type() == torch::kInt32
+                                && mapping.is_contiguous() && mapping.dim() == 2 && mapping.size(1) == 3,
+                            "kv_cache_update_mapping must be a contiguous CPU int32 [copies, 3] matrix");
+    std::vector<std::string> tags;
+    tags.reserve(cache_config.groups().size());
+    for (const auto& group : cache_config.groups()) {
+        tags.push_back(group.tag);
+    }
+    const auto sorted_tags = sortedCacheGroupTags(tags, "cache update mapping");
+
+    const auto*                    rows = reinterpret_cast<const GroupOrdinalBlockIdPair*>(mapping.data_ptr());
+    std::vector<TaggedBlockIdPair> tagged;
+    tagged.reserve(static_cast<size_t>(mapping.size(0)));
+    for (int64_t i = 0; i < mapping.size(0); ++i) {
+        const auto group_ordinal = rows[i].group_ordinal;
+        RTP_LLM_CHECK_WITH_INFO(group_ordinal >= 0 && static_cast<size_t>(group_ordinal) < sorted_tags.size(),
+                                "kv_cache_update_mapping row %ld has out-of-range group_ordinal=%d for %zu cache tags",
+                                static_cast<long>(i),
+                                group_ordinal,
+                                sorted_tags.size());
+        tagged.push_back({sorted_tags[static_cast<size_t>(group_ordinal)], rows[i].src, rows[i].dst});
+    }
+    return tagged;
+}
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -117,10 +150,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
-    const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
+    const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().cacheKeyBlockTokens() :
                                                                    params.model_config_.attn_config.tokens_per_block;
     const size_t runtime_kernel_tokens_per_block = cache_manager ?
-                                                       cache_manager->cacheConfig().kernel_seq_size_per_block :
+                                                       cache_manager->cacheConfig().kernelBlockTokens() :
                                                        params.model_config_.attn_config.kernel_tokens_per_block;
 
     GptModelInitParams model_init_params(
@@ -161,11 +194,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         RTP_LLM_LOG_WARNING("py_model is None — model will not be initialized (test mode)");
     }
 
-    // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ?
-                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
-                                                  cache_manager->cacheConfig()) :
-                                   CacheConfig();
+    const int cache_gen_num_per_cycle =
+        params.sp_config.type != SP_TYPE_NONE ? static_cast<int>(params.sp_config.gen_num_per_cycle) : 0;
+    const auto cache_config =
+        cache_manager ?
+            (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                           cache_manager->cacheConfig()) :
+            CacheConfigCreator::createDecodeWarmupConfig(
+                params.model_config_, params.parallelism_config, params.kv_cache_config, cache_gen_num_per_cycle);
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
@@ -254,9 +290,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         // update kv cache
-        if (model_input.kv_cache_update_mapping.defined()) {
+        if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.size(0) > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
-            cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+            cache_manager_->blockBatchCopyByTag(
+                decodeCacheUpdateMapping(model_input.kv_cache_update_mapping, cache_manager_->cacheConfig()));
         }
     }
     {
@@ -338,7 +375,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -360,7 +397,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }

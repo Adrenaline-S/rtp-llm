@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockExpression.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 
@@ -182,7 +183,7 @@ protected:
     static uint32_t entryCount(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         uint32_t entries = 0;
         switch (desc.entry_count_mode) {
-            case OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED:
+            case OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED: {
                 RTP_LLM_CHECK_WITH_INFO(
                     desc.compression_ratio > 0,
                     "desc tag=%s derives entries from kernel block but has invalid compression_ratio=%u",
@@ -197,8 +198,11 @@ protected:
                                         desc.tag.c_str(),
                                         desc.compression_ratio,
                                         ctx.kernel_tokens_per_block);
-                entries = ctx.kernel_tokens_per_block / desc.compression_ratio;
+                const uint32_t physical_tokens_per_block = seqSizePerBlock(desc, ctx);
+                (void)PoolBlockToKernelBlockProjection(physical_tokens_per_block, ctx.kernel_tokens_per_block);
+                entries = physical_tokens_per_block / desc.compression_ratio;
                 break;
+            }
             case OpaqueBlockEntryCountMode::STATE_RING:
                 entries = stateRingEntries(desc, ctx);
                 break;
@@ -281,12 +285,27 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
                                 desc.tag.c_str());
 
         auto spec                = std::make_shared<CompressedKVCacheSpec>();
-        spec->tag                = desc.tag;
         spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
         spec->entry_dtype_       = desc.entry_dtype;
         const uint32_t entries   = entryCount(desc, ctx);
-        const size_t   payload   = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
-        const size_t   stride    = blockStrideBytes(desc, payload, entries);
+        size_t         payload   = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
+        size_t         stride    = blockStrideBytes(desc, payload, entries);
+        if (desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
+            const uint32_t kernel_entries = ctx.kernel_tokens_per_block / desc.compression_ratio;
+            const uint32_t kernel_pages   = static_cast<uint32_t>(
+                PoolBlockToKernelBlockProjection(spec->seq_size_per_block, ctx.kernel_tokens_per_block)
+                    .projectedSize(1));
+            RTP_LLM_CHECK_WITH_INFO(entries == kernel_entries * kernel_pages,
+                                    "desc tag=%s physical entries %u do not match kernel entries %u * pages %u",
+                                    desc.tag.c_str(),
+                                    entries,
+                                    kernel_entries,
+                                    kernel_pages);
+            const size_t kernel_payload = payloadBytes(desc.entry_elems, kernel_entries, desc.entry_dtype);
+            const size_t kernel_stride  = blockStrideBytes(desc, kernel_payload, kernel_entries);
+            payload                     = kernel_payload * kernel_pages;
+            stride                      = kernel_stride * kernel_pages;
+        }
         spec->setLayout(desc.entry_elems, entries, payload, stride);
         return spec;
     }
@@ -317,7 +336,6 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
                                 desc.tag.c_str());
 
         auto spec                = std::make_shared<FixedStateCacheSpec>();
-        spec->tag                = desc.tag;
         spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
         spec->entry_dtype_       = desc.entry_dtype;
         const uint32_t entries   = entryCount(desc, ctx);

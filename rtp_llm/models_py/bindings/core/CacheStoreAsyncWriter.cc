@@ -139,17 +139,19 @@ void CacheStoreAsyncWriter::waitAllDone() {
 }
 
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
-                                  const torch_ext::LayerKVCache&       layer_kv) {
+                                  const torch_ext::LayerKVCache&       layer_kv,
+                                  const at::Tensor&                    host_pool_block_table) {
     if (!active_cache_store_ || !cache_config_) {
         return;
     }
 
     // Capture tensors by value so their underlying storage stays alive in the background thread.
     // A torch::Tensor copy only increments the reference count.
-    auto captured_cache_store_inputs = cache_store_inputs;
-    auto captured_layer_kv           = layer_kv;
-    auto cache_config                = cache_config_;
-    auto cache_store                 = active_cache_store_;
+    auto captured_cache_store_inputs                 = cache_store_inputs;
+    captured_cache_store_inputs.host_kv_cache_offset = host_pool_block_table;
+    auto captured_layer_kv                           = layer_kv;
+    auto cache_config                                = cache_config_;
+    auto cache_store                                 = active_cache_store_;
     // Create the event on the main thread to avoid event-record contention in worker threads.
     auto event = runtimeCreateEvent();
     auto run   = [captured_cache_store_inputs,

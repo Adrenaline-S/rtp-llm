@@ -33,7 +33,8 @@ public:
     void init();
     void waitAllDone();
     void write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
-               const torch_ext::LayerKVCache&       layer_kv) override;
+               const torch_ext::LayerKVCache&       layer_kv,
+               const at::Tensor&                    host_pool_block_table) override;
 
 private:
     void submit(std::function<void()> task);

@@ -79,6 +79,10 @@ def _is_rocm() -> bool:
     return torch.cuda.is_available() and torch.version.hip is not None
 
 
+def _make_group_attn_inputs(attn_inputs):
+    return attn_inputs
+
+
 def _make_attn_configs(
     head_num: int, head_num_kv: int, head_dim: int, tokens_per_block: int = 16
 ):
@@ -479,6 +483,26 @@ class TestAiterPrefillAttnOp(unittest.TestCase):
         # The forward() path moves them to query.device internally.
         return op, params
 
+    def test_prepare_treats_defined_empty_block_tables_as_non_paged(self):
+        batch_size = 2
+        attn_inputs = _make_prefill_inputs([4, 7], self.device)
+        host_table = torch.empty(batch_size, 0, dtype=torch.int32).pin_memory()
+        device_table = torch.empty(batch_size, 0, dtype=torch.int32, device=self.device)
+        # Cache-free production inputs retain four defined [batch, 0] tables.
+        attn_inputs.kv_cache_block_id = host_table
+        attn_inputs.kv_cache_block_id_device = device_table
+        attn_inputs.kv_cache_kernel_block_id = host_table.clone()
+        attn_inputs.kv_cache_kernel_block_id_device = device_table.clone()
+
+        op = AiterPrefillAttnOp(_make_attn_configs(8, 8, 64))
+        params = op.prepare(attn_inputs)
+
+        self.assertIsNone(params.sanitized_block_table)
+        self.assertIsNone(params.block_indices)
+        self.assertIsNone(params.compact_block_table)
+        self.assertIsNone(params.k_compact_buf)
+        self.assertIsNone(params.v_compact_buf)
+
     def _check_varlen_no_kv_cache(
         self,
         input_lengths: List[int],
@@ -857,7 +881,7 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         rope_impl = MagicMock()
         observed_pad_query = []
 
-        def prepare_rope(_):
+        def prepare_rope(_attn_inputs):
             observed_pad_query.append(rope_impl.pad_query)
             return object()
 
@@ -869,9 +893,14 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             size_per_head=8,
             kernel_tokens_per_block=16,
         )
+        block_ids = torch.zeros(len(input_lengths), 4, dtype=torch.int32)
         attn_inputs = SimpleNamespace(
             is_cuda_graph=is_cuda_graph,
             input_lengths=torch.tensor(input_lengths, dtype=torch.int32),
+            kv_cache_block_id=block_ids,
+            kv_cache_block_id_device=block_ids,
+            kv_cache_kernel_block_id=block_ids,
+            kv_cache_kernel_block_id_device=block_ids,
         )
         module_path = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
         with patch(
@@ -883,7 +912,10 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         ), patch(
             f"{module_path}.common.create_write_cache_store_impl"
         ):
-            impl = AiterPrefillImplPaged(cfg, attn_inputs)
+            impl = AiterPrefillImplPaged(
+                cfg,
+                attn_inputs,
+            )
 
         return (
             impl,
@@ -1020,7 +1052,13 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         calls = []
         fmha_params = object()
         triton_fmha_params = object()
-        attn_inputs = object()
+        block_ids = torch.zeros(2, 4, dtype=torch.int32)
+        attn_inputs = SimpleNamespace(
+            kv_cache_block_id=block_ids,
+            kv_cache_block_id_device=block_ids,
+            kv_cache_kernel_block_id=block_ids,
+            kv_cache_kernel_block_id_device=block_ids,
+        )
 
         def prepare_batch(params, inputs):
             calls.append(("prepare_batch", params, inputs))
@@ -1428,6 +1466,8 @@ class TestAiterPrefillTritonCudaGraphNumerics(unittest.TestCase):
         expected = eager_impl.forward(replay_qkv, eager_cache, layer_idx=0).clone()
 
         graph_cache = self._make_cache(cache_snapshot, kv_cache_dtype)
+        # Replay must reuse the capture-time view so the kernel keeps reading the
+        # same block-table storage that graph capture recorded.
         graph_impl = AiterPrefillImplPaged(cfg, capture_inputs)
         self.assertEqual(graph_impl.backend, "triton")
 
@@ -2459,7 +2499,7 @@ class TestAiterDecodeTritonNumerics(unittest.TestCase):
 
     def _make_shared_decode_inputs(
         self, sequence_lengths: List[int], block_table: torch.Tensor
-    ) -> PyAttentionInputs:
+    ):
         positions = torch.tensor(
             sequence_lengths, dtype=torch.int32, device=self.device
         )
@@ -2558,7 +2598,10 @@ class TestAiterDecodeTritonNumerics(unittest.TestCase):
         # The implementation writes the current K/V through the same writer and
         # then dispatches the one-token query to pa_decode_gluon.
         decode_inputs = self._make_shared_decode_inputs([prefix_length], block_table)
-        impl = AiterDecodeImplTriton(self.config, decode_inputs)
+        impl = AiterDecodeImplTriton(
+            self.config,
+            decode_inputs,
+        )
         actual = impl.forward(
             _pack_qkv(
                 query[prefix_length:],
@@ -2713,11 +2756,11 @@ class TestVLayoutContract(unittest.TestCase):
             accepts_fmha_config = False
             support = support_parallelism_config = staticmethod(lambda *_: True)
 
-            def __init__(self, *_):
+            def __init__(self, *_, **__):
                 raise RuntimeError("constructor failed")
 
         class WorkingImpl(BrokenImpl):
-            def __init__(self, *_):
+            def __init__(self, *_, **__):
                 pass
 
         _, inputs = self._make_case(128, 16)

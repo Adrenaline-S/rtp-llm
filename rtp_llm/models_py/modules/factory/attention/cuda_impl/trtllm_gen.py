@@ -338,13 +338,14 @@ class FlashInferTRTLLMPrefillOp(object):
         # PyFlashinferPagedPrefillImpl instead.
         if is_sm12x():
             return False
-        return (
-            is_blackwell()
-            and attention_inputs.is_prefill
-            and attention_inputs.kv_cache_kernel_block_id_device is not None
-        )
+        kernel_table = attention_inputs.kv_cache_kernel_block_id_device
+        has_kernel_table = kernel_table is not None and kernel_table.numel() > 0
+        return is_blackwell() and attention_inputs.is_prefill and has_kernel_table
 
-    def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
+    def prepare(
+        self,
+        attention_inputs: PyAttentionInputs,
+    ) -> FlashInferTRTLLMParams:
         prefix_lengths = torch.zeros_like(
             attention_inputs.input_lengths,
             device="cuda",
@@ -466,7 +467,10 @@ class FlashInferTRTLLMDecodeOp(object):
             return True
         return not attention_inputs.is_prefill
 
-    def prepare(self, attention_inputs: PyAttentionInputs) -> FlashInferTRTLLMParams:
+    def prepare(
+        self,
+        attention_inputs: PyAttentionInputs,
+    ) -> FlashInferTRTLLMParams:
         if not attention_inputs.is_prefill:
             # need transfer to cuda, cuda graph can capture the add
             sequence_lengths = torch.ones_like(
@@ -552,7 +556,6 @@ class FlashInferTRTLLMDecodeOp(object):
 
 
 class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
-
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -563,13 +566,14 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         self.fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
         self.attn_inputs = attn_inputs
+        block_table = attn_inputs.kv_cache_kernel_block_id_device
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         self._cg = _init_prefill_cg_params(
             self.fmha_params.batch_size,
-            attn_inputs.kv_cache_kernel_block_id_device,
+            block_table,
             self.fmha_params.seq_lens,
             self.fmha_params.cu_kv_seqlens,
             self.rope_params.kv_cache_offset,
@@ -617,7 +621,6 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
 
 
 class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
-
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -629,13 +632,14 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
+        block_table = attn_inputs.kv_cache_kernel_block_id_device
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         self._cg = _init_decode_cg_params(
             self.fmha_params.batch_size,
-            attn_inputs.kv_cache_kernel_block_id_device,
+            block_table,
             self.fmha_params.seq_lens,
             self.rope_params.kv_cache_offset,
         )
@@ -644,7 +648,9 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        if attn_configs.use_mla:
+        kernel_table = attn_inputs.kv_cache_kernel_block_id_device
+        has_kernel_table = kernel_table is not None and kernel_table.numel() > 0
+        if attn_configs.use_mla or not has_kernel_table:
             return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)
@@ -693,7 +699,6 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
 
 
 class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
-
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -705,13 +710,14 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
+        block_table = attn_inputs.kv_cache_kernel_block_id_device
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         self._cg = _init_decode_cg_params(
             self.fmha_params.batch_size,
-            attn_inputs.kv_cache_kernel_block_id_device,
+            block_table,
             self.fmha_params.seq_lens,
             self.rope_params.kv_cache_offset,
         )

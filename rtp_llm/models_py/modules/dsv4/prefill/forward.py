@@ -96,7 +96,16 @@ from __future__ import annotations
 
 import os
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import torch
 
@@ -297,6 +306,7 @@ def forward_layers(
     block_tables_by_type: Optional[Dict[str, torch.Tensor]],
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
+    cache_group_attn_inputs: Optional[Mapping[str, Any]] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -372,7 +382,9 @@ def forward_layers(
     # a cheap None check.
     write_cache_store_impl = None
     if kv_cache is not None and attn_inputs is not None:
-        write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
+        write_cache_store_impl = create_write_cache_store_impl(
+            attn_inputs, kv_cache, cache_group_attn_inputs=cache_group_attn_inputs
+        )
 
     if prepare_hidden_fn is None:
         h = v4.embed(input_ids)  # [T_total, dim]
@@ -674,15 +686,16 @@ def forward_prefill(
     kv_cache: Optional[KVCache],
     parallelism_config: Optional[ParallelismConfig],
     inputs: PyModelInputs,
+    cache_group_bindings: Sequence[str],
     prepare_hidden_fn: Optional[Any] = None,
 ) -> PyModelOutputs:
     """Prefill dispatcher — single :func:`forward_layers` call on the full
     flat ``[T_total]`` batch (vLLM-aligned).
 
-    Pulls flat metadata off :attr:`PyModelInputs.attention_inputs`. For the
-    multi-group DSV4 cache that attribute is a ``{tag: PyAttentionInputs}``
-    mapping, so group-invariant fields are read off the primary entry while
-    block tables are collected per tag:
+    Pulls flat metadata from the single :attr:`PyModelInputs.attention_inputs`.
+    Group-local tables come from the tag-keyed per-group attention inputs in
+    :attr:`PyModelInputs.cache_group_attn_inputs` and are translated to tags for
+    the DSV4 backend dictionary:
 
     * ``positions``  = ``attn.combo_position_ids`` — ``[T_total]`` global pos
     * ``cu_seqlens`` = ``attn.cu_seqlens``         — ``[B+1]`` int32 prefix sum
@@ -734,7 +747,7 @@ def forward_prefill(
             total_tokens=int(input_ids.numel()),
         )
 
-    block_tables_by_type = build_block_tables_batched(kv_cache, attn_inputs)
+    block_tables_by_type = build_block_tables_batched(inputs, cache_group_bindings)
 
     hidden = forward_layers(
         v4,
@@ -745,5 +758,6 @@ def forward_prefill(
         block_tables_by_type,
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
+        cache_group_attn_inputs=inputs.cache_group_attn_inputs,
     )  # [T_total, dim]
     return PyModelOutputs(hidden)

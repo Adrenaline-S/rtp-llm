@@ -77,16 +77,14 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = mtp_module_num;
 
-    // NOTE: createSpConfig builds main global layer routing and local MTP sub-config routing.
-    auto cfg = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
-                                                           propose_model_config,
-                                                           parallelism_config,
-                                                           runtime_config,
-                                                           kv_cache_config,
-                                                           sp_config,
-                                                           /*warm_up_result=*/std::nullopt,
-                                                           /*is_mtp=*/true,
-                                                           /*is_eagle=*/false);
+    // The test helper builds main global layer routing and local MTP sub-config routing.
+    auto cfg = rtp_llm::test::createTestSpeculativeCacheConfig(score_model_config,
+                                                               propose_model_config,
+                                                               parallelism_config,
+                                                               runtime_config,
+                                                               kv_cache_config,
+                                                               sp_config,
+                                                               /*warm_up_result=*/std::nullopt);
     return cfg;
 }
 
@@ -105,33 +103,32 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
-    // Use createSpConfig logic so that group layer ids are filled for main + sub-model layers.
+    // Use speculative merge logic so group layer ids are filled for main and draft layers.
     // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_GT(cache_cfg.groupNums(), 0);
-    ASSERT_EQ(cache_cfg.layerIdsForGroup(0).size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_EQ(cache_cfg.soleGroupForLayer(0).layer_ids.size(), cache_cfg.layerCount());
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->groupNums(), 1);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->groupNums(), 1);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->specForGroup(0)->block_size_bytes(),
-              cache_cfg.mtp_sub_configs[1]->specForGroup(0)->block_size_bytes());
+    ASSERT_EQ(cache_cfg.mtpModuleCount(), 2u);
+    ASSERT_EQ(cache_cfg.mtpModule(0).groupNums(), 1);
+    ASSERT_EQ(cache_cfg.mtpModule(1).groupNums(), 1);
+    EXPECT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).spec->block_size_bytes(),
+              cache_cfg.mtpModule(1).soleGroupForLayer(0).spec->block_size_bytes());
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0).size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0).size(), 1u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0)[0], 0);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0)[0], 0);
+    ASSERT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).layer_ids.size(), 1u);
+    ASSERT_EQ(cache_cfg.mtpModule(1).soleGroupForLayer(0).layer_ids.size(), 1u);
+    EXPECT_EQ(cache_cfg.mtpModule(0).soleGroupForLayer(0).layer_ids[0], 0);
+    EXPECT_EQ(cache_cfg.mtpModule(1).soleGroupForLayer(0).layer_ids[0], 0);
 
     RuntimeConfig runtime_config;
-    cache_cfg.finalizeBlockNums(/*global_block_num=*/3, runtime_config);
-    EXPECT_EQ(cache_cfg.block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 3u);
+    cache_cfg =
+        test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_cfg)).setProjectedBlockCountBasis(3).build();
+    EXPECT_EQ(cache_cfg.blockCountBasis(), 3u);
+    EXPECT_EQ(cache_cfg.mtpModule(0).blockCountBasis(), 3u);
+    EXPECT_EQ(cache_cfg.mtpModule(1).blockCountBasis(), 3u);
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, "full");
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
     ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 2u);
     ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 1u);
@@ -217,25 +214,110 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 
 // Allocation Test
 
-TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
+TEST_F(BlockPoolTest, FullGroupMTPLayoutsUseMainBlockNumAfterTpSync) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 4u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 4u);
+    ASSERT_EQ(cache_cfg.mtpModuleCount(), 2u);
+    ASSERT_EQ(cache_cfg.mtpModule(0).blockCountBasis(), 4u);
+    ASSERT_EQ(cache_cfg.mtpModule(1).blockCountBasis(), 4u);
 
-    // Shared default pool follows the main cache_config.block_num after TP sync.
-    // MTP sub-config block_num may still contain the pre-sync local value.
-    cache_cfg.block_num = 3;
+    // The independent "full" pool follows the finalized global block count after TP sync.
+    cache_cfg =
+        test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_cfg)).setProjectedBlockCountBasis(3).build();
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfigForGroup(cache_cfg, "full");
     ASSERT_EQ(pool_cfg.block_num, 3u);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
     EXPECT_EQ(pool_cfg.memory_layouts[0].block_num, 3u);
     EXPECT_EQ(pool_cfg.memory_layouts[1].block_num, 3u);
     EXPECT_EQ(pool_cfg.memory_layouts[2].block_num, 3u);
+}
+
+TEST_F(BlockPoolTest, ComposedPoolUsesEachModuleActualStride) {
+    auto main_model                       = makeTestModelConfig(/*num_layers=*/2);
+    auto draft_model                      = makeTestModelConfig(/*num_layers=*/1);
+    draft_model.attn_config.size_per_head = 2;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 4;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+    const auto cache_cfg        = test::createTestSpeculativeCacheConfig(
+        main_model, draft_model, parallelism_config, runtime_config, kv_cache_config, sp_config);
+    const auto pool_cfg = BlockPoolConfigHelper::createConfigForGroup(cache_cfg, "full");
+
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
+    EXPECT_NE(pool_cfg.memory_layouts[0].kv_block_stride_bytes, pool_cfg.memory_layouts[1].kv_block_stride_bytes);
+    EXPECT_EQ(pool_cfg.memory_layouts[1].kv_block_stride_bytes, pool_cfg.memory_layouts[2].kv_block_stride_bytes);
+    EXPECT_EQ(pool_cfg.total_size_bytes, static_cast<size_t>(pool_cfg.block_num) * cache_cfg.blockSizeBytes("full"));
+}
+
+TEST_F(BlockPoolTest, SingleFullCpOwnerTransferReturnsWholeKAndVParts) {
+    for (const bool quantized : {false, true}) {
+        const size_t k_scale_bytes = quantized ? 16 : 0;
+        const size_t v_scale_bytes = quantized ? 16 : 0;
+        auto         config        = createTestConfig(/*k_block_stride_bytes=*/64,
+                                       /*v_block_stride_bytes=*/64,
+                                       k_scale_bytes,
+                                       v_scale_bytes,
+                                       TYPE_FP16,
+                                       /*local_head_num_kv=*/1,
+                                       /*seq_size_per_block=*/4);
+        block_pool_                = std::make_shared<BlockPool>(config);
+        ASSERT_TRUE(block_pool_->init());
+
+        const auto parts = block_pool_->convertIndexToBuffer(
+            /*layer_id=*/0, /*block_id=*/1, /*partition_count=*/1, /*partition_id=*/0);
+        ASSERT_EQ(parts.size(), quantized ? 4u : 2u);
+        EXPECT_EQ(parts[0].size_bytes, 64u);
+        EXPECT_EQ(parts[1].size_bytes, 64u);
+        if (quantized) {
+            EXPECT_EQ(parts[2].size_bytes, k_scale_bytes);
+            EXPECT_EQ(parts[3].size_bytes, v_scale_bytes);
+        }
+        block_pool_.reset();
+    }
+}
+
+TEST_F(BlockPoolTest, ComposedMainLayoutIgnoresDraftMlaAndSparseCapabilities) {
+    auto main_model                                  = makeTestModelConfig(/*num_layers=*/2);
+    auto draft_model                                 = makeTestModelConfig(/*num_layers=*/1);
+    draft_model.attn_config.use_mla                  = true;
+    draft_model.attn_config.is_sparse                = true;
+    draft_model.attn_config.kv_lora_rank             = 1;
+    draft_model.attn_config.rope_head_dim            = 1;
+    draft_model.kv_cache_spec_descs[0][0].cache_type = KVCacheSpecType::MultiHeadLatentAttention;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 4;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 1;
+    const auto cache_cfg        = test::createTestSpeculativeCacheConfig(
+        main_model, draft_model, parallelism_config, runtime_config, kv_cache_config, sp_config);
+    EXPECT_FALSE(cache_cfg.usesMla());
+    EXPECT_FALSE(cache_cfg.isSparse());
+    ASSERT_EQ(cache_cfg.mtpModuleCount(), 1u);
+    EXPECT_TRUE(cache_cfg.mtpModule(0).usesMla());
+    EXPECT_TRUE(cache_cfg.mtpModule(0).isSparse());
+
+    const auto pool_cfg = BlockPoolConfigHelper::createConfigForGroup(cache_cfg, "full");
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 2u);
+    const auto& main_layout  = pool_cfg.memory_layouts[0];
+    const auto& draft_layout = pool_cfg.memory_layouts[1];
+    EXPECT_FALSE(main_layout.use_mla);
+    EXPECT_FALSE(main_layout.is_mla);
+    EXPECT_FALSE(main_layout.use_whole_block_transfer);
+    EXPECT_TRUE(draft_layout.use_mla);
+    EXPECT_TRUE(draft_layout.is_mla);
+    EXPECT_TRUE(draft_layout.use_whole_block_transfer);
 }
 
 TEST_F(BlockPoolTest, AllocSingleBlock) {

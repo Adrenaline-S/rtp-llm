@@ -5,6 +5,9 @@ import torch
 from rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test import (
     PyModelInputs,
     PyModelOutputs,
+    run_cache_free_graph_lifecycle,
+    run_kernel_block_table_update_lifecycle,
+    run_large_tail_update_lifecycle,
     run_scenario,
 )
 
@@ -27,26 +30,19 @@ class CacheStoreForwardModel:
 
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
-        first_inputs = (
-            next(iter(attention_inputs.values()))
-            if isinstance(attention_inputs, dict)
-            else attention_inputs
-        )
-        self.seen_input_lengths.append(first_inputs.input_lengths.tolist())
+        self.seen_input_lengths.append(attention_inputs.input_lengths.tolist())
 
         assert self.kv_cache is not None
         for layer_cache in self.kv_cache.get_layer_cache_groups(0):
-            tag_inputs = (
-                attention_inputs[layer_cache.tag]
-                if isinstance(attention_inputs, dict)
-                else attention_inputs
-            )
+            group_view = inputs.cache_group_attn_inputs[str(layer_cache.tag)]
             if (
-                tag_inputs.cache_store_inputs is not None
-                and tag_inputs.cache_store_writer is not None
+                attention_inputs.cache_store_inputs is not None
+                and attention_inputs.cache_store_writer is not None
             ):
-                tag_inputs.cache_store_writer.write(
-                    tag_inputs.cache_store_inputs, layer_cache
+                attention_inputs.cache_store_writer.write(
+                    attention_inputs.cache_store_inputs,
+                    layer_cache,
+                    group_view.kv_cache_block_id,
                 )
 
         hidden_states = torch.zeros(
@@ -63,6 +59,31 @@ class CacheStoreForwardModel:
     def forward_micro_batch(self, inputs: list[PyModelInputs]) -> list[PyModelOutputs]:
         self.micro_batch_calls += 1
         return [self._forward_one(model_inputs) for model_inputs in inputs]
+
+
+class CacheFreeBoundaryModel(CacheStoreForwardModel):
+    def initialize(self, resources) -> bool:
+        self.kv_cache = None
+        return True
+
+    def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+        attention_inputs = inputs.attention_inputs
+        self.seen_input_lengths.append(attention_inputs.input_lengths.tolist())
+        for table in (
+            attention_inputs.kv_cache_block_id,
+            attention_inputs.kv_cache_block_id_device,
+            attention_inputs.kv_cache_kernel_block_id,
+            attention_inputs.kv_cache_kernel_block_id_device,
+        ):
+            assert table is not None
+            assert tuple(table.shape) == (3, 0)
+        return PyModelOutputs(
+            torch.zeros(
+                (inputs.input_ids.numel(), 1),
+                dtype=torch.float16,
+                device=inputs.input_ids.device,
+            )
+        )
 
 
 def _blocks_by_key(result: dict) -> dict[str, dict]:
@@ -86,7 +107,116 @@ def _record_for_request(result: dict, request_id: int) -> dict:
     return matches[0]
 
 
+def _offsets_by_tag(result: dict) -> dict:
+    blocks = _blocks_by_key(result)
+    offsets = {}
+    for tag in ("full", "linear"):
+        offsets[tag] = sorted(
+            block["address"] - result["base_addresses"][tag]
+            for key, block in blocks.items()
+            if ("_tag_" + tag) in key
+        )
+    return offsets
+
+
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_cache_free_prepare_publishes_canonical_tables_to_graph(self) -> None:
+        model = CacheFreeBoundaryModel()
+        result = run_cache_free_graph_lifecycle(model)
+        self.assertEqual(result["table_shapes"], ([3, 0],) * 4)
+        self.assertEqual(result["table_device_flags"], (False, True, False, True))
+        self.assertEqual(result["group_view_count"], 0)
+        self.assertEqual(result["graph_calls"], (2, 1, 1))
+        self.assertEqual(model.seen_input_lengths, [[4, 3, 2]])
+
+    def test_large_heterogeneous_tail_update_uses_one_cuda_launch(self) -> None:
+        result = run_large_tail_update_lifecycle(CacheStoreForwardModel())
+        self.assertTrue(result["backing_stable"])
+        self.assertEqual(result["short_row_count"], 65)
+        self.assertEqual(result["device_tail_fill_launches"], 1)
+        self.assertTrue(result["host_tails_cleared"])
+        self.assertTrue(result["device_tails_cleared"])
+
+    def test_kernel_value_update_preserves_prepared_packed_storage(self) -> None:
+        result = run_kernel_block_table_update_lifecycle(CacheStoreForwardModel())
+        self.assertTrue(result["device_backings_owned"])
+        self.assertTrue(result["device_backings_from_host"])
+        self.assertTrue(result["host_backings_held"])
+        self.assertTrue(result["group_device_views_owned"])
+        self.assertTrue(result["backings_stable"])
+        self.assertTrue(result["views_stable"])
+        self.assertTrue(result["cache_store_alias_stable"])
+        self.assertEqual(result["cache_store_alias_pool_id"], 201)
+        expected_pool_values = list(range(201, 219))
+        self.assertEqual(result["pool_host_values"].tolist(), expected_pool_values)
+        self.assertEqual(result["pool_device_values"].tolist(), expected_pool_values)
+        self.assertEqual(
+            tuple(value.tolist() for value in result["pool_valid_lengths"]),
+            ([1, 2, 1], [2, 3, 1]),
+        )
+        expected_kernel_values = [
+            101,
+            -1,
+            -1,
+            -1,
+            105,
+            106,
+            107,
+            108,
+            -1,
+            -1,
+            111,
+            112,
+            113,
+            -1,
+            115,
+            -1,
+            -1,
+            -1,
+        ]
+        self.assertEqual(result["kernel_host_values"].tolist(), expected_kernel_values)
+        self.assertEqual(
+            result["kernel_device_values"].tolist(), expected_kernel_values
+        )
+        self.assertEqual(
+            tuple(value.tolist() for value in result["kernel_valid_lengths"]),
+            ([1, 0, 2], [2, 3, 1]),
+        )
+        self.assertEqual(result["device_tail_fill_launches"], 1)
+        self.assertIn("full prepare", result["structural_rejection"])
+
+    def test_multi_tag_binding_ignores_cache_group_declaration_order(self) -> None:
+        # Dense execution ordinals are assigned from sorted tags during plan
+        # construction, independent of CacheConfig declaration order.
+        unsorted_result = run_scenario(CacheStoreForwardModel(), "multi_tag")
+        sorted_result = run_scenario(
+            CacheStoreForwardModel(), "multi_tag_sorted_declaration"
+        )
+
+        self.assertEqual(
+            _offsets_by_tag(unsorted_result), _offsets_by_tag(sorted_result)
+        )
+        self.assertEqual(
+            _offsets_by_tag(sorted_result),
+            {"full": [16, 32], "linear": [72, 96, 120, 144]},
+        )
+
+    def test_tp_non_root_reconstructs_single_tag_after_tensor_sync(self) -> None:
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "tp_non_root_single_tag")
+        self.assertEqual(model.forward_calls, 1)
+        record = _record_for_request(result, 351)
+        base = result["base_addresses"]["default"]
+        self.assertEqual(
+            sorted(block["address"] - base for block in record["blocks"]),
+            [16, 32],
+        )
+
+    def test_tp_non_root_reconstructs_reordered_multi_group_parallel_rows(self) -> None:
+        canonical = run_scenario(CacheStoreForwardModel(), "multi_tag")
+        reconstructed = run_scenario(CacheStoreForwardModel(), "tp_non_root_multi_tag")
+        self.assertEqual(_offsets_by_tag(reconstructed), _offsets_by_tag(canonical))
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")

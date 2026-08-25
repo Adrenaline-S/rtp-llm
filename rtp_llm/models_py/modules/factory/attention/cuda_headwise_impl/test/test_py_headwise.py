@@ -105,9 +105,17 @@ class TestHeadwisePrefillOp(unittest.TestCase):
         )
         num_pages_per_seq = (case.kv_len + case.page_size - 1) // case.page_size
         total_num_pages = num_pages_per_seq * case.batch_size
-        attn_inputs.kv_cache_block_id_device = torch.arange(
+        block_table = torch.arange(
             0, total_num_pages, device=self.device, dtype=self.index_dtype
         ).view(case.batch_size, num_pages_per_seq)
+        attn_inputs.kv_cache_block_id = block_table.cpu()
+        attn_inputs.kv_cache_block_id_device = block_table
+        attn_inputs.kv_cache_kernel_block_id = block_table.cpu()
+        attn_inputs.kv_cache_kernel_block_id_device = block_table
+        attn_inputs.pool_valid_lengths = torch.full(
+            (case.batch_size,), num_pages_per_seq, dtype=torch.int32
+        )
+        attn_inputs.kernel_valid_lengths = attn_inputs.pool_valid_lengths.clone()
         attn_inputs.headwise_config = self._build_headwise_config(case)
         return attn_inputs
 
@@ -167,8 +175,10 @@ class TestHeadwisePrefillOp(unittest.TestCase):
     ) -> torch.Tensor:
         op = self._get_or_create_op(case)
         if not op.support(attn_inputs):
-            self.skipTest("HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)")
-        op.prepare(attn_inputs)
+            self.skipTest(
+                "HeadWisePrefillAttnOp not supported (missing flashinfer/rtp_kernel)"
+            )
+        op.prepare(attn_inputs, attn_inputs.kv_cache_kernel_block_id_device)
         op._get_headwise_config(0)
         return op.forward(qkv, cache, None)
 

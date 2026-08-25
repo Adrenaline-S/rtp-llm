@@ -22,7 +22,7 @@ cc_library(
         ":client",
         ":config",
         ":subscriber",
-        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
     ],
@@ -87,4 +87,15 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test, the terminal
+# source gate that rejects positional cache group routing in this package.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
 )

@@ -11,28 +11,57 @@
 
 namespace rtp_llm {
 
+CacheBlockTablePackingSignature CacheBlockTablePackingSignature::fromPlan(const CacheBlockTablePackingPlan& plan) {
+    CacheBlockTablePackingSignature signature;
+    signature.batch_capacity = plan.batchCapacity();
+    signature.pool_numel     = plan.poolNumel();
+    signature.kernel_numel   = plan.kernelNumel();
+    signature.groups.reserve(plan.groupCount());
+    for (uint32_t ordinal = 0; ordinal < plan.groupCount(); ++ordinal) {
+        signature.groups.push_back(plan.group(ordinal));
+    }
+    return signature;
+}
+
+bool CacheBlockTablePackingSignature::matches(const CacheBlockTablePackingPlan& plan) const noexcept {
+    if (batch_capacity != plan.batchCapacity() || pool_numel != plan.poolNumel() || kernel_numel != plan.kernelNumel()
+        || groups.size() != plan.groupCount()) {
+        return false;
+    }
+    for (uint32_t ordinal = 0; ordinal < groups.size(); ++ordinal) {
+        const auto& expected = groups[ordinal];
+        const auto& actual   = plan.group(ordinal);
+        if (expected.tag != actual.tag || expected.execution_ordinal != actual.execution_ordinal
+            || expected.pool.offset != actual.pool.offset || expected.pool.row_width != actual.pool.row_width
+            || expected.pool.batch_capacity != actual.pool.batch_capacity
+            || expected.kernel.offset != actual.kernel.offset || expected.kernel.row_width != actual.kernel.row_width
+            || expected.kernel.batch_capacity != actual.kernel.batch_capacity) {
+            return false;
+        }
+    }
+    return true;
+}
+
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
-    shape_hints[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
+    shape_hints[GptModelInputIndex::comboTokens]  = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints[GptModelInputIndex::inputLengths] = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::sequenceLengths] =
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::prefixLengths] =
         inputs.prefix_lengths.defined() ? inputs.prefix_lengths.numel() : 0;
-    shape_hints[GptModelInputIndex::maxKernelBlocksPerBatch] =
-        inputs.kv_cache_kernel_block_id.defined() ? inputs.kv_cache_kernel_block_id.size(2) : 0;
-    shape_hints[GptModelInputIndex::maxBlocksPerBatch] =
-        inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(2) : 0;
+    shape_hints[GptModelInputIndex::kvCacheKernelBlockTableNumel] =
+        inputs.kv_cache_kernel_block_id.defined() ? inputs.kv_cache_kernel_block_id.numel() : 0;
+    shape_hints[GptModelInputIndex::kvCachePoolBlockTableNumel] =
+        inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.numel() : 0;
     shape_hints[GptModelInputIndex::cacheKeysWidth] =
         inputs.cache_keys.defined() && inputs.cache_keys.dim() >= 2 ? inputs.cache_keys.size(1) : 0;
-    shape_hints[GptModelInputIndex::kvCacheGroupNum] =
-        inputs.kv_cache_kernel_block_id.defined() ?
-            inputs.kv_cache_kernel_block_id.size(0) :
-            (inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(0) : 1);
-    // Kept as a reserved zero-valued slot for shape-hint wire compatibility.
-    // Per-layer group mapping is carried by GroupedCacheLayerLayout now, not by
-    // a broadcast tensor.
-    shape_hints[GptModelInputIndex::kvCacheLayerToGroupLen] = 0;
+    shape_hints[GptModelInputIndex::kvCacheGroupNum] = inputs.kv_cache_block_table_plan.groupCount();
+    // The TP metadata wire preserves the complete root-side packing identity,
+    // including tags and region geometry. Non-root ranks must not invent tag
+    // identity locally because MTP structural decisions govern collectives.
+    shape_hints[GptModelInputIndex::kvCacheBlockTableMetadataLen] =
+        static_cast<int64_t>(encodeCacheBlockTablePackingPlan(inputs.kv_cache_block_table_plan).size());
     shape_hints[GptModelInputIndex::kvCacheGroupTypesLen] =
         inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
     shape_hints[GptModelInputIndex::kvCacheUpdateCopyNum] =
@@ -93,9 +122,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
     }
-    if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
-        device_bits |= GptModelInputDeviceBit::kDeviceBitKernelBlockId;
-    }
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     return shape_hints;
 }
@@ -128,6 +154,15 @@ std::array<int64_t, 2> decodeMtpHiddenStatesShape(int64_t total_numel, int64_t r
     return {rows, cols};
 }
 
+void refreshKVCacheBlockTableDeviceReplicas(GptModelInputs& inputs) {
+    if (inputs.kv_cache_block_id.numel() > 0) {
+        inputs.kv_cache_block_id_device.copy_(inputs.kv_cache_block_id, /*non_blocking=*/true);
+    }
+    if (inputs.kv_cache_kernel_block_id.numel() > 0) {
+        inputs.kv_cache_kernel_block_id_device.copy_(inputs.kv_cache_kernel_block_id, /*non_blocking=*/true);
+    }
+}
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
@@ -153,10 +188,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // extra-input (model-specific, treated as opaque flat 1-D tensors) per-tensor element count
     torch::Tensor mm_extra_input_shape_t;
     int64_t*      mm_extra_input_shape_ptr = nullptr;
-    inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
-    inputs.need_all_hidden_states          = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
-    inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
-    inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    torch::Tensor cache_block_table_metadata_t;
+    inputs.need_all_logits        = shape_hints_ptr[GptModelInputIndex::needAllLogits];
+    inputs.need_all_hidden_states = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
+    inputs.skip_run               = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.is_fake_stream         = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;
     }
@@ -195,10 +231,30 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         cudaSyncAndCheck();
     }
 
-    const auto max_kernel_blocks = checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
-    const auto max_blocks        = checkedHint(GptModelInputIndex::maxBlocksPerBatch, "maxBlocksPerBatch");
-    const auto cache_keys_width  = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
-    const auto kv_cache_group_num      = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
+    const auto kv_cache_group_num = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
+    const auto cache_block_table_metadata_len =
+        checkedHint(GptModelInputIndex::kvCacheBlockTableMetadataLen, "kvCacheBlockTableMetadataLen");
+    RTP_LLM_CHECK_WITH_INFO((kv_cache_group_num == 0 && cache_block_table_metadata_len == 2)
+                                || (kv_cache_group_num > 0 && cache_block_table_metadata_len > 2),
+                            "invalid packed cache metadata length %lld for group count %lld",
+                            static_cast<long long>(cache_block_table_metadata_len),
+                            static_cast<long long>(kv_cache_group_num));
+    if (cache_block_table_metadata_len > 0) {
+        cache_block_table_metadata_t = torch::empty({cache_block_table_metadata_len}, torch::kInt64).pin_memory();
+        if (parallelism_config.tp_rank == 0) {
+            const auto metadata = encodeCacheBlockTablePackingPlan(inputs.kv_cache_block_table_plan);
+            RTP_LLM_CHECK_WITH_INFO(metadata.size() == static_cast<size_t>(cache_block_table_metadata_len),
+                                    "root packed cache metadata changed after shape-hint publication");
+            std::copy(metadata.begin(), metadata.end(), cache_block_table_metadata_t.data_ptr<int64_t>());
+        }
+        execBroadcastCpu({{cache_block_table_metadata_t}, 0});
+    }
+
+    const auto kernel_table_numel =
+        checkedHint(GptModelInputIndex::kvCacheKernelBlockTableNumel, "kvCacheKernelBlockTableNumel");
+    const auto pool_table_numel =
+        checkedHint(GptModelInputIndex::kvCachePoolBlockTableNumel, "kvCachePoolBlockTableNumel");
+    const auto cache_keys_width        = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
     const auto group_types_len         = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
     const auto combo_position_ids_size = checkedHint(GptModelInputIndex::comboPositionIds, "comboPositionIds");
     const auto text_tokens_mask_size   = checkedHint(GptModelInputIndex::textTokensMask, "textTokensMask");
@@ -248,41 +304,47 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             return (device_bits & bit) ? rtp_llm::AllocationType::DEVICE : rtp_llm::AllocationType::HOST;
         };
 
-        inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
+        inputs.combo_tokens             = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
-        inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
+        inputs.input_lengths            = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
-        inputs.sequence_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {checkedHint(GptModelInputIndex::sequenceLengths, "sequenceLengths")},
+        inputs.sequence_lengths         = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {checkedHint(GptModelInputIndex::sequenceLengths, "sequenceLengths")},
                                            pickAlloc(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
-        inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {context_batch_size},
+        inputs.prefix_lengths           = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
-        if (max_kernel_blocks != 0) {
-            // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
-            // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
-            // classification below stays identical across ranks (otherwise pack/unpack drifts
-            // off-by-tensor and non-root unpacks garbage).
-            inputs.kv_cache_kernel_block_id =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num,
-                          checkedHint(GptModelInputIndex::inputLengths, "inputLengths"),
-                          max_kernel_blocks},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
+        const auto batch_capacity       = checkedHint(GptModelInputIndex::inputLengths, "inputLengths");
+        inputs.kv_cache_block_id        = allocBuf(rtp_llm::DataType::TYPE_INT32, {pool_table_numel});
+        inputs.kv_cache_kernel_block_id = allocBuf(rtp_llm::DataType::TYPE_INT32, {kernel_table_numel});
+        inputs.kv_cache_block_id_device =
+            allocBuf(rtp_llm::DataType::TYPE_INT32, {pool_table_numel}, rtp_llm::AllocationType::DEVICE);
+        inputs.kv_cache_kernel_block_id_device =
+            allocBuf(rtp_llm::DataType::TYPE_INT32, {kernel_table_numel}, rtp_llm::AllocationType::DEVICE);
+        if (kv_cache_group_num > 0) {
+            inputs.kv_cache_block_table_plan = decodeCacheBlockTablePackingPlan(
+                cache_block_table_metadata_t.data_ptr<int64_t>(), static_cast<size_t>(cache_block_table_metadata_len));
+            RTP_LLM_CHECK_WITH_INFO(
+                inputs.kv_cache_block_table_plan.groupCount() == static_cast<size_t>(kv_cache_group_num)
+                    && inputs.kv_cache_block_table_plan.batchCapacity() == static_cast<size_t>(batch_capacity),
+                "TP packed cache plan group/batch metadata mismatch");
+            for (uint32_t ordinal = 0; ordinal < inputs.kv_cache_block_table_plan.groupCount(); ++ordinal) {
+                inputs.kv_cache_pool_valid_lengths.push_back(allocBuf(rtp_llm::DataType::TYPE_INT32, {batch_capacity}));
+                inputs.kv_cache_kernel_valid_lengths.push_back(
+                    allocBuf(rtp_llm::DataType::TYPE_INT32, {batch_capacity}));
+            }
+            RTP_LLM_CHECK_WITH_INFO(
+                inputs.kv_cache_block_table_plan.poolNumel() == static_cast<size_t>(pool_table_numel)
+                    && inputs.kv_cache_block_table_plan.kernelNumel() == static_cast<size_t>(kernel_table_numel),
+                "TP packed cache plan numel mismatch");
             inputs.kv_cache_update_mapping =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3});
         }
-        if (max_blocks != 0) {
-            inputs.kv_cache_block_id = allocBuf(
-                rtp_llm::DataType::TYPE_INT32,
-                {kv_cache_group_num, checkedHint(GptModelInputIndex::inputLengths, "inputLengths"), max_blocks});
-            if (inputs.pd_separation) {
-                inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64,
-                                             {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks});
-            }
+        if (pool_table_numel != 0 && inputs.pd_separation) {
+            inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64, {context_batch_size, cache_keys_width});
         }
         if (group_types_len) {
             inputs.kv_cache_group_types = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
@@ -350,9 +412,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
-    if (max_kernel_blocks || max_blocks) {
+    if (kernel_table_numel || pool_table_numel) {
         collect(inputs.kv_cache_kernel_block_id);
         collect(inputs.kv_cache_block_id);
+        for (auto& valid_lengths : inputs.kv_cache_pool_valid_lengths) {
+            collect(valid_lengths);
+        }
+        for (auto& valid_lengths : inputs.kv_cache_kernel_valid_lengths) {
+            collect(valid_lengths);
+        }
         if (group_types_len) {
             collect(inputs.kv_cache_group_types);
         }
@@ -515,6 +583,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
             flush_fused_copy();
         }
+    }
+
+    if (!is_root) {
+        // Non-root reconstructs device replicas from the host tables received
+        // above. Rank 0's PyWrappedModel materializes its address-stable device
+        // backing directly from the same authoritative host tables.
+        refreshKVCacheBlockTableDeviceReplicas(inputs);
     }
 }
 

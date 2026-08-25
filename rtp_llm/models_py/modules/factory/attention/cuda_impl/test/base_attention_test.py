@@ -105,6 +105,11 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+def make_single_group_attn_inputs(attn_inputs: PyAttentionInputs) -> PyAttentionInputs:
+    """Return the already-bound per-group attention inputs."""
+    return attn_inputs
+
+
 def compare_tensors(
     a: torch.Tensor,
     b: torch.Tensor,

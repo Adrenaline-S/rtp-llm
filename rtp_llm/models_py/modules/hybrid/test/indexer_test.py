@@ -326,7 +326,12 @@ class IndexerTest(TestCase):
         # Create inputs
         attn_inputs = self._create_attention_inputs(batch_size, seq_len, is_prefill)
         fmha_params = rtp_llm_ops.prepare_sparse_mla_params(
-            attn_inputs, config.attn_config.tokens_per_block
+            attn_inputs.input_lengths,
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.kv_cache_kernel_block_id,
+            attn_inputs.is_prefill,
+            config.attn_config.tokens_per_block,
         )
         fmha_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
             fmha_params.kvlen_d,

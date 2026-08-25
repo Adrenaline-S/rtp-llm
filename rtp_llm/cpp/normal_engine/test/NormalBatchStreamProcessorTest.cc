@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 using namespace std;
 
@@ -31,14 +32,27 @@ static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
     return torch::tensor(data, torch::kInt32);
 }
 
-static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
-    auto spec = std::make_shared<MHAKVCacheSpec>();
-    spec->tag = "default";
+static void addDecodeWarmupCacheSpec(ModelConfig& model_config) {
+    model_config.num_layers                   = 1;
+    model_config.data_type                    = DataType::TYPE_FP16;
+    model_config.attn_config.head_num         = 1;
+    model_config.attn_config.kv_head_num      = 1;
+    model_config.attn_config.size_per_head    = 1;
+    model_config.attn_config.tokens_per_block = 1;
+    KVCacheSpecDesc desc;
+    desc.tag                         = "default";
+    desc.cache_type                  = KVCacheSpecType::MultiHeadAttention;
+    model_config.kv_cache_spec_descs = {{std::move(desc)}};
+}
+
+static CacheConfig initFullCacheConfig(CacheConfig cache_config, int layer_num) {
+    auto             spec = std::make_shared<MHAKVCacheSpec>();
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.layer_num     = static_cast<uint32_t>(layer_num);
-    cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    return rtp_llm::test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_config))
+        .setMainLayerCount(static_cast<uint32_t>(layer_num))
+        .setGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"})
+        .build();
 }
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {
@@ -79,15 +93,20 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
 
-    EXPECT_EQ(processor.model_input_gatherer_config_.kv_cache_group_nums, 0);
-    EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_group_types.empty());
+    EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_groups.empty());
     ASSERT_EQ(stream->kvCache().groupNums(), 1);
     EXPECT_EQ(stream->kvCache().cacheResource().soleGroupTagForLayer(0), "__warmup__");
     TensorHolder holder;
     auto         model_input = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input.ok());
-    EXPECT_FALSE(model_input->kv_cache_block_id.defined());
-    EXPECT_FALSE(model_input->kv_cache_kernel_block_id.defined());
+    EXPECT_TRUE(model_input->kv_cache_block_id.defined());
+    EXPECT_TRUE(model_input->kv_cache_block_id_device.defined());
+    EXPECT_TRUE(model_input->kv_cache_kernel_block_id.defined());
+    EXPECT_TRUE(model_input->kv_cache_kernel_block_id_device.defined());
+    EXPECT_EQ(model_input->kv_cache_block_id.numel(), 0);
+    EXPECT_EQ(model_input->kv_cache_block_id_device.numel(), 0);
+    EXPECT_EQ(model_input->kv_cache_kernel_block_id.numel(), 0);
+    EXPECT_EQ(model_input->kv_cache_kernel_block_id_device.numel(), 0);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
@@ -101,7 +120,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     pd_sep_config.role_type = RoleType::PREFILL;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config = initFullCacheConfig(std::move(cache_config), model_config.num_layers);
     RuntimeConfig runtime_config;
 
     auto query                                   = make_shared<GenerateInput>();
@@ -113,9 +132,9 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
 
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);
-    resource.initGroups(cache_config.topologyPtr());
-    resource.setBatchBlocks(0, 0, {1, 2});
-    resource.setBatchBlocks(1, 0, {3, 4});
+    resource.initGroups(cache_config);
+    resource.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({1, 2}));
+    resource.mutableBlockBinding(1, "default").assign(poolBlockSnapshotForTest({3, 4}));
     resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
     resource.setBatchCacheKeys(1, CacheKeysType{201, 202, 203, 204, 205});
     stream->setKVCache(resource);
@@ -136,6 +155,215 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     EXPECT_EQ(cache_keys.size(0), 2);
     EXPECT_EQ(cache_keys.size(1), 5);
     EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 0, 0, 201, 202, 203, 204, 205}));
+}
+
+static CacheConfig initTwoGroupCacheConfig(CacheConfig cache_config, bool declare_in_sorted_order) {
+    auto full_spec   = std::make_shared<MHAKVCacheSpec>();
+    auto linear_spec = test::makeResolvedLinearSpec(
+        TYPE_FP16, 1, 1, 1, 1, /*conv_kernel_dim=*/2, /*seq_size_per_block=*/1, TYPE_FP16, TYPE_FP16, "linear");
+    std::vector<int> layer_ids{0};
+    if (declare_in_sorted_order) {
+        return test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_config))
+            .setMainLayerCount(1)
+            .setGroupedSpecs({full_spec, linear_spec},
+                             {layer_ids, layer_ids},
+                             {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                             {"full", "linear"})
+            .build();
+    } else {
+        return test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_config))
+            .setMainLayerCount(1)
+            .setGroupedSpecs({linear_spec, full_spec},
+                             {layer_ids, layer_ids},
+                             {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                             {"linear", "full"})
+            .build();
+    }
+}
+
+// The model-input group dimension is a positional boundary payload, so it must be
+// ordered by sorted unique tags and not by CacheConfig's own record order.
+TEST_F(NormalBatchStreamProcessorTest, testGroupDimensionUsesSortedTagOrder) {
+    const auto gatherTwoGroupInput = [&](bool declare_in_sorted_order) {
+        ResourceContext resource_context;
+        ModelConfig     model_config;
+        model_config.max_seq_len = 2048;
+        model_config.vocab_size  = 2048;
+        model_config.num_layers  = 1;
+
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        CacheConfig                 cache_config;
+        cache_config = initTwoGroupCacheConfig(std::move(cache_config), declare_in_sorted_order);
+        RuntimeConfig runtime_config;
+
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({1, 2, 3});
+        query->generate_config = make_shared<GenerateConfig>();
+        GenerateStreamPtr stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(1);
+        resource.initGroups(cache_config);
+        resource.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({11, 12}));
+        resource.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({21, 22}));
+        stream->setKVCache(resource);
+        stream->generate_status_->status = StreamState::RUNNING;
+
+        StreamGroups               stream_groups({stream});
+        NormalBatchStreamProcessor processor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        TensorHolder holder;
+        auto         model_input = processor.gatherModelInput(stream_groups, holder);
+        EXPECT_TRUE(model_input.ok());
+        return model_input.value();
+    };
+
+    const auto unsorted_declaration = gatherTwoGroupInput(/*declare_in_sorted_order=*/false);
+    const auto sorted_declaration   = gatherTwoGroupInput(/*declare_in_sorted_order=*/true);
+
+    const std::vector<std::string> sorted_tags{"full", "linear"};
+
+    ASSERT_TRUE(unsorted_declaration.kv_cache_block_id.defined());
+    ASSERT_EQ(unsorted_declaration.kv_cache_block_id.dim(), 1);
+    ASSERT_EQ(unsorted_declaration.kv_cache_block_table_plan.groupCount(), 2);
+    EXPECT_EQ(unsorted_declaration.kv_cache_block_table_plan.group(0).tag, "full");
+    EXPECT_EQ(unsorted_declaration.kv_cache_block_table_plan.group(1).tag, "linear");
+    EXPECT_EQ(sorted_declaration.kv_cache_block_table_plan.group(0).tag, sorted_tags[0]);
+    EXPECT_EQ(sorted_declaration.kv_cache_block_table_plan.group(1).tag, sorted_tags[1]);
+    // Row 0 is "full", row 1 is "linear" regardless of the declaration order.
+    EXPECT_EQ(toVec<int32_t>(unsorted_declaration.kv_cache_block_id), (std::vector<int32_t>{11, 12, 21, 22}));
+    EXPECT_EQ(toVec<int32_t>(unsorted_declaration.kv_cache_block_id),
+              toVec<int32_t>(sorted_declaration.kv_cache_block_id));
+    EXPECT_EQ(toVec<int32_t>(unsorted_declaration.kv_cache_kernel_block_id),
+              toVec<int32_t>(sorted_declaration.kv_cache_kernel_block_id));
+
+    // kv_cache_group_types is the payload parallel to the block tables and must
+    // be permuted into the same sorted order.
+    ASSERT_TRUE(unsorted_declaration.kv_cache_group_types.defined());
+    const std::vector<int32_t> expected_types{static_cast<int32_t>(CacheGroupType::FULL),
+                                              static_cast<int32_t>(CacheGroupType::LINEAR)};
+    EXPECT_EQ(toVec<int32_t>(unsorted_declaration.kv_cache_group_types), expected_types);
+    EXPECT_EQ(toVec<int32_t>(sorted_declaration.kv_cache_group_types), expected_types);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsBeforePublishing) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 32;
+    model_config.num_layers  = 1;
+
+    auto full_spec                = std::make_shared<MHAKVCacheSpec>();
+    full_spec->seq_size_per_block = 8;
+    auto linear_spec              = test::makeResolvedLinearSpec(
+        TYPE_FP16, 1, 1, 1, 1, /*conv_kernel_dim=*/2, /*seq_size_per_block=*/2, TYPE_FP16, TYPE_FP16, "linear");
+    auto cache_config_builder = rtp_llm::test::TestCacheConfigBuilder::makeBase(
+        /*layer_count=*/1, /*block_count=*/0, /*cache_key_tokens=*/2, /*kernel_tokens=*/2, TYPE_FP16);
+    auto cache_config = std::move(cache_config_builder)
+                            .setGroupedSpecs({linear_spec, full_spec},
+                                             {{0}, {0}},
+                                             {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                             {"linear", "full"})
+                            .build();
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({1});
+    query->generate_config = make_shared<GenerateConfig>();
+    RuntimeConfig runtime_config;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(cache_config);
+    resource.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({3}));
+    resource.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({7}));
+    stream->setKVCache(resource);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    NormalBatchStreamProcessor  processor(model_config, pd_sep_config, logging_config, cache_config, false);
+    StreamGroups                stream_groups({stream});
+    TensorHolder                holder;
+    auto                        result = processor.gatherKvCacheKernelBlockId(stream_groups, holder);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(toVec<int32_t>(result->kernel_host), (std::vector<int32_t>{12, 13, 14, 15, 7}));
+    EXPECT_EQ(toVec<int32_t>(result->kernel_device), (std::vector<int32_t>{12, 13, 14, 15, 7}));
+    ASSERT_EQ(result->kernel_valid_lengths.size(), 2);
+    EXPECT_EQ(toVec<int32_t>(result->kernel_valid_lengths[0]), (std::vector<int32_t>{4}));
+    EXPECT_EQ(toVec<int32_t>(result->kernel_valid_lengths[1]), (std::vector<int32_t>{1}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMutateHostOrPublish) {
+    const auto make_config = [](const std::string& second_tag, size_t second_b) {
+        auto first_spec                = std::make_shared<MHAKVCacheSpec>();
+        first_spec->seq_size_per_block = 2;
+        auto second_spec               = test::makeResolvedLinearSpec(TYPE_FP16,
+                                                        1,
+                                                        1,
+                                                        1,
+                                                        1,
+                                                        /*conv_kernel_dim=*/2,
+                                                        /*seq_size_per_block=*/second_b,
+                                                        TYPE_FP16,
+                                                        TYPE_FP16,
+                                                        second_tag);
+        auto builder                   = rtp_llm::test::TestCacheConfigBuilder::makeBase(
+            /*layer_count=*/1, /*block_count=*/0, /*cache_key_tokens=*/2, /*kernel_tokens=*/2, TYPE_FP16);
+        return std::move(builder)
+            .setGroupedSpecs({first_spec, second_spec},
+                             {{0}, {0}},
+                             {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                             {"full", second_tag})
+            .build();
+    };
+    const auto run_invalid = [&](const CacheConfig& expected_config,
+                                 const CacheConfig& resource_config,
+                                 bool               make_late_row_oversized) {
+        ResourceContext resource_context;
+        ModelConfig     model_config;
+        model_config.max_seq_len = 32;
+        model_config.vocab_size  = 32;
+        model_config.num_layers  = 1;
+        RuntimeConfig runtime_config;
+        auto          query    = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({1});
+        query->generate_config = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(1);
+        resource.initGroups(resource_config);
+        resource.mutableBlockBinding(0, "full").assign(poolBlockSnapshotForTest({3}));
+        resource.mutableBlockBinding(0, resource_config.groups()[1].tag).assign(poolBlockSnapshotForTest({7}));
+        if (make_late_row_oversized) {
+            resource.mutableBlockBinding(0, "linear").assign(poolBlockSnapshotForTest({7, 8}));
+        }
+        stream->setKVCache(resource);
+        stream->generate_status_->status = StreamState::RUNNING;
+
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig logging_config;
+        NormalBatchStreamProcessor  processor(model_config, pd_sep_config, logging_config, expected_config, false);
+        StreamGroups                stream_groups({stream});
+        PackedBlockTableSnapshot    snapshot;
+        snapshot.plan                 = CacheBlockTablePackingPlan::create(expected_config, 1, 1);
+        snapshot.kernel_host          = torch::full({static_cast<int64_t>(snapshot.plan.kernelNumel())},
+                                           91,
+                                           torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        snapshot.kernel_valid_lengths = {torch::zeros({1}, torch::TensorOptions(torch::kInt32).pinned_memory(true)),
+                                         torch::zeros({1}, torch::TensorOptions(torch::kInt32).pinned_memory(true))};
+        TensorHolder holder;
+        auto         sentinel = torch::tensor({5}, torch::kInt32);
+        holder.hold(sentinel);
+        EXPECT_ANY_THROW(processor.model_input_gatherer_->gatherKvCacheKernelBlockIdToHost(stream_groups, snapshot));
+        EXPECT_EQ(toVec<int32_t>(snapshot.kernel_host), std::vector<int32_t>(snapshot.plan.kernelNumel(), 91));
+        EXPECT_EQ(holder.tensors.size(), 1u);
+    };
+
+    const auto expected = make_config("linear", 2);
+    run_invalid(expected, make_config("unknown", 2), false);
+    run_invalid(expected, expected, true);
 }
 
 class TestStatefulLogitsProcessor: public BaseLogitsProcessor {
@@ -186,9 +414,15 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
-    cache_config.kv_block_stride_bytes = 4096;
-    cache_config.kv_scale_stride_bytes = 256;
+    cache_config  = initFullCacheConfig(std::move(cache_config), model_config.num_layers);
+    auto fp8_spec = rtp_llm::test::makeMhaSpec(
+        "default", /*tokens_per_block=*/8, TYPE_FP8_E4M3, /*local_head_num_kv=*/4, /*size_per_head=*/64);
+    const auto block_count = cache_config.blockCountBasis();
+    cache_config =
+        test::TestCacheConfigBuilder::rebuildForTest(std::move(cache_config))
+            .setGroupedSpecs({fp8_spec}, {{0, 1}}, {CacheGroupType::FULL}, {"default"})
+            .setGroupBlockLayout({block_count}, {fp8_spec->block_size_bytes()}, {fp8_spec->scale_block_size_bytes()})
+            .build();
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -202,8 +436,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query1->input_ids = hostIntBuffer({1});
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1, 2, 3, 4});
+    addr1.initGroups(cache_config);
+    addr1.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({1, 2, 3, 4}));
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
 
@@ -215,8 +449,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query2->input_ids = hostIntBuffer({1, 2});
     BatchKVCacheResource addr2;
     addr2.resetBatchSize(1);
-    addr2.initGroups(cache_config.topologyPtr());
-    addr2.setBatchBlocks(0, 0, {5, 6, 7, 8});
+    addr2.initGroups(cache_config);
+    addr2.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({5, 6, 7, 8}));
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
 
@@ -227,8 +461,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
-    addr3.initGroups(cache_config.topologyPtr());
-    addr3.setBatchBlocks(0, 0, {9, 10});
+    addr3.initGroups(cache_config);
+    addr3.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({9, 10}));
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
@@ -238,8 +472,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
-    addr4.initGroups(cache_config.topologyPtr());
-    addr4.setBatchBlocks(0, 0, {11, 12, 13, 14});
+    addr4.initGroups(cache_config);
+    addr4.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({11, 12, 13, 14}));
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
 
@@ -265,14 +499,12 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         vector<int> input_lengths     = {1, 2, 3, 3};
         vector<int> sequence_lengths  = {1, 2};
         vector<int> prefix_lengths    = {0, 1};
-        vector<int> kv_cache_block_id = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 11, 12, 13, 14};
+        vector<int> kv_cache_block_id = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 11, 12, 13, 14};
         EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
     }
     {
         MMModelConfig mm_model_config;
@@ -294,6 +526,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLo
     ModelConfig     model_config;
     model_config.max_seq_len = 128;
     model_config.vocab_size  = 128900;
+    addDecodeWarmupCacheSpec(model_config);
     RuntimeConfig runtime_config;
 
     std::shared_ptr<GenerateInput> query          = make_shared<GenerateInput>();
@@ -337,6 +570,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
     ModelConfig     model_config;
     model_config.max_seq_len = 128;
     model_config.vocab_size  = 128900;
+    addDecodeWarmupCacheSpec(model_config);
     RuntimeConfig runtime_config;
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
@@ -380,7 +614,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config = initFullCacheConfig(std::move(cache_config), model_config.num_layers);
     RuntimeConfig                  runtime_config;
     std::shared_ptr<GenerateInput> query1         = make_shared<GenerateInput>();
     query1->input_ids                             = hostIntBuffer({1});
@@ -390,8 +624,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1});
+    addr1.initGroups(cache_config);
+    addr1.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({1}));
     stream1->setKVCache(addr1);
 
     std::list<GenerateStreamPtr> streams;
@@ -895,7 +1129,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config = initFullCacheConfig(std::move(cache_config), model_config.num_layers);
     RuntimeConfig                  runtime_config;
     std::shared_ptr<GenerateInput> query1   = make_shared<GenerateInput>();
     query1->input_ids                       = hostIntBuffer({1});
@@ -905,8 +1139,8 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1});
+    addr1.initGroups(cache_config);
+    addr1.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({1}));
     stream1->setKVCache(addr1);
 
     std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
@@ -917,8 +1151,8 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
-    addr3.initGroups(cache_config.topologyPtr());
-    addr3.setBatchBlocks(0, 0, {9});
+    addr3.initGroups(cache_config);
+    addr3.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({9}));
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4   = make_shared<GenerateInput>();
@@ -929,8 +1163,8 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
-    addr4.initGroups(cache_config.topologyPtr());
-    addr4.setBatchBlocks(0, 0, {11, 12});
+    addr4.initGroups(cache_config);
+    addr4.mutableBlockBinding(0, "default").assign(poolBlockSnapshotForTest({11, 12}));
     stream4->setKVCache(addr4);
 
     std::list<GenerateStreamPtr> streams;
@@ -988,7 +1222,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config = initFullCacheConfig(std::move(cache_config), model_config.num_layers);
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
@@ -1064,7 +1298,7 @@ TEST_F(NormalBatchStreamProcessorTest, testPartiallyReusedMultimodalFeatureIsNor
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config = initFullCacheConfig(std::move(cache_config), model_config.num_layers);
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
@@ -1133,7 +1367,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejec
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    cache_config = initFullCacheConfig(std::move(cache_config), model_config.num_layers);
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);

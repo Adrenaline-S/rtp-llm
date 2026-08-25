@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
@@ -33,11 +34,6 @@ struct CacheReusePolicyDesc {
 struct CacheCapacityPolicyDesc {
     std::optional<bool>     reservable;
     std::optional<uint32_t> explicit_block_num;
-    std::optional<bool>     charge_to_paged_budget;
-};
-
-struct CacheMemoryPolicyDesc {
-    std::optional<CacheMemoryPlacement> placement;
 };
 
 struct CacheTailPolicyDesc {
@@ -65,6 +61,10 @@ struct KVCacheSpecDesc {
     OpaqueBlockEntryCountMode entry_count_mode                     = OpaqueBlockEntryCountMode::EXPLICIT;
     uint32_t                  explicit_entry_count                 = 0;
     uint32_t                  compression_ratio                    = 1;
+    // KERNEL_BLOCK_COMPRESSED descriptors may require a model-specific
+    // kernel-page granularity. The default keeps the generic compressed
+    // contract usable by indexer kernels whose native page is 64 tokens.
+    uint32_t                  kernel_tokens_per_block_alignment    = 1;
     uint32_t                  state_ring_overlap                   = 0;
     bool                      state_ring_include_gen_num_per_cycle = false;
 
@@ -75,7 +75,6 @@ struct KVCacheSpecDesc {
     std::optional<CacheGroupType>          group_type;
     std::optional<CacheReusePolicyDesc>    reuse;
     std::optional<CacheCapacityPolicyDesc> capacity;
-    std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
 };
@@ -90,11 +89,24 @@ struct SpecBuildContext {
     uint32_t                     gen_num_per_cycle       = 0;
 };
 
+struct BuiltLayerSpec {
+    // Minimal descriptor-lowering result: tag remains business identity while
+    // the built physical spec and policy are consumed by the common grouper.
+    std::string      tag;
+    KVCacheSpecPtr   spec;
+    CacheGroupPolicy policy;
+};
+
+using LayerBuiltSpecs = std::vector<std::vector<BuiltLayerSpec>>;
+
 class SpecBuilder {
 public:
-    static KVCacheSpecPtr   build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
+    static BuiltLayerSpec   build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
     static CacheGroupType   groupType(const KVCacheSpecDesc& desc);
     static CacheGroupPolicy groupPolicy(const KVCacheSpecDesc& desc);
+
+private:
+    static KVCacheSpecPtr buildSpec(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
 };
 
 }  // namespace rtp_llm

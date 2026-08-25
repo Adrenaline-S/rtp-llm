@@ -131,9 +131,9 @@ class LayerKVCache:
         kv_cache_base: torch.Tensor,
         seq_size_per_block: int,
         layer_id: int = -1,
-        group_id: int = -1,
         tag: str = "default",
         kv_scale_base: torch.Tensor | None = None,
+        execution_ordinal: int = 0,
     ) -> None: ...
     @property
     def kv_cache_base(self) -> torch.Tensor:
@@ -158,16 +158,13 @@ class LayerKVCache:
         """
 
     @property
-    def group_id(self) -> int:
-        """
-        Cache group id (-1 = default)
-        """
-
-    @property
     def tag(self) -> str:
         """
         Cache group tag
         """
+
+    @property
+    def execution_ordinal(self) -> int: ...
 
     @property
     def seq_size_per_block(self) -> int:
@@ -219,6 +216,7 @@ class CacheStoreWriter:
         self,
         cache_store_inputs: PyCacheStoreInputs,
         kv_cache: LayerKVCache,
+        host_pool_block_table: torch.Tensor,
     ) -> None: ...
 
 class PyAttentionInputs:
@@ -233,6 +231,7 @@ class PyAttentionInputs:
     cu_kv_seqlens_device: torch.Tensor
     cu_seqlens_device: torch.Tensor
     cu_seqlens: torch.Tensor
+    cuda_graph_shared_workspace: torch.Tensor
     decode_cu_seqlens_device: torch.Tensor
     decode_cu_seqlens: torch.Tensor
     dtype: TypeMeta
@@ -252,6 +251,8 @@ class PyAttentionInputs:
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_block_id: torch.Tensor
     kv_cache_block_id_device: torch.Tensor
+    pool_valid_lengths: torch.Tensor
+    kernel_valid_lengths: torch.Tensor
     @property
     def input_lengths_device(self) -> torch.Tensor: ...
     @property
@@ -316,17 +317,24 @@ class PyModelInputs:
         combo_position_ids: torch.Tensor = ...,
         embedding_inputs: PyEmbeddingInputs = ...,
         multimodal_inputs: PyMultimodalInputs = ...,
-        attention_inputs: PyAttentionInputs | dict[str, PyAttentionInputs] = ...,
+        attention_inputs: PyAttentionInputs = ...,
+        cache_group_attn_inputs: dict[str, PyAttentionInputs] = ...,
         bert_embedding_inputs: BertEmbeddingInputs = ...,
     ) -> None: ...
     @property
-    def attention_inputs(self) -> PyAttentionInputs | dict[str, PyAttentionInputs]:
+    def attention_inputs(self) -> PyAttentionInputs:
         """
         Attention inputs structure
         """
 
     @attention_inputs.setter
-    def attention_inputs(self, arg0: PyAttentionInputs | dict[str, PyAttentionInputs]) -> None: ...
+    def attention_inputs(self, arg0: PyAttentionInputs) -> None: ...
+    @property
+    def cache_group_attn_inputs(self) -> dict[str, PyAttentionInputs]: ...
+    @cache_group_attn_inputs.setter
+    def cache_group_attn_inputs(
+        self, arg0: dict[str, PyAttentionInputs]
+    ) -> None: ...
     @property
     def bert_embedding_inputs(self) -> BertEmbeddingInputs:
         """

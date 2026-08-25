@@ -392,7 +392,11 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             run_seq_lens,
             config.seq_size_per_block,
         )
-        attn_op.prepare_for_cuda_graph_replay(run_inputs)
+        attn_op.prepare_for_cuda_graph_replay(
+            run_inputs,
+            run_inputs.kv_cache_kernel_block_id,
+            run_inputs.kv_cache_kernel_block_id_device,
+        )
 
         self.assertEqual(len(plan_calls), 1)
         plan_args, plan_kwargs = plan_calls[0]
@@ -478,7 +482,11 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             run_seq_lens,
             config.seq_size_per_block,
         )
-        attn_op.prepare_for_cuda_graph_replay(run_inputs)
+        attn_op.prepare_for_cuda_graph_replay(
+            run_inputs,
+            run_inputs.kv_cache_kernel_block_id,
+            run_inputs.kv_cache_kernel_block_id_device,
+        )
 
         self.assertEqual(len(plan_calls), 0)
 
@@ -507,7 +515,11 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             run_seq_lens,
             config.seq_size_per_block,
         )
-        attn_op.prepare_for_cuda_graph_replay(run_inputs)
+        attn_op.prepare_for_cuda_graph_replay(
+            run_inputs,
+            run_inputs.kv_cache_kernel_block_id,
+            run_inputs.kv_cache_kernel_block_id_device,
+        )
 
         # Verify page_indptr matches run_seq_lens
         page_indptr = fmha_params.decode_page_indptr_h.tolist()

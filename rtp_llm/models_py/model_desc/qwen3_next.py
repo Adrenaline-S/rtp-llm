@@ -11,7 +11,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, al
 from rtp_llm.models_py.model_desc.block_map import (
     get_group_tags_for_layers,
     get_primary_attention_inputs,
-    select_attention_inputs_for_layer,
+    select_cache_group_attn_inputs_for_layer,
     select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
@@ -94,25 +94,28 @@ class Qwen3NextMetadata(object):
 
 
 def _write_cp_cache_store(
-    attention_inputs: PyAttentionInputs, kv_cache: LayerKVCache
+    attention_inputs: PyAttentionInputs,
+    kv_cache: LayerKVCache,
+    pool_block_table: torch.Tensor,
 ) -> None:
     """Write a CP linear layer using that layer's tag-local cache metadata."""
     cache_store_inputs = attention_inputs.cache_store_inputs
     cache_store_writer = attention_inputs.cache_store_writer
     if cache_store_inputs is None or cache_store_writer is None:
         return
-    cache_store_writer.write(cache_store_inputs, kv_cache)
+    cache_store_writer.write(cache_store_inputs, kv_cache, pool_block_table)
 
 
 def _maybe_write_cp_cache_store(
     attention_inputs: PyAttentionInputs,
     kv_cache: Optional[LayerKVCache],
     attn_meta: Qwen3NextMetadata,
+    pool_block_table: torch.Tensor,
 ) -> None:
     """Keep CacheStore writes on the CP linear-attention path only."""
     if kv_cache is None or not attn_meta.is_cp_linear_attn:
         return
-    _write_cp_cache_store(attention_inputs, kv_cache)
+    _write_cp_cache_store(attention_inputs, kv_cache, pool_block_table)
 
 
 class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
@@ -177,6 +180,7 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
@@ -206,6 +210,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         metadata: Optional[CausalConv1dMetadata] = None,
     ) -> torch.Tensor:
         # cu_seqlen_without_padding = attn_inputs.cu_seqlens_device[
@@ -223,7 +228,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             bias=None,
             conv_states=conv_states,
             query_start_loc=cu_seqlen_without_padding,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=block_table,
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
@@ -238,6 +243,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
     ) -> torch.Tensor:
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
@@ -261,7 +267,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
             load_initial_state_from_block_map(
                 attn_inputs.prefix_lengths_device,
-                attn_inputs.kv_cache_kernel_block_id_device,
+                block_table,
                 ssm_states,
                 initial_states,
                 seq_size_per_block,
@@ -313,11 +319,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                     if ssm_states is not None
                     else None
                 ),
-                block_map=(
-                    attn_inputs.kv_cache_kernel_block_id_device
-                    if ssm_states is not None
-                    else None
-                ),
+                block_map=(block_table if ssm_states is not None else None),
                 ssm_states=ssm_states,
                 seq_size_per_block=(
                     seq_size_per_block if ssm_states is not None else None
@@ -345,7 +347,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 final_state,
                 attn_inputs.prefix_lengths_device,
                 cu_seqlens_without_padding,
-                attn_inputs.kv_cache_kernel_block_id_device,
+                block_table,
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
@@ -358,6 +360,8 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
+        pool_block_table: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
@@ -373,10 +377,17 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             kv_cache_tensor,
             seq_size_per_block,
             attn_inputs,
+            block_table,
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
         attn_out = self._fla(
-            mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
+            mixed_qkv,
+            b,
+            a,
+            kv_cache_tensor,
+            seq_size_per_block,
+            attn_inputs,
+            block_table,
         )
         cache_store_inputs = attn_inputs.cache_store_inputs
         cache_store_writer = attn_inputs.cache_store_writer
@@ -385,13 +396,15 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             and cache_store_inputs is not None
             and cache_store_writer is not None
         ):
-            cache_store_writer.write(cache_store_inputs, kv_cache)
+            cache_store_writer.write(cache_store_inputs, kv_cache, pool_block_table)
         return attn_out
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
-    def _get_fla_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
-        block_map = attn_inputs.kv_cache_kernel_block_id_device
+    def _get_fla_block_map(
+        self, attn_inputs: PyAttentionInputs, block_table: torch.Tensor
+    ) -> torch.Tensor:
+        block_map = block_table
         if (
             attn_inputs.is_cuda_graph
             and block_map is not None
@@ -411,6 +424,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: torch.Tensor,
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         is_target_verify: bool,
     ) -> torch.Tensor:
         conv_states = self._get_conv_states(kv_cache_tensor)
@@ -427,7 +441,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             bias=None,
             activation="silu",
             cache_seqlens=None,
-            block_map=attn_inputs.kv_cache_kernel_block_id_device,
+            block_map=block_table,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
         )
@@ -442,6 +456,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: torch.Tensor,
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         is_target_verify: bool,
     ) -> torch.Tensor:
         batch, seq = self._get_bs_from_attenion_input(
@@ -479,7 +494,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             scale=None,
             initial_state=ssm_states,
             inplace_final_state=True,
-            block_map=self._get_fla_block_map(attn_inputs),
+            block_map=self._get_fla_block_map(attn_inputs, block_table),
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
             use_qk_l2norm_in_kernel=True,
@@ -495,6 +510,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         b: torch.Tensor,
         a: torch.Tensor,
         attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
@@ -511,6 +527,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache_tensor,
             kv_cache.seq_size_per_block,
             attn_inputs,
+            block_table,
             is_target_verify,
         )
         attn_out = self._fla(
@@ -520,6 +537,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache_tensor,
             kv_cache.seq_size_per_block,
             attn_inputs,
+            block_table,
             is_target_verify,
         )
 
@@ -581,8 +599,10 @@ class Qwen3NextAttention(CausalAttention):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
+        group_view: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
+        del group_view, attention_inputs, attn_meta
         gate = self.gate(hidden_states)
         attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
         return attn_out
@@ -734,6 +754,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         b: torch.Tensor,
         a: torch.Tensor,
         attention_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
+        pool_block_table: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
@@ -778,7 +800,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             bias=None,
             conv_states=conv_states,
             query_start_loc=full_cu,
-            block_map=attention_inputs.kv_cache_kernel_block_id_device,
+            block_map=block_table,
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attention_inputs.prefix_lengths_device,
             metadata=full_conv_meta,
@@ -803,7 +825,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
             load_initial_state_from_block_map(
                 attention_inputs.prefix_lengths_device,
-                attention_inputs.kv_cache_kernel_block_id_device,
+                block_table,
                 ssm_states,
                 initial_states,
                 seq_size_per_block,
@@ -848,11 +870,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                     if ssm_states is not None
                     else None
                 ),
-                block_map=(
-                    attention_inputs.kv_cache_kernel_block_id_device
-                    if ssm_states is not None
-                    else None
-                ),
+                block_map=(block_table if ssm_states is not None else None),
                 ssm_states=ssm_states,
                 seq_size_per_block=(
                     seq_size_per_block if ssm_states is not None else None
@@ -881,13 +899,15 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 final_state,
                 attention_inputs.prefix_lengths_device,
                 full_cu,
-                attention_inputs.kv_cache_kernel_block_id_device,
+                block_table,
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
             )
 
-        _maybe_write_cp_cache_store(attention_inputs, kv_cache, attn_meta)
+        _maybe_write_cp_cache_store(
+            attention_inputs, kv_cache, attn_meta, pool_block_table
+        )
 
         full_attn_out = attn_out.squeeze_(0)
 
@@ -917,6 +937,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
+        group_view: PyAttentionInputs,
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
@@ -933,14 +954,35 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         if attention_inputs.is_prefill and not attn_meta.is_target_verify:
             if attn_meta.is_cp_linear_attn:
                 return self._forward_cp_prefill(
-                    mixed_qkv, z, b, a, attention_inputs, kv_cache, attn_meta
+                    mixed_qkv,
+                    z,
+                    b,
+                    a,
+                    attention_inputs,
+                    group_view.kv_cache_kernel_block_id_device,
+                    group_view.kv_cache_block_id,
+                    kv_cache,
+                    attn_meta,
                 )
             attn_output = self.prefill_gdn(
-                mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                group_view.kv_cache_kernel_block_id_device,
+                group_view.kv_cache_block_id,
+                kv_cache,
+                attn_meta,
             )
         else:
             attn_output = self.decode_gdn(
-                mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                group_view.kv_cache_kernel_block_id_device,
+                kv_cache,
+                attn_meta,
             )
         attn_output = self.norm(
             attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
@@ -1025,15 +1067,19 @@ class Qwen3NextDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
+        group_view: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        if self.layer_type == HybridAttentionType.LINEAR:
+            assert group_view is not None, "group_view is required"
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
             attention_inputs=attention_inputs,
+            group_view=group_view,
             attn_meta=attn_meta,
         )
 
@@ -1212,7 +1258,7 @@ class Qwen3NextModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
 
         for i, decoder_layer in enumerate(self.layers):
-            layer_attention_inputs = select_attention_inputs_for_layer(
+            layer_group_attn_inputs = select_cache_group_attn_inputs_for_layer(
                 inputs, self.kv_cache, i
             )
             layer_fmha_impl = (
@@ -1225,7 +1271,8 @@ class Qwen3NextModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=layer_attention_inputs,
+                attention_inputs=attention_inputs,
+                group_view=layer_group_attn_inputs,
                 attn_meta=attn_meta,
             )
 

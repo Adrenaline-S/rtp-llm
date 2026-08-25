@@ -4,6 +4,12 @@ load("@//bazel:arch_select.bzl", "transfer_backend_deps")
 
 transfer_backend_deps()
 
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob(["*.h", "*.cc"]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
+)
+
 cc_library(
     name = "arpc_dep",
     srcs = [
@@ -93,4 +99,3 @@ cc_library(
     ],
     visibility = ['//visibility:public'],
 )
-

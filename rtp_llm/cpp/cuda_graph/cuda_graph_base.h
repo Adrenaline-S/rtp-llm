@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace rtp_llm {
@@ -15,6 +16,21 @@ struct CudaGraphState {
     int current_real_graph_bs{1};       // for decode
     int current_real_graph_seq_len{1};  // for prefill
     int seq_len_sum{0};
+};
+
+struct GraphCacheBlockTableGroup {
+    std::string tag;
+    size_t      pool_row_width   = 0;
+    size_t      kernel_row_width = 0;
+};
+
+struct BlockTableRefreshRegion {
+    const void* source                   = nullptr;
+    void*       destination              = nullptr;
+    size_t      row_count                = 0;
+    size_t      row_bytes                = 0;
+    size_t      source_stride_bytes      = 0;
+    size_t      destination_stride_bytes = 0;
 };
 
 struct GraphParams {
@@ -33,10 +49,9 @@ struct GraphParams {
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int64_t          hc_mult = 1;
-    // Golden cache-group identity for CUDA graph capture/replay. A one-group
-    // topology keeps the direct AttentionInputs fast path; multiple groups
-    // require an exact tag -> AttentionInputs mapping at replay time.
-    std::vector<std::string> kv_cache_group_tags;
+    // Immutable execution-ordinal geometry. Capture derives all four packed
+    // backing offsets exactly once from this ordered specification.
+    std::vector<GraphCacheBlockTableGroup> kv_cache_block_table_groups;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
@@ -63,7 +78,7 @@ public:
 
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.
-    virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
+    virtual void updateKVCacheKernelBlockTableValues(const PyModelInputs& inputs, CudaGraphState& state) {}
 
     py::object py_instance_;
 };

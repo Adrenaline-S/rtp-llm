@@ -7,12 +7,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    FMHAType,
-    ParallelismConfig,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
@@ -91,7 +86,7 @@ class XQAImpl(FMHAImplBase):
         if is_sm12x():
             return False
         fmha_impl = XQAAttnOp(attn_configs)
-        return fmha_impl.support(attn_inputs)
+        return fmha_impl.support()
 
     def forward(
         self,

@@ -4,6 +4,7 @@ import os
 import pickle
 import sys
 from unittest import TestCase, main
+from unittest.mock import patch
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -496,6 +497,30 @@ class ServerArgsSetTest(TestCase):
         parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
+
+    def test_removed_dsv4_host_pool_option_is_unknown(self):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            init_all_group_args,
+        )
+
+        parser = EnvArgumentParser(description="test")
+        cfg = PyEnvConfigs()
+        parser.set_root_config(cfg)
+        init_all_group_args(parser, cfg)
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--dsv4_fixed_pool_use_memory", "true"])
+
+    def test_removed_dsv4_host_pool_environment_is_unknown(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(
+            os.environ, {"DSV4_FIXED_POOL_USE_MEMORY": "true"}, clear=False
+        ):
+            with self.assertRaises(SystemExit):
+                setup_args([])
 
     def test_repetition_detection_config(self):
         """Test that repetition detection args bind to PyEnvConfigs."""

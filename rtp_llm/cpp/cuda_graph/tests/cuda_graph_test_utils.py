@@ -7,6 +7,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import torch
@@ -165,7 +166,10 @@ class CudaGraphTestModelBuilder:
         # Initialize KV cache if requested
         if init_kv_cache:
             self._init_kv_cache(result, py_model_config)
-            model.kv_cache = result.kv_cache
+            # Standalone graph tests bypass the production C++ initializer.
+            # Invoke the common initialization boundary explicitly so cache
+            # group execution ordinals are cold-bound before the hot path.
+            GptModelBase.initialize(model, SimpleNamespace(kv_cache=result.kv_cache))
 
         return result
 
@@ -179,11 +183,20 @@ class CudaGraphTestModelBuilder:
             model_config.attn_config.kernel_tokens_per_block
         )
 
-        result.block_nums = math.ceil(
-            self.config.max_total_tokens / result.kernel_tokens_per_block
+        if result.tokens_per_block % result.kernel_tokens_per_block != 0:
+            raise ValueError(
+                "tokens_per_block must be divisible by kernel_tokens_per_block: "
+                f"{result.tokens_per_block} vs {result.kernel_tokens_per_block}"
+            )
+        kernel_blocks_per_pool_block = (
+            result.tokens_per_block // result.kernel_tokens_per_block
         )
-        # since block_id start from 1, so we should add 1 in the corner case
-        result.block_nums += 1
+        # Test block IDs start at one, so reserve physical pool block zero and
+        # expand every physical block into the kernel-addressable cache view.
+        pool_block_nums = (
+            math.ceil(self.config.max_total_tokens / result.tokens_per_block) + 1
+        )
+        result.block_nums = pool_block_nums * kernel_blocks_per_pool_block
 
         kv_shape = [
             result.layer_num,

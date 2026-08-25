@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include <algorithm>
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -20,6 +22,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #endif
 
 using namespace std;
@@ -352,75 +355,141 @@ static void calculatePaddingOffsetDeviceAware(torch_ext::PyAttentionInputs& py_a
 #endif
 }
 
-// Helper function to setup KV cache for attention inputs
-torch_ext::AttentionInputsByTag
-PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
-                                               const GptModelInputs&         inputs) {
-    RTP_LLM_PROFILE_SCOPE("py_model.setupKVCacheForAttentionInputs");
-    DevicePerfWrapper wrapper(enable_device_perf_, "py model setupKVCacheForAttentionInputs");
-    if (!inputs.kv_cache_kernel_block_id.defined()) {
-        return {};
-    }
-    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 2 || inputs.kv_cache_kernel_block_id.dim() == 3,
-                            "kv_cache_kernel_block_id must be [batch, blocks] or [group, batch, blocks]");
+PyWrappedModel::CacheGroupBindingResult
+PyWrappedModel::bindCacheGroupsForInputs(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs) {
+    CacheGroupBindingResult result;
+    const auto&             plan = inputs.kv_cache_block_table_plan;
 
-    if (inputs.kv_cache_kernel_block_id.dim() == 2) {
-        py_attn_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id;
-        py_attn_inputs.kv_cache_kernel_block_id_device =
-            tensorHoldHostAndToCuda(py_attn_inputs.kv_cache_kernel_block_id);
-        if (inputs.kv_cache_block_id.defined()) {
-            RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_id.dim() == 2,
-                                    "kv_cache_block_id must be 2-D when kernel block table is 2-D");
-            py_attn_inputs.kv_cache_block_id        = inputs.kv_cache_block_id;
-            py_attn_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(py_attn_inputs.kv_cache_block_id);
-            if (py_attn_inputs.cache_store_inputs.has_value()) {
-                // Async writer reads via raw host pointers; MTP device-state
-                // paths may carry CUDA block tables here.
-                py_attn_inputs.cache_store_inputs->host_kv_cache_offset = py_attn_inputs.kv_cache_block_id.is_cuda() ?
-                                                                              py_attn_inputs.kv_cache_block_id.cpu() :
-                                                                              py_attn_inputs.kv_cache_block_id;
-            }
-        }
-        return {};
+    if (plan.groupCount() == 0) {
+        // No KV cache: keep the Phase 1 semantics of empty 2-D tables so backend
+        // ops take their existing empty-table branch.
+        const auto batch_size = inputs.input_lengths.size(0);
+        const auto host_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
+        const auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        py_attn_inputs.kv_cache_block_id               = torch::empty({batch_size, 0}, host_i32);
+        py_attn_inputs.kv_cache_block_id_device        = torch::empty({batch_size, 0}, device_i32);
+        py_attn_inputs.kv_cache_kernel_block_id        = torch::empty({batch_size, 0}, host_i32);
+        py_attn_inputs.kv_cache_kernel_block_id_device = torch::empty({batch_size, 0}, device_i32);
+        return result;
     }
 
-    const size_t group_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
-    RTP_LLM_CHECK_WITH_INFO(kv_cache_layer_layout_.has_value(),
-                            "tagged attention inputs require the current model cache layout");
-    const auto& group_tags = kv_cache_layer_layout_->topology().groupTagsSnapshot();
-    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == group_count,
-                            "KV block table group count=%zu does not match topology tag count=%zu",
+    // The pinned host tables are the authoritative packed snapshot. Build
+    // model-owned device replicas from them so attention never depends on a
+    // caller-owned device tensor that may still contain the preceding MTP/TP
+    // step's values. tensorHoldHostAndToCuda also keeps the host staging
+    // storage alive until the deferred fused H2D copy has completed.
+    auto pool_device   = tensorHoldHostAndToCuda(inputs.kv_cache_block_id);
+    auto kernel_device = tensorHoldHostAndToCuda(inputs.kv_cache_kernel_block_id);
+    adoptPackedBlockTables(
+        plan, inputs.kv_cache_block_id, pool_device, inputs.kv_cache_kernel_block_id, kernel_device, result.storage);
+
+    // The base carries shared fields only; each per-group copy rebinds the tables.
+    py_attn_inputs.kv_cache_block_id               = torch::Tensor();
+    py_attn_inputs.kv_cache_block_id_device        = torch::Tensor();
+    py_attn_inputs.kv_cache_kernel_block_id        = torch::Tensor();
+    py_attn_inputs.kv_cache_kernel_block_id_device = torch::Tensor();
+
+    result.group_inputs = bindCacheGroupAttentionInputs(py_attn_inputs, plan, result.storage, result.bindings);
+
+    // Own the valid lengths: they change every step, so capture-time addresses must
+    // not depend on the caller's tensor identity.
+    for (size_t idx = 0; idx < result.bindings.size(); ++idx) {
+        auto& group                = result.group_inputs.at(result.bindings[idx].tag);
+        group.pool_valid_lengths   = inputs.kv_cache_pool_valid_lengths.at(idx).clone();
+        group.kernel_valid_lengths = inputs.kv_cache_kernel_valid_lengths.at(idx).clone();
+    }
+    return result;
+}
+
+void PyWrappedModel::bindCacheGroups(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.bindCacheGroups");
+    DevicePerfWrapper wrapper(enable_device_perf_, "py model bindCacheGroups");
+    auto              result = bindCacheGroupsForInputs(py_attn_inputs, inputs);
+    packed_tables_           = std::move(result.storage);
+    group_bindings_          = std::move(result.bindings);
+    cache_group_attn_inputs_ = std::move(result.group_inputs);
+}
+
+void PyWrappedModel::bindCacheStoreOffsets(torch_ext::PyAttentionInputs& py_attn_inputs) {
+    if (cache_group_attn_inputs_.size() != 1 || !py_attn_inputs.cache_store_inputs.has_value()) {
+        return;
+    }
+    py_attn_inputs.cache_store_inputs->host_kv_cache_offset =
+        cache_group_attn_inputs_.begin()->second.kv_cache_block_id;
+}
+
+void PyWrappedModel::validateCacheBlockTableBoundary(const GptModelInputs& inputs) const {
+    const auto group_count = inputs.kv_cache_block_table_plan.groupCount();
+    if (group_count == 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(group_count == kv_cache_boundary_group_tags_.size(),
+                            "kernel KV block-table group count=%zu does not match cache tag count=%zu",
                             group_count,
-                            group_tags.size());
-    RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 3,
-                            "physical kv_cache_block_id must be 3-D for tagged inputs");
-
-    torch_ext::AttentionInputsByTag by_tag;
-    for (size_t group_id = 0; group_id < group_count; ++group_id) {
-        auto group_inputs                            = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[group_id];
-        group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
-        if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
-            group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
-            if (group_inputs.cache_store_inputs.has_value()) {
-                group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
-                                                                            group_inputs.kv_cache_block_id.cpu() :
-                                                                            group_inputs.kv_cache_block_id;
+                            kv_cache_boundary_group_tags_.size());
+    // Match tensorHoldHostAndToCuda's bounded residency sanity window:
+    // is_pinned() and full valid-length scans are measurably expensive and
+    // must not remain on the steady-state model hot path.
+    const bool validate_pinned_and_ranges = pinned_check_remaining_ > 0;
+    const auto validate_backing           = [validate_pinned_and_ranges](const torch::Tensor& tensor,
+                                                               size_t               expected_numel,
+                                                               bool                 device,
+                                                               const char*          name) {
+        RTP_LLM_CHECK_WITH_INFO(
+            tensor.defined() && tensor.dim() == 1, "%s packed backing must be defined and flat", name);
+        RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == torch::kInt32 && tensor.is_contiguous(),
+                                "%s packed backing must be contiguous int32",
+                                name);
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(tensor.numel()) == expected_numel,
+                                "%s packed backing numel=%zu does not match plan numel=%zu",
+                                name,
+                                static_cast<size_t>(tensor.numel()),
+                                expected_numel);
+        if (device) {
+            RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "%s packed backing must be device-resident", name);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(!tensor.is_cuda(), "%s packed backing must be host-resident", name);
+            if (validate_pinned_and_ranges) {
+                RTP_LLM_CHECK_WITH_INFO(tensor.is_pinned(), "%s packed backing must be pinned host memory", name);
             }
         }
-        const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));
-        (void)it;
-        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group_tags[group_id].c_str());
+    };
+    validate_backing(inputs.kv_cache_block_id, inputs.kv_cache_block_table_plan.poolNumel(), false, "pool host");
+    validate_backing(
+        inputs.kv_cache_block_id_device, inputs.kv_cache_block_table_plan.poolNumel(), true, "pool device");
+    validate_backing(
+        inputs.kv_cache_kernel_block_id, inputs.kv_cache_block_table_plan.kernelNumel(), false, "kernel host");
+    validate_backing(
+        inputs.kv_cache_kernel_block_id_device, inputs.kv_cache_block_table_plan.kernelNumel(), true, "kernel device");
+    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_pool_valid_lengths.size() == group_count
+                                && inputs.kv_cache_kernel_valid_lengths.size() == group_count,
+                            "cache valid-length vector count must match group count=%zu",
+                            group_count);
+    const auto validate_lengths = [&](const torch::Tensor& lengths, size_t width, const char* name) {
+        RTP_LLM_CHECK_WITH_INFO(lengths.defined() && lengths.dim() == 1
+                                    && static_cast<size_t>(lengths.numel())
+                                           == inputs.kv_cache_block_table_plan.batchCapacity(),
+                                "%s must have one entry per packed batch row",
+                                name);
+        RTP_LLM_CHECK_WITH_INFO(lengths.scalar_type() == torch::kInt32 && lengths.is_contiguous() && !lengths.is_cuda(),
+                                "%s must be contiguous int32 host memory",
+                                name);
+        if (validate_pinned_and_ranges) {
+            RTP_LLM_CHECK_WITH_INFO(lengths.is_pinned(), "%s must be pinned host memory", name);
+        }
+        if (validate_pinned_and_ranges && lengths.numel() != 0) {
+            RTP_LLM_CHECK_WITH_INFO(lengths.min().item<int32_t>() >= 0
+                                        && static_cast<size_t>(lengths.max().item<int32_t>()) <= width,
+                                    "%s entries must be in [0, %zu]",
+                                    name,
+                                    width);
+        }
+    };
+    for (uint32_t ordinal = 0; ordinal < group_count; ++ordinal) {
+        const auto& group = inputs.kv_cache_block_table_plan.group(ordinal);
+        validate_lengths(inputs.kv_cache_pool_valid_lengths[ordinal], group.pool.row_width, "pool valid lengths");
+        validate_lengths(inputs.kv_cache_kernel_valid_lengths[ordinal], group.kernel.row_width, "kernel valid lengths");
     }
-
-    // A single global group keeps the direct fast path. Multiple groups are
-    // exposed only through the outer tag mapping.
-    py_attn_inputs = by_tag.at(group_tags.front());
-    if (group_count == 1) {
-        return {};
-    }
-    return by_tag;
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
@@ -501,14 +570,17 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 }
 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
+    validateCacheBlockTableBoundary(inputs);
+    return forwardMicroBatchedValidated(inputs);
+}
+
+GptModelOutputs PyWrappedModel::forwardMicroBatchedValidated(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // d2d_copies_ accumulates across ALL micro-batches before the single
-    // fusedCopy() flush below. Per micro-batch this adds ~6 copies from
-    // buildPyAttentionInputs + padding_offset, plus group_count from
-    // setupKVCacheForAttentionInputs. With the planMicroBatches cap of 2
-    // micro-batches and hybrid group_count of 4 the worst case is ~20.
+    // fusedCopy() flush below. Binding each micro-batch adds two copies for
+    // its packed pool/kernel host backings, independent of group count.
     // If new tensorHoldHostAndToCuda call sites land below — or if
     // planMicroBatches starts producing >2 micro-batches — re-check
     // MAX_FUSED_D2D_COPIES.
@@ -532,7 +604,10 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     input_list.reserve(split_inputs.size());
 
     for (size_t i = 0; i < split_inputs.size(); ++i) {
-        const bool  is_real_micro_input   = split_inputs[i].kv_cache_kernel_block_id.defined();
+        // The four cache-table fields are deliberately always defined. The
+        // padding lane created below is distinguished by its empty plan, which
+        // preserves the old "no cache table means fake lane" contract.
+        const bool  is_real_micro_input   = split_inputs[i].kv_cache_block_table_plan.groupCount() != 0;
         const auto& micro_inputs          = is_real_micro_input ? split_inputs[i] : split_inputs[0];
         auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
         auto        embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
@@ -549,7 +624,15 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                                torch::empty({0});
         calculatePaddingOffsetDeviceAware(py_attn_inputs);
         py_attn_inputs.padding_offset = tensorHoldHostAndToCuda(py_attn_inputs.padding_offset);
-        auto attention_inputs_by_tag  = setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs);
+
+        auto binding_result          = bindCacheGroupsForInputs(py_attn_inputs, micro_inputs);
+        auto cache_group_attn_inputs = std::move(binding_result.group_inputs);
+        // The micro-batched path intentionally keeps its historical tail handling;
+        // only the common binding operation is shared with bindCacheGroups.
+        if (cache_group_attn_inputs.size() == 1 && py_attn_inputs.cache_store_inputs.has_value()) {
+            py_attn_inputs.cache_store_inputs->host_kv_cache_offset =
+                cache_group_attn_inputs.begin()->second.kv_cache_block_id;
+        }
 
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
@@ -560,7 +643,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               embedding_inputs,
                                               multimodal_inputs,
                                               py_attn_inputs,
-                                              attention_inputs_by_tag,
+                                              cache_group_attn_inputs,
                                               bert_embedding_inputs});
     }
 
@@ -660,6 +743,11 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
+    validateCacheBlockTableBoundary(inputs);
+    prepareAttentionInputsValidated(inputs, skip_forward_event_sync);
+}
+
+void PyWrappedModel::prepareAttentionInputsValidated(const GptModelInputs& inputs, bool skip_forward_event_sync) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
@@ -685,9 +773,33 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     }
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(setup_kv_cache)");
-        attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs, inputs);
+        bindCacheGroups(attention_inputs, inputs);
+        bindCacheStoreOffsets(attention_inputs);
     }
-    attention_inputs_ = std::move(attention_inputs);
+    size_t tail_region_capacity = 0;
+    for (const auto& entry : cache_group_attn_inputs_) {
+        tail_region_capacity += static_cast<size_t>(entry.second.kv_cache_kernel_block_id.size(0));
+    }
+    kernel_tail_fill_region_capacity_ = tail_region_capacity;
+#if USING_CUDA
+    if (tail_region_capacity > 0) {
+        const auto region_bytes = static_cast<int64_t>(tail_region_capacity * sizeof(CudaGraphPrepareFillRegion));
+        kernel_tail_fill_regions_host_ =
+            torch::empty({region_bytes}, torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
+        kernel_tail_fill_regions_device_ =
+            torch::empty({region_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    } else {
+        kernel_tail_fill_regions_host_   = torch::Tensor();
+        kernel_tail_fill_regions_device_ = torch::Tensor();
+    }
+#endif
+    last_kernel_tail_fill_launch_count_ = normalizeKernelTailFill(cache_group_attn_inputs_,
+                                                                  group_bindings_,
+                                                                  kernel_tail_fill_regions_host_,
+                                                                  kernel_tail_fill_regions_device_,
+                                                                  kernel_tail_fill_region_capacity_);
+    cache_block_table_signature_        = CacheBlockTablePackingSignature::fromPlan(inputs.kv_cache_block_table_plan);
+    attention_inputs_                   = std::move(attention_inputs);
     prepared_attention_inputs_.store(true, std::memory_order_release);
 
     // CRITICAL ORDERING: flush queued H2D copies BEFORE graph_runner_->prepareAttentionInputs.
@@ -711,7 +823,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                           torch_ext::PyEmbeddingInputs(),
                                           torch_ext::PyMultimodalInputs(),
                                           attention_inputs_,
-                                          attention_inputs_by_tag_,
+                                          cache_group_attn_inputs_,
                                           torch_ext::BertEmbeddingInputs()});
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
@@ -719,15 +831,31 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     }
 }
 
-void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
-    RTP_LLM_PROFILE_SCOPE("py_model.updateKVCacheKernelBlockId");
+void PyWrappedModel::updateKVCacheKernelBlockTableValues(const GptModelInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.updateKVCacheKernelBlockTableValues");
     if (!inputs.kv_cache_kernel_block_id.defined() || !prepared_attention_inputs_.load(std::memory_order_acquire)) {
         return;
     }
+    validateCacheBlockTableBoundary(inputs);
+    RTP_LLM_CHECK_WITH_INFO(cache_block_table_signature_.has_value()
+                                && cache_block_table_signature_->matches(inputs.kv_cache_block_table_plan),
+                            "KV cache block-table structure changed during value-only update; full prepare required");
 
-    d2d_copies_.clear();
-    attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs_, inputs);
-    fusedCopy(d2d_copies_);
+    refreshPackedBlockTableValues(inputs.kv_cache_block_id,
+                                  inputs.kv_cache_block_id_device,
+                                  inputs.kv_cache_pool_valid_lengths,
+                                  inputs.kv_cache_kernel_block_id,
+                                  inputs.kv_cache_kernel_block_id_device,
+                                  inputs.kv_cache_kernel_valid_lengths,
+                                  packed_tables_,
+                                  group_bindings_,
+                                  cache_group_attn_inputs_);
+
+    last_kernel_tail_fill_launch_count_ = normalizeKernelTailFill(cache_group_attn_inputs_,
+                                                                  group_bindings_,
+                                                                  kernel_tail_fill_regions_host_,
+                                                                  kernel_tail_fill_regions_device_,
+                                                                  kernel_tail_fill_region_capacity_);
 
     if (enable_cuda_graph_) {
         auto empty           = torch::Tensor();
@@ -737,10 +865,10 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
                                               torch_ext::PyEmbeddingInputs(),
                                               torch_ext::PyMultimodalInputs(),
                                               attention_inputs_,
-                                              attention_inputs_by_tag_,
+                                              cache_group_attn_inputs_,
                                               torch_ext::BertEmbeddingInputs()});
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
-            graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
+            graph_runner_->updateKVCacheKernelBlockTableValues(py_model_inputs, graph_state_);
         }
     }
 }
@@ -748,6 +876,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
+    validateCacheBlockTableBoundary(inputs);
     holdInputsHostBuffers(inputs);
 
     // RAII guard: ensure prepared_attention_inputs_ is always reset to false on scope exit,
@@ -764,7 +893,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         if (int(device_props_.enable_layer_micro_batch)) {
-            return forwardMicroBatched(inputs);
+            return forwardMicroBatchedValidated(inputs);
         }
         PyContextParallelParams cp_params;
         const bool              has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
@@ -799,13 +928,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
-            prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
+            prepareAttentionInputsValidated(inputs, /*skip_forward_event_sync=*/true);
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             attention_inputs_.context_parallel_info = cp_params;
-            for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
-                tagged_inputs.context_parallel_info = cp_params;
-            }
         }
 
         if (device_props_.enable_prefill_cp && has_context_request
@@ -823,7 +949,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         embedding_inputs,
                                                         multimodal_inputs,
                                                         attention_inputs_,
-                                                        attention_inputs_by_tag_,
+                                                        cache_group_attn_inputs_,
                                                         bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
@@ -897,19 +1023,75 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
 // --- Methods absorbed from GptModel ---
 
-static torch::Tensor
-sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_offset, size_t batch_size) {
-    if (!kv_cache_block_id.defined()) {
-        return torch::Tensor();
+static void slicePackedCacheTablesByBatch(const GptModelInputs& inputs,
+                                          size_t                batch_offset,
+                                          size_t                batch_size,
+                                          GptModelInputs&       output) {
+    const auto& source_plan = inputs.kv_cache_block_table_plan;
+    RTP_LLM_CHECK_WITH_INFO(batch_offset <= source_plan.batchCapacity()
+                                && batch_size <= source_plan.batchCapacity() - batch_offset,
+                            "micro-batch block-table slice [%zu, %zu) exceeds batch capacity %zu",
+                            batch_offset,
+                            batch_offset + batch_size,
+                            source_plan.batchCapacity());
+
+    std::vector<torch::Tensor>              pool_host_parts;
+    std::vector<torch::Tensor>              pool_device_parts;
+    std::vector<torch::Tensor>              kernel_host_parts;
+    std::vector<torch::Tensor>              kernel_device_parts;
+    std::vector<CacheGroupBlockTableRegion> sliced_regions;
+    std::vector<torch::Tensor>              pool_valid_lengths;
+    std::vector<torch::Tensor>              kernel_valid_lengths;
+    pool_host_parts.reserve(source_plan.groupCount());
+    pool_device_parts.reserve(source_plan.groupCount());
+    kernel_host_parts.reserve(source_plan.groupCount());
+    kernel_device_parts.reserve(source_plan.groupCount());
+    sliced_regions.reserve(source_plan.groupCount());
+    pool_valid_lengths.reserve(source_plan.groupCount());
+    kernel_valid_lengths.reserve(source_plan.groupCount());
+
+    size_t pool_offset   = 0;
+    size_t kernel_offset = 0;
+    for (uint32_t ordinal = 0; ordinal < source_plan.groupCount(); ++ordinal) {
+        const auto& source_region = source_plan.group(ordinal);
+        auto        slice         = [batch_offset, batch_size](const torch::Tensor& table) {
+            return table.narrow(0, static_cast<int64_t>(batch_offset), static_cast<int64_t>(batch_size))
+                .contiguous()
+                .view({-1});
+        };
+        pool_host_parts.push_back(slice(source_plan.poolView(inputs.kv_cache_block_id, ordinal)));
+        pool_device_parts.push_back(slice(source_plan.poolView(inputs.kv_cache_block_id_device, ordinal)));
+        kernel_host_parts.push_back(slice(source_plan.kernelView(inputs.kv_cache_kernel_block_id, ordinal)));
+        kernel_device_parts.push_back(slice(source_plan.kernelView(inputs.kv_cache_kernel_block_id_device, ordinal)));
+
+        CacheGroupBlockTableRegion sliced_region;
+        sliced_region.tag               = source_region.tag;
+        sliced_region.execution_ordinal = ordinal;
+        sliced_region.pool              = {pool_offset, source_region.pool.row_width, batch_size};
+        sliced_region.kernel            = {kernel_offset, source_region.kernel.row_width, batch_size};
+        pool_offset += sliced_region.pool.numel();
+        kernel_offset += sliced_region.kernel.numel();
+        sliced_regions.push_back(std::move(sliced_region));
+        pool_valid_lengths.push_back(inputs.kv_cache_pool_valid_lengths.at(ordinal).narrow(
+            0, static_cast<int64_t>(batch_offset), static_cast<int64_t>(batch_size)));
+        kernel_valid_lengths.push_back(inputs.kv_cache_kernel_valid_lengths.at(ordinal).narrow(
+            0, static_cast<int64_t>(batch_offset), static_cast<int64_t>(batch_size)));
     }
-    if (kv_cache_block_id.dim() == 2) {
-        return kv_cache_block_id.narrow(0, batch_offset, batch_size);
-    }
-    if (kv_cache_block_id.dim() == 3) {
-        // [group, batch, max_blocks] → narrow on dim 1
-        return kv_cache_block_id.narrow(1, batch_offset, batch_size).contiguous();
-    }
-    return kv_cache_block_id;
+
+    auto concatenate = [](const std::vector<torch::Tensor>& parts, const torch::Tensor& source) {
+        auto result = parts.empty() ? torch::empty({0}, source.options()) : torch::cat(parts);
+        if (result.device().is_cpu() && !result.is_pinned()) {
+            result = result.pin_memory();
+        }
+        return result;
+    };
+    output.kv_cache_block_id               = concatenate(pool_host_parts, inputs.kv_cache_block_id);
+    output.kv_cache_block_id_device        = concatenate(pool_device_parts, inputs.kv_cache_block_id_device);
+    output.kv_cache_kernel_block_id        = concatenate(kernel_host_parts, inputs.kv_cache_kernel_block_id);
+    output.kv_cache_kernel_block_id_device = concatenate(kernel_device_parts, inputs.kv_cache_kernel_block_id_device);
+    output.kv_cache_pool_valid_lengths     = std::move(pool_valid_lengths);
+    output.kv_cache_kernel_valid_lengths   = std::move(kernel_valid_lengths);
+    output.kv_cache_block_table_plan       = CacheBlockTablePackingPlan::fromRegions(std::move(sliced_regions));
 }
 
 torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
@@ -1206,22 +1388,25 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
-    const auto* input_lengths_ptr =
-        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");
         micro_batch_inputs.push_back(inputs);
 
         GptModelInputs fake_inputs;
-        fake_inputs.kv_cache_block_id = torch::Tensor();
-        fake_inputs.combo_tokens      = inputs.combo_tokens.narrow(0, 0, 1);
-        fake_inputs.input_lengths     = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        fake_inputs.sequence_lengths  = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        fake_inputs.prefix_lengths    = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.kv_cache_block_id        = torch::empty({0}, inputs.kv_cache_block_id.options());
+        fake_inputs.kv_cache_block_id_device = torch::empty({0}, inputs.kv_cache_block_id_device.options());
+        fake_inputs.kv_cache_kernel_block_id = torch::empty({0}, inputs.kv_cache_kernel_block_id.options());
+        fake_inputs.kv_cache_kernel_block_id_device =
+            torch::empty({0}, inputs.kv_cache_kernel_block_id_device.options());
+        fake_inputs.combo_tokens     = inputs.combo_tokens.narrow(0, 0, 1);
+        fake_inputs.input_lengths    = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.sequence_lengths = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.prefix_lengths   = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
@@ -1241,10 +1426,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.sequence_lengths =
                     inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
-                micro_model_inputs.kv_cache_block_id =
-                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, total_batch_size);
-                micro_model_inputs.kv_cache_kernel_block_id =
-                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, total_batch_size);
+                slicePackedCacheTablesByBatch(inputs, sliced_batch_idx, total_batch_size, micro_model_inputs);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
                 micro_model_inputs.attention_mask =
@@ -1297,10 +1479,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.attention_mask.defined() ?
                         inputs.attention_mask.narrow(0, sliced_batch_idx, d_micro_batch_size) :
                         torch::Tensor();
-                micro_model_inputs.kv_cache_block_id =
-                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, d_micro_batch_size);
-                micro_model_inputs.kv_cache_kernel_block_id =
-                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, d_micro_batch_size);
+                slicePackedCacheTablesByBatch(inputs, sliced_batch_idx, d_micro_batch_size, micro_model_inputs);
                 micro_model_inputs.prefix_lengths =
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
                 micro_model_inputs.lm_output_indexes =
@@ -1322,10 +1501,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 GptModelInputs micro_model_inputs = inputs;
                 RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size);
-                micro_model_inputs.kv_cache_block_id =
-                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, p_micro_batch_size);
-                micro_model_inputs.kv_cache_kernel_block_id =
-                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, p_micro_batch_size);
+                slicePackedCacheTablesByBatch(inputs, sliced_batch_idx, p_micro_batch_size, micro_model_inputs);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
                 micro_model_inputs.attention_mask =

@@ -18,10 +18,23 @@ cc_library(
 cc_library(
     name = "cache_group_type",
     hdrs = [
+        "CacheGroupTagOrder.h",
         "CacheGroupType.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
+    name = "block_expression",
+    srcs = ["BlockExpression.cc"],
+    hdrs = ["BlockExpression.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
 )
 
 cc_library(
@@ -50,6 +63,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_expression",
         ":block_info",
         ":cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
@@ -75,15 +89,14 @@ cc_library(
     name = "cache_config",
     srcs = [
         "CacheConfig.cc",
-        "CacheTopology.cc",
     ],
     hdrs = [
         "CacheConfig.h",
-        "CacheTopology.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_expression",
         ":cache_group_type",
         ":kv_cache_specs",
         "//rtp_llm/cpp/config:config_modules",
@@ -152,6 +165,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":batch_kv_cache_resource",
+        ":block_expression",
         ":cache_types",
         ":cp_slot_mapper",
         ":recent_cache_key_window",
@@ -163,13 +177,11 @@ cc_library(
 cc_library(
     name = "block_pool",
     srcs = [
-        "BlockCache.cc",
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
         "SharedBlockCache.cc",
     ],
     hdrs = [
-        "BlockCache.h",
         "BlockPool.h",
         "BlockPoolConfig.h",
         "BlockPoolConfigHelper.h",
@@ -209,22 +221,24 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_group_type",
+        ":cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 
 cc_library(
-    name = "kv_cache_group",
+    name = "single_type_cache_manager",
     srcs = [
-        "FullKVCacheGroup.cc",
-        "KVCacheGroup.cc",
-        "LinearKVCacheGroup.cc",
-        "SWAKVCacheGroup.cc",
+        "FullCacheManager.cc",
+        "SingleTypeCacheManager.cc",
+        "LinearCacheManager.cc",
+        "SWACacheManager.cc",
     ],
     hdrs = [
-        "FullKVCacheGroup.h",
-        "KVCacheGroup.h",
-        "LinearKVCacheGroup.h",
-        "SWAKVCacheGroup.h",
+        "FullCacheManager.h",
+        "SingleTypeCacheManager.h",
+        "LinearCacheManager.h",
+        "SWACacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -235,9 +249,9 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_allocator_hdr",
+    name = "coordinator_cache_manager_hdr",
     hdrs = [
-        "KVCacheAllocator.h",
+        "CoordinatorCacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -250,27 +264,19 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_allocator",
+    name = "coordinator_cache_manager",
     srcs = [
-        "HybridKVCacheAllocator.cc",
-        "HybridPoolKVCacheAllocator.cc",
-        "HybridTypeKVCacheAllocator.cc",
-        "KVCacheAllocator.cc",
-        "SingleTypeKVCacheAllocator.cc",
+        "CoordinatorCacheManager.cc",
     ],
     hdrs = [
-        "HybridKVCacheAllocator.h",
-        "HybridPoolKVCacheAllocator.h",
-        "HybridTypeKVCacheAllocator.h",
-        "KVCacheAllocator.h",
-        "SingleTypeKVCacheAllocator.h",
+        "CoordinatorCacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":cp_slot_mapper",
-        ":kv_cache_allocator_hdr",
-        ":kv_cache_group",
+        ":coordinator_cache_manager_hdr",
+        ":single_type_cache_manager",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
@@ -286,6 +292,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_expression",
         ":cache_config",
         ":cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
@@ -296,26 +303,21 @@ cc_library(
     name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
-        "HybridConfigCreator.cc",
-        "HybridPoolConfigCreator.cc",
         "KVCacheHashUtil.cc",
         "MemoryEvaluationHelper.cc",
-        "SingleConfigCreator.cc",
     ],
     hdrs = [
         "CacheConfigCreator.h",
-        "HybridConfigCreator.h",
-        "HybridPoolConfigCreator.h",
         "KVCacheHashUtil.h",
         "MemoryEvaluationHelper.h",
-        "SingleConfigCreator.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":batch_kv_cache_resource",
+        ":block_expression",
         ":cache_types",
-        ":kv_cache_allocator",
+        ":coordinator_cache_manager",
         ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
@@ -375,4 +377,15 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
+)
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test, the terminal
+# source gate that rejects positional cache group routing in this package.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
 )

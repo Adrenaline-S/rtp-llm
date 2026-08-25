@@ -475,6 +475,12 @@ class Qwen3AttnModel(DisaggregateModelBase):
                     self.parallelism_config,
                     self.weight,
                     mirco_batch_input.attention_inputs,
+                    (
+                        # This path is single-group dense MHA; the tag is always "default".
+                        mirco_batch_input.cache_group_attn_inputs["default"]
+                        if mirco_batch_input.cache_group_attn_inputs
+                        else None
+                    ),
                     self.fmha_config,
                 )
                 out = layer(

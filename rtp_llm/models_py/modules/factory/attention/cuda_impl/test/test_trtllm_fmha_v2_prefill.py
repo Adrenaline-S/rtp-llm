@@ -240,12 +240,14 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
                 capture_inputs.dtype = get_typemeta(static_qkv)
                 replay_inputs.dtype = get_typemeta(replay_qkv)
                 expect_impl = FlashInferTRTLLMFMHAv2PrefillImpl(
-                    attn_configs, replay_inputs
+                    attn_configs,
+                    replay_inputs,
                 )
                 expect_output = expect_impl.forward(replay_qkv, None).clone()
 
                 graph_impl = FlashInferTRTLLMFMHAv2PrefillImpl(
-                    attn_configs, capture_inputs
+                    attn_configs,
+                    capture_inputs,
                 )
                 self.assertTrue(graph_impl.support_cuda_graph())
 
@@ -455,7 +457,10 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
             head_dim,
         )
 
-        impl = FlashInferTRTLLMFMHAv2PrefillImpl(attn_configs, attn_inputs)
+        impl = FlashInferTRTLLMFMHAv2PrefillImpl(
+            attn_configs,
+            attn_inputs,
+        )
         actual = impl.forward(qkv.clone(), None)
 
         if self.kv_cache_dtype == KvCacheDataType.FP8:

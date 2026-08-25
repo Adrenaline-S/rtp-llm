@@ -5,7 +5,12 @@
 
 namespace rtp_llm {
 
-KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+BuiltLayerSpec SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+    auto spec = buildSpec(desc, ctx);
+    return {desc.tag, std::move(spec), groupPolicy(desc)};
+}
+
+KVCacheSpecPtr SpecBuilder::buildSpec(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
     RTP_LLM_CHECK_WITH_INFO(!desc.tag.empty(), "KVCacheSpecDesc tag must not be empty");
     switch (desc.cache_type) {
         case KVCacheSpecType::MultiHeadAttention:
@@ -61,12 +66,6 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         if (desc.capacity->explicit_block_num.has_value()) {
             policy.explicit_block_num = *desc.capacity->explicit_block_num;
         }
-        if (desc.capacity->charge_to_paged_budget.has_value()) {
-            policy.charge_to_paged_budget = *desc.capacity->charge_to_paged_budget;
-        }
-    }
-    if (desc.memory.has_value() && desc.memory->placement.has_value()) {
-        policy.memory_placement = *desc.memory->placement;
     }
     if (desc.tail.has_value()) {
         if (desc.tail->active_tail_blocks.has_value()) {

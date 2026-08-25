@@ -109,14 +109,14 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     EXPECT_EQ(wire_hints.scalar_type(), torch::kInt64);
     EXPECT_EQ(wire_hints.data_ptr<int64_t>()[GptModelInputIndex::mtpHiddenStates], 3221225472LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{262144, 12288}));
 
     inputs.last_hidden_states = backing.expand({1048576, 12288});
     shape_hints               = getModelInputShapeHints(inputs);
     EXPECT_EQ(shape_hints[GptModelInputIndex::mtpHiddenStates], 12884901888LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 
@@ -125,6 +125,46 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(5, 2), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
+}
+
+TEST_F(ModelDataTest, testRefreshNonRootKVCacheBlockTableDeviceReplicasUsesHostTables) {
+    GptModelInputs inputs;
+    inputs.kv_cache_block_id        = torch::tensor({0, 7, 11, -1}, torch::kInt32);
+    inputs.kv_cache_kernel_block_id = torch::tensor({0, 14, 15, 22, 23, -1}, torch::kInt32);
+    inputs.kv_cache_block_id_device =
+        torch::full(inputs.kv_cache_block_id.sizes(), 99, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    inputs.kv_cache_kernel_block_id_device = torch::full(
+        inputs.kv_cache_kernel_block_id.sizes(), 99, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+
+    refreshKVCacheBlockTableDeviceReplicas(inputs);
+
+    EXPECT_TRUE(torch::equal(inputs.kv_cache_block_id_device.cpu(), inputs.kv_cache_block_id));
+    EXPECT_TRUE(torch::equal(inputs.kv_cache_kernel_block_id_device.cpu(), inputs.kv_cache_kernel_block_id));
+}
+
+TEST_F(ModelDataTest, testPackedCacheMetadataCarriesCompleteRootIdentity) {
+    GptModelInputs inputs;
+    inputs.kv_cache_block_table_plan = CacheBlockTablePackingPlan::fromRegions({
+        {"full", 0, {0, 3, 1}, {0, 6, 1}},
+        {"linear", 1, {3, 2, 1}, {6, 2, 1}},
+    });
+    inputs.kv_cache_kernel_block_id  = torch::zeros({8}, torch::kInt32);
+    inputs.kv_cache_block_id         = torch::zeros({5}, torch::kInt32);
+    inputs.input_lengths             = torch::ones({1}, torch::kInt32);
+
+    // Header(2) + full(8 fields + 4 bytes) + linear(8 fields + 6 bytes).
+    const auto shape_hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(shape_hints[GptModelInputIndex::kvCacheGroupNum], 2);
+    EXPECT_EQ(shape_hints[GptModelInputIndex::kvCachePoolBlockTableNumel], 5);
+    EXPECT_EQ(shape_hints[GptModelInputIndex::kvCacheKernelBlockTableNumel], 8);
+    EXPECT_EQ(shape_hints[GptModelInputIndex::kvCacheBlockTableMetadataLen], 28);
+    EXPECT_EQ(static_cast<size_t>(shape_hints[GptModelInputIndex::kvCacheGroupNum]),
+              inputs.kv_cache_block_table_plan.groupCount());
+
+    const auto debug_string = inputs.debugString(/*force=*/true);
+    EXPECT_NE(debug_string.find("kv_cache_group_tags"), std::string::npos);
+    EXPECT_NE(debug_string.find("full"), std::string::npos);
+    EXPECT_NE(debug_string.find("linear"), std::string::npos);
 }
 
 }  // namespace rtp_llm

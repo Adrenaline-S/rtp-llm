@@ -40,8 +40,8 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     update_decode_metadata_in_place_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    as_attention_inputs_by_tag,
     primary_attention_inputs,
+    select_cache_group_attn_inputs,
 )
 
 
@@ -67,12 +67,9 @@ class DSv4DecodeFmhaImplConfigFP8:
     # ``(entries_per_block, tokens_per_block, max_blocks_per_req)``.
     paged_pool_specs: Dict[str, Tuple[int, int, int]] = field(default_factory=dict)
 
-    # Snapshot of ``kv_cache.group_tags`` (framework-owned group ordering, one
-    # cache tag per entry). Kept so ``prepare`` can key a single-group
-    # ``PyAttentionInputs`` without a live ``kv_cache`` (the CUDA-graph replay
-    # path doesn't hand one in). Static for the allocator's lifetime, so
-    # snapshot-at-construct is safe.
-    group_tags: List[str] = field(default_factory=list)
+    # Cold-bound semantic identity -> dense execution ordinal. Graph replay
+    # indexes group views directly and never rediscovers this relation.
+    group_bindings: Tuple[str, ...] = field(default_factory=tuple)
 
 
 class DSv4DecodeFmhaImplFP8:
@@ -122,20 +119,15 @@ class DSv4DecodeFmhaImplFP8:
     ) -> Optional[Dict[str, torch.Tensor]]:
         """Collect the per-tag kernel block tables the metadata needs.
 
-        ``attn_inputs`` is whatever ``PyModelInputs.attention_inputs`` holds: a
-        ``{tag: PyAttentionInputs}`` mapping for the multi-group DSV4 cache (C++
-        ``callPrepareCudaGraph`` forwards that mapping verbatim), or a single
-        ``PyAttentionInputs`` when the model collapses to one group.
+        ``attn_inputs`` is the complete ``PyModelInputs`` during graph replay;
+        tag-keyed group attention inputs are translated here because the DSV4
+        metadata API requires a tag-keyed dictionary.
         """
         if not self._paged_entries_per_block:
             return None
-        by_tag = as_attention_inputs_by_tag(attn_inputs)
+        by_tag = select_cache_group_attn_inputs(attn_inputs, self.config.group_bindings)
         if not by_tag:
             return None
-        if len(by_tag) == 1 and len(self.config.group_tags) == 1:
-            # Single-group cache: C++ collapses the mapping to a bare
-            # PyAttentionInputs, so re-key with the snapshotted tag.
-            by_tag = {self.config.group_tags[0]: next(iter(by_tag.values()))}
         paged_block_tables: Dict[str, torch.Tensor] = {}
         for tag, tagged_inputs in by_tag.items():
             if tag not in self.config.paged_pool_specs:

@@ -116,7 +116,12 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
                     return_value=None,
                 )
             )
-            op = PCPAll2AllAttnOp(attn_cfg, attn_inputs, par_cfg)
+            op = PCPAll2AllAttnOp(
+                attn_cfg,
+                attn_inputs,
+                par_cfg,
+                attn_inputs.kv_cache_kernel_block_id,
+            )
             params = op.prepare(attn_inputs)
             return op.forward(qkv, kv_cache, params)
 

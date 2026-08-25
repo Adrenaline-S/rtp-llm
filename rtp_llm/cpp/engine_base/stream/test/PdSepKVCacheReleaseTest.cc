@@ -5,9 +5,11 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -21,13 +23,16 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -178,27 +183,39 @@ void expectDsv4RegionBytes(
     }
 }
 
-uint8_t dsv4PdPattern(int layer_id, int gid, size_t block_pos) {
-    return static_cast<uint8_t>(17 + layer_id * 19 + gid * 11 + block_pos);
+// Fill-pattern seed for a cache tag. The DSV4 tags this test drives are listed
+// explicitly so every (layer, tag, block position) region gets its own byte.
+// This is test-local pattern bookkeeping, never a routing identity.
+size_t dsv4PatternSeed(std::string_view tag) {
+    static const std::vector<std::string> kSeededTags = {
+        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
+    const auto it = std::find(kSeededTags.begin(), kSeededTags.end(), tag);
+    RTP_LLM_CHECK_WITH_INFO(
+        it != kSeededTags.end(), "no dsv4 fill pattern seed for cache tag=%s", std::string(tag).c_str());
+    return static_cast<size_t>(std::distance(kSeededTags.begin(), it));
 }
 
-// Block positions a group actually transfers on the PD prefill->decode path.
-// Both sides derive the plan from the group policy: runtimeWriteCacheStore via
-// buildCacheStorePlan and DecodeRpcServer::loadCache via
-// blockPositionsForCacheTransfer, and the two agree for cp_size == 1.
+uint8_t dsv4PdPattern(int layer_id, std::string_view tag, size_t block_pos) {
+    return static_cast<uint8_t>(17 + layer_id * 19 + dsv4PatternSeed(tag) * 11 + block_pos);
+}
+
+// Physical block-table positions a group actually transfers on the PD
+// prefill->decode path.
 std::vector<size_t>
-dsv4TransferPositions(const CacheConfig& config, int gid, size_t block_num, size_t reuse_block_size) {
-    const auto policy = config.policyForGroup(static_cast<size_t>(gid));
+dsv4TransferPositions(const CacheConfig& config, std::string_view tag, size_t block_num, size_t reuse_block_size) {
+    const auto&  group = config.group(tag);
+    const size_t tail_block_count =
+        group.policy.active_tail_blocks > 0 ? static_cast<size_t>(group.policy.active_tail_blocks) : 0;
     return blockPositionsForCacheTransfer(block_num,
                                           reuse_block_size,
                                           /*use_hybrid=*/config.groupNums() > 1,
-                                          /*transfer_tail_blocks=*/policy.active_tail_blocks > 0,
-                                          static_cast<size_t>(policy.active_tail_blocks),
+                                          tail_block_count > 0,
+                                          tail_block_count,
                                           /*hybrid_full_from_begin=*/true);
 }
 
-torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, int gid) {
-    const auto& blocks = resource->blocks(0, gid);
+torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, std::string_view tag) {
+    const auto& blocks = encodedPoolBlocksForTest(resource->blockBinding(0, tag));
     return torch::from_blob(const_cast<int*>(blocks.data()), {1, static_cast<int64_t>(blocks.size())}, torch::kInt32)
         .clone();
 }
@@ -217,6 +234,57 @@ torch_ext::PyCacheStoreInputs makeSingleBlockWriteInputs(int64_t cache_key, int 
     return inputs;
 }
 
+class SingleBlockWriteCacheSpec: public KVCacheSpec {
+public:
+    SingleBlockWriteCacheSpec(
+        const std::string&, size_t tokens_per_block, size_t kv_stride, size_t kv_scale_stride, bool opaque_store):
+        kv_stride_(kv_stride), kv_scale_stride_(kv_scale_stride) {
+        this->type               = opaque_store ? KVCacheSpecType::OpaqueState : KVCacheSpecType::MultiHeadAttention;
+        this->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+    }
+
+    size_t block_size() const override {
+        return kv_stride_;
+    }
+    size_t k_block_size() const override {
+        return kv_stride_ / 2;
+    }
+    size_t v_block_size() const override {
+        return kv_stride_ - k_block_size();
+    }
+    size_t block_size_bytes() const override {
+        return kv_stride_;
+    }
+    size_t k_block_size_bytes() const override {
+        return k_block_size();
+    }
+    size_t v_block_size_bytes() const override {
+        return v_block_size();
+    }
+    size_t scale_block_size_bytes() const override {
+        return kv_scale_stride_;
+    }
+    size_t k_scale_block_size_bytes() const override {
+        return kv_scale_stride_ / 2;
+    }
+    size_t v_scale_block_size_bytes() const override {
+        return kv_scale_stride_ - k_scale_block_size_bytes();
+    }
+    DataType memoryLayoutDType() const override {
+        return DataType::TYPE_UINT8;
+    }
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<SingleBlockWriteCacheSpec>(*this);
+    }
+    std::string debugString(size_t = 0) const override {
+        return "SingleBlockWriteCacheSpec";
+    }
+
+private:
+    size_t kv_stride_       = 0;
+    size_t kv_scale_stride_ = 0;
+};
+
 // Single-group, single-layer config that pins the physical block strides and the
 // opaque-store policy the write path must use. Geometry now travels through
 // CacheConfig instead of the per-call write inputs.
@@ -226,22 +294,17 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                        size_t             kv_scale_stride,
                                        bool               use_opaque_kv_cache_store) {
     constexpr uint32_t kBlockNum = 2;
-    // BF16 keeps the prototype spec scale-free, so a caller asking for
-    // kv_scale_stride == 0 really gets a scale-less group (an INT8/FP8 prototype
-    // would have CacheConfig::setTopology backfill a non-zero scale stride).
-    auto config                      = test::makeSingleGroupCacheConfig(test::makeMhaSpec(tag,
-                                                                     static_cast<size_t>(tokens_per_block),
-                                                                     rtp_llm::DataType::TYPE_BF16,
-                                                                     /*local_head_num_kv=*/1,
-                                                                     /*size_per_head=*/1),
-                                                   CacheGroupType::FULL,
-                                                   /*layer_num=*/1,
-                                                   /*block_num=*/static_cast<int>(kBlockNum));
-    config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
-    config.kv_block_stride_bytes     = kv_stride;
-    config.kv_scale_stride_bytes     = kv_scale_stride;
-    config.setGroupBlockLayout({kBlockNum}, {kv_stride}, {kv_scale_stride});
-    return config;
+    auto               config    = test::makeSingleGroupCacheConfig(
+        std::make_shared<SingleBlockWriteCacheSpec>(
+            tag, static_cast<size_t>(tokens_per_block), kv_stride, kv_scale_stride, use_opaque_kv_cache_store),
+        CacheGroupType::FULL,
+        /*layer_num=*/1,
+        /*block_num=*/static_cast<int>(kBlockNum),
+        tag);
+    return test::TestCacheConfigBuilder::rebuildForTest(std::move(config))
+        .setUsesOpaqueKVCacheStore(use_opaque_kv_cache_store)
+        .setGroupBlockLayout({kBlockNum}, {kv_stride}, {kv_scale_stride})
+        .build();
 }
 
 // Per-request metadata for a DSV4 PD prefill write of one context request.
@@ -291,19 +354,21 @@ protected:
                                uint32_t seq_size_per_block      = kDsv4TokensPerBlock,
                                uint32_t kernel_seq_size_per_blk = kDsv4TokensPerBlock) {
         ModelConfig mc;
-        mc.num_layers                   = 43;
-        mc.hidden_size                  = 4096;
-        mc.attn_config.head_num         = 64;
-        mc.attn_config.kv_head_num      = 1;
-        mc.attn_config.size_per_head    = 512;
-        mc.attn_config.rope_head_dim    = 64;
-        mc.attn_config.sliding_window   = 128;
-        mc.attn_config.indexer_head_dim = 128;
-        mc.attn_config.indexer_head_num = 64;
-        mc.attn_config.indexer_topk     = 512;
-        mc.attn_config.o_groups         = 8;
-        mc.attn_config.o_lora_rank      = 1024;
-        std::vector<int> ratios         = {0, 0};
+        mc.num_layers                                      = 43;
+        mc.hidden_size                                     = 4096;
+        mc.attn_config.head_num                            = 64;
+        mc.attn_config.kv_head_num                         = 1;
+        mc.attn_config.size_per_head                       = 512;
+        mc.attn_config.rope_head_dim                       = 64;
+        mc.attn_config.sliding_window                      = 128;
+        mc.attn_config.indexer_head_dim                    = 128;
+        mc.attn_config.indexer_head_num                    = 64;
+        mc.attn_config.indexer_topk                        = 512;
+        mc.attn_config.o_groups                            = 8;
+        mc.attn_config.o_lora_rank                         = 1024;
+        mc.attn_config.tokens_per_block                    = seq_size_per_block;
+        mc.hybrid_attention_config.enable_hybrid_attention = true;
+        std::vector<int> ratios                            = {0, 0};
         for (int i = 2; i < 43; ++i) {
             ratios.push_back((i % 2 == 0) ? 4 : 128);
         }
@@ -320,11 +385,11 @@ protected:
         KVCacheConfig     kv_config;
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
-        auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
-        // KVCacheManager::init() calls finalizeBlockNums(block_num), which fans the
+        kv_config.test_block_num            = block_num;
+        auto config                         = CacheConfigCreator::createConfig(mc, pc, RuntimeConfig{}, kv_config);
+        // KVCacheManager::init() calls withRankSyncBlockCount(block_num), which fans the
         // global block count out to every group according to its capacity policy.
-        config.block_num = block_num;
-        return config;
+        return test::TestCacheConfigBuilder::rebuildForTest(std::move(config)).setBlockCountBasis(block_num).build();
     }
 
     // Build a PREFILL stream with reuse_cache enabled
@@ -339,8 +404,9 @@ protected:
     void prepareStreamWithConfig(const std::vector<int>& input_tokens,
                                  const CacheConfig&      cache_config,
                                  int                     tokens_per_block,
-                                 RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr);
+                                 RoleType                role_type,
+                                 const KVCacheConfig&    kv_cache_config = KVCacheConfig{}) {
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager_->init());
         initial_free_blocks_ = cache_manager_->freeBlocksNum();
 
@@ -362,6 +428,7 @@ protected:
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = tokens_per_block;
         model_config.max_seq_len                  = std::max<int64_t>(2048, input_tokens.size() + tokens_per_block);
+        model_config.vocab_size                   = 1024;
         RuntimeConfig runtime_config;
 
         stream_ = std::make_shared<NormalGenerateStream>(
@@ -546,6 +613,481 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
     stream2->releaseResource();
 }
 
+TEST_F(PdSepKVCacheReleaseTest, testTerminalOutputPublishesDeviceCacheBeforeSchedulerRelease) {
+    const std::vector<int> input_tokens = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    prepareStream(input_tokens);
+    stream_->generateConfig()->max_new_tokens = 1;
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+
+    const int32_t terminal_token = 15;
+    stream_->update(
+        {.new_tokens = torch::tensor({terminal_token}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+    EXPECT_TRUE(output.value().generate_outputs.front().finished);
+    EXPECT_FALSE(resource.resource_released_);
+    EXPECT_TRUE(resource.device_cache_published_);
+
+    auto next_input_tokens = input_tokens;
+    next_input_tokens.push_back(terminal_token);
+
+    ResourceContext next_context;
+    next_context.cache_manager       = cache_manager_;
+    next_context.reuse_cache         = true;
+    next_context.enable_device_cache = true;
+    next_context.role_type           = RoleType::PREFILL;
+
+    auto next_input                   = std::make_shared<GenerateInput>();
+    auto next_config                  = std::make_shared<GenerateConfig>();
+    next_config->num_return_sequences = 1;
+    next_config->reuse_cache          = true;
+    next_config->enable_device_cache  = true;
+    next_input->input_ids =
+        torch::tensor(std::vector<int32_t>(next_input_tokens.begin(), next_input_tokens.end()), torch::kInt32);
+    next_input->generate_config = next_config;
+
+    ModelConfig next_model_config;
+    next_model_config.attn_config.tokens_per_block = 8;
+    next_model_config.max_seq_len                  = 2048;
+    next_model_config.vocab_size                   = 1024;
+    auto next_stream =
+        std::make_shared<NormalGenerateStream>(next_input, next_model_config, RuntimeConfig{}, next_context, nullptr);
+    next_stream->generate_status_->status = StreamState::RUNNING;
+
+    ASSERT_TRUE(next_stream->streamCacheResource().initKVBlock().ok());
+    EXPECT_GE(next_stream->reuseLength(), 8)
+        << "terminal request must publish its full device-cache prefix before scheduler-owned release";
+
+    next_stream->releaseResource();
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testTerminalOutputWaitsForSynchronousMemoryCachePublication) {
+    const std::vector<int> input_tokens = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    prepareStream(input_tokens);
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+
+    std::atomic<bool> store_submitted{false};
+    std::atomic<bool> store_done{false};
+    auto              store_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*store_context, done()).WillByDefault(testing::Invoke([&] { return store_done.load(); }));
+    ON_CALL(*store_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(1)
+        .WillOnce(testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>&) {
+            store_submitted.store(true);
+            return store_context;
+        }));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+
+    const int32_t terminal_token = 15;
+    stream_->update(
+        {.new_tokens = torch::tensor({terminal_token}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = std::async(std::launch::async, [&] { return stream_->nextOutput(); });
+
+    const auto submit_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!store_submitted.load() && std::chrono::steady_clock::now() < submit_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!store_submitted.load()) {
+        store_done.store(true);
+        output.wait();
+        FAIL() << "terminal update did not submit synchronous memory publication";
+        return;
+    }
+
+    EXPECT_EQ(output.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout)
+        << "terminal output must stay consumer-invisible while synchronous memory publication is pending";
+
+    store_done.store(true);
+    ASSERT_EQ(output.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    auto output_result = output.get();
+    ASSERT_TRUE(output_result.ok());
+    const auto& generate_outputs = output_result.value().generate_outputs;
+    ASSERT_EQ(generate_outputs.size(), 1u);
+    EXPECT_TRUE(generate_outputs.front().finished);
+    EXPECT_FALSE(resource.resource_released_);
+    EXPECT_TRUE(resource.memory_cache_published_);
+
+    // Simulate the scheduler committing the pending GenerateDone event before
+    // release. The release path must not submit the already-published cache again.
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPermanentlyPendingSynchronousPublicationHasBoundedConsumerAndReleaseWaits) {
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.memory_cache_sync_timeout_ms = 20;
+    prepareStreamWithConfig({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
+                            makeConfig(),
+                            /*tokens_per_block=*/8,
+                            RoleType::PREFILL,
+                            kv_cache_config);
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    std::atomic<bool> done{false};
+    auto              pending_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*pending_context, done()).WillByDefault(testing::Invoke([&] { return done.load(); }));
+    ON_CALL(*pending_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(1).WillOnce(testing::Return(pending_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto       output_future = std::async(std::launch::async, [&] { return stream_->nextOutput(); });
+    const auto output_wait   = output_future.wait_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(output_wait, std::future_status::ready)
+        << "write_cache_sync must not block terminal output past its configured deadline";
+    if (output_wait != std::future_status::ready) {
+        done.store(true);
+    }
+    auto output = output_future.get();
+    ASSERT_TRUE(output.ok());
+
+    if (output_wait == std::future_status::ready) {
+        EXPECT_EQ(resource.store_cache_context_, pending_context);
+        EXPECT_FALSE(resource.memory_cache_published_);
+        stream_->generate_status_->status = StreamState::FINISHED;
+        auto release                      = std::async(std::launch::async, [&] { stream_->releaseResource(); });
+        EXPECT_EQ(release.wait_for(std::chrono::milliseconds(150)), std::future_status::ready)
+            << "scheduler release must also bound synchronous cache publication waits";
+        release.wait();
+        EXPECT_EQ(resource.store_cache_context_, pending_context);
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testTimedOutSynchronousPublicationLateSuccessConvergesWithoutDuplicate) {
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.memory_cache_sync_timeout_ms = 20;
+    prepareStreamWithConfig({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
+                            makeConfig(),
+                            /*tokens_per_block=*/8,
+                            RoleType::PREFILL,
+                            kv_cache_config);
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    std::atomic<bool> done{false};
+    auto              context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*context, done()).WillByDefault(testing::Invoke([&] { return done.load(); }));
+    ON_CALL(*context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(1).WillOnce(testing::Return(context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto       output_future = std::async(std::launch::async, [&] { return stream_->nextOutput(); });
+    const auto output_wait   = output_future.wait_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(output_wait, std::future_status::ready);
+    if (output_wait != std::future_status::ready) {
+        done.store(true);
+    }
+    ASSERT_TRUE(output_future.get().ok());
+
+    if (output_wait == std::future_status::ready) {
+        EXPECT_FALSE(resource.memory_cache_published_);
+        done.store(true);
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->releaseResource();
+        EXPECT_TRUE(resource.memory_cache_published_);
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testTimedOutSynchronousPublicationLateFailureRetriesAtRelease) {
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.memory_cache_sync_timeout_ms = 20;
+    prepareStreamWithConfig({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
+                            makeConfig(),
+                            /*tokens_per_block=*/8,
+                            RoleType::PREFILL,
+                            kv_cache_config);
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    std::atomic<bool> failed_done{false};
+    auto              failed_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*failed_context, done()).WillByDefault(testing::Invoke([&] { return failed_done.load(); }));
+    ON_CALL(*failed_context, success()).WillByDefault(testing::Return(false));
+    auto success_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*success_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(2)
+        .WillOnce(testing::Return(failed_context))
+        .WillOnce(testing::Return(success_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto       output_future = std::async(std::launch::async, [&] { return stream_->nextOutput(); });
+    const auto output_wait   = output_future.wait_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(output_wait, std::future_status::ready);
+    if (output_wait != std::future_status::ready) {
+        failed_done.store(true);
+    }
+    ASSERT_TRUE(output_future.get().ok());
+
+    if (output_wait == std::future_status::ready) {
+        EXPECT_FALSE(resource.memory_cache_published_);
+        failed_done.store(true);
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->releaseResource();
+        EXPECT_TRUE(resource.memory_cache_published_);
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testCancelBeforeTerminalConsumeDoesNotPublishCache) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(0);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    stream_->reportEvent(StreamEvents::Error, ErrorCode::CANCELLED, "cancelled before terminal consume");
+
+    auto output = stream_->nextOutput();
+    ASSERT_FALSE(output.ok());
+    EXPECT_EQ(output.status().code(), ErrorCode::CANCELLED);
+    EXPECT_FALSE(resource.memory_cache_published_);
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPdRemoteHandoffOutputDoesNotPublishCache) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 8;
+    stream_->generateConfig()->pd_separation       = true;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(0);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens             = torch::tensor({15}, torch::kInt32).reshape({1, 1}),
+                     .num_new_tokens         = 1,
+                     .update_remote_generate = true});
+    ASSERT_TRUE(stream_->hasEvent(StreamEvents::NeedRemoteGenerate));
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    resource.releaseKVCacheForPDSep();
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testNullSynchronousPublicationRetriesAtRelease) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    auto success_context         = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*success_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(2)
+        .WillOnce(testing::Return(nullptr))
+        .WillOnce(testing::Return(success_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPendingAsynchronousPublicationIsNotSubmittedAgainAtRelease) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = false;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    auto pending_context         = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*pending_context, done()).WillByDefault(testing::Return(false));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_)).Times(1).WillOnce(testing::Return(pending_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_EQ(resource.store_cache_context_, pending_context);
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testFailedSynchronousPublicationRetriesAtRelease) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    auto failed_context          = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*failed_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*failed_context, success()).WillByDefault(testing::Return(false));
+    auto success_context = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*success_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(2)
+        .WillOnce(testing::Return(failed_context))
+        .WillOnce(testing::Return(success_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPublicationExceptionDoesNotFailInferenceAndRetriesAtRelease) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    stream_->generateConfig()->max_new_tokens      = 1;
+    stream_->generateConfig()->enable_device_cache = false;
+    stream_->generateConfig()->enable_memory_cache = true;
+
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = false;
+    resource.resource_context_.enable_memory_cache = true;
+    resource.resource_context_.write_cache_sync    = true;
+    auto mock_coordinator = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
+    cache_manager_->coordinator_ = mock_coordinator;
+    auto success_context         = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*success_context, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*success_context, success()).WillByDefault(testing::Return(true));
+    EXPECT_CALL(*mock_coordinator, asyncWrite(testing::_))
+        .Times(2)
+        .WillOnce(testing::Invoke(
+            [](const std::shared_ptr<KVCacheConnectorReadWriteContext>&) -> std::shared_ptr<AsyncContext> {
+                throw std::runtime_error("publication failed");
+            }))
+        .WillOnce(testing::Return(success_context));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->update({.new_tokens = torch::tensor({15}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_FALSE(resource.memory_cache_published_);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
+}
+
 // =============================================================================
 // Test 6: Race condition simulation
 // Engine thread calls releaseResource concurrently with
@@ -629,18 +1171,19 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     auto config = makeDsv4Config();
     // linear_step=4: with the default step of 1 every slot is a step hit and all
     // blocks materialize, defeating the tail-only assertions below.
-    config.linear_step = 4;
+    config = test::TestCacheConfigBuilder::rebuildForTest(std::move(config)).setLinearStep(4).build();
     prepareStreamWithConfig(tokens, config, spb, RoleType::PREFILL);
     allocateAndFinish();
 
     auto& resource = stream_->streamCacheResource();
     ASSERT_EQ(resource.kvCache().groupNums(), kDsv4PoolNum);
     ASSERT_GT(resource.curBlocksNum(), 0);
-    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        const auto& tag = config.tagForGroup(static_cast<size_t>(gid));
-        ASSERT_EQ(resource.kvCache().blocksNum(0, gid), 4) << "group " << tag;
-        const auto&  blocks = resource.kvCache().blocks(0, gid);
-        const size_t tail   = static_cast<size_t>(config.policyForGroup(static_cast<size_t>(gid)).active_tail_blocks);
+    ASSERT_EQ(config.groupNums(), kDsv4PoolNum);
+    for (const auto& group : config.groups()) {
+        const auto& tag = group.tag;
+        ASSERT_EQ(resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
+        const auto&  blocks = encodedPoolBlocksForTest(resource.kvCache().blockBinding(0, tag));
+        const size_t tail   = static_cast<size_t>(group.policy.active_tail_blocks);
         if (tail == 0) {
             // Paged group: every logical block is materialized from position 0.
             EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << tag;
@@ -735,8 +1278,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
     EXPECT_EQ(decode_stream->reuseLength(), 0)
         << "Hybrid DSV4 decode first malloc must not consume local device-cache reuse; PD load owns reuse.";
     EXPECT_EQ(decode_resource.kvCache().groupNums(), kDsv4PoolNum);
-    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
+    for (const auto& [tag, block_ids] : decode_resource.kvCache().blocksByTag()) {
+        (void)block_ids;
+        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
     }
 
     decode_stream->releaseResource();
@@ -753,7 +1297,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -792,23 +1336,22 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     size_t expected_requests = 0;
     size_t expected_blocks   = 0;
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ++expected_requests;
-            expected_blocks += dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0).size();
+            expected_blocks += dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0).size();
         }
     }
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
-            auto        positions = dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0);
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
+            auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
-                auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
-                auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                auto prefill_block_id = encodedPoolBlocksForTest(prefill_resource->blockBinding(0, tag))[block_pos];
+                auto decode_block_id  = encodedPoolBlocksForTest(decode_resource->blockBinding(0, tag))[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill tag=" << tag << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode tag=" << tag << " pos=" << block_pos;
                 fillDsv4RegionBytes(
-                    prefill_manager, prefill_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
+                    prefill_manager, prefill_block_id, layer_id, tag, dsv4PdPattern(layer_id, tag, block_pos));
                 fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, tag, 0xEE);
             }
         }
@@ -818,22 +1361,20 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
 
             auto inputs = makeDsv4WriteInputs(request_id,
                                               /*input_length=*/block_num * spb,
                                               /*prefix_length=*/0,
-                                              blockIdsTensor(prefill_resource, gid),
+                                              blockIdsTensor(prefill_resource, tag),
                                               cache_keys);
 
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
-            layer_cache.seq_size_per_block = static_cast<int>(cache_config.seqSizePerBlockForGroup(gid));
+            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seq_size_per_block);
             layer_cache.layer_id           = layer_id;
-            layer_cache.group_id           = gid;
             layer_cache.tag                = tag;
 
             runtimeWriteCacheStore(inputs,
@@ -866,7 +1407,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      "dsv4-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->blocksByTag(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -878,14 +1419,13 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
-            auto        positions = dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0);
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
+            auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
-                auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                auto decode_block_id = encodedPoolBlocksForTest(decode_resource->blockBinding(0, tag))[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
-                    decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
+                    decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, tag, block_pos));
             }
         }
     }
@@ -903,7 +1443,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -937,16 +1477,15 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
     const auto& cache_config = prefill_manager->cacheConfig();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
-            auto        positions = dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0);
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
+            auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
-                auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
-                auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                auto prefill_block_id = encodedPoolBlocksForTest(prefill_resource->blockBinding(0, tag))[block_pos];
+                auto decode_block_id  = encodedPoolBlocksForTest(decode_resource->blockBinding(0, tag))[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill tag=" << tag << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode tag=" << tag << " pos=" << block_pos;
                 fillDsv4RegionBytes(
-                    prefill_manager, prefill_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
+                    prefill_manager, prefill_block_id, layer_id, tag, dsv4PdPattern(layer_id, tag, block_pos));
                 fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, tag, 0xEE);
             }
         }
@@ -956,15 +1495,14 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
 
             auto inputs = makeDsv4WriteInputs(request_id,
                                               /*input_length=*/block_num * spb,
                                               /*prefix_length=*/0,
-                                              blockIdsTensor(prefill_resource, gid),
+                                              blockIdsTensor(prefill_resource, tag),
                                               cache_keys);
 
             // Paged groups expose the layer view at kernel-block granularity;
@@ -972,9 +1510,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
             layer_cache.seq_size_per_block =
-                cache_config.typeForGroup(static_cast<size_t>(gid)) == CacheGroupType::FULL ? kernel_spb : spb;
+                cache_config.group(tag).policy.group_type == CacheGroupType::FULL ? kernel_spb : spb;
             layer_cache.layer_id = layer_id;
-            layer_cache.group_id = gid;
             layer_cache.tag      = tag;
 
             runtimeWriteCacheStore(inputs,
@@ -988,10 +1525,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
         }
     }
 
-    const auto csa_gid       = static_cast<size_t>(cache_config.groupIdForTag("csa_kv"));
-    const auto first_csa_key = "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[0]), /*layer_id=*/2, "csa_kv");
+    const std::string csa_tag = "csa_kv";
+    const auto first_csa_key  = "kv_" + makeCacheKey(model_id, std::to_string(cache_keys[0]), /*layer_id=*/2, "csa_kv");
     ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
-    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(), cache_config.kvBlockStrideBytesForGroup(csa_gid));
+    EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(), cache_config.group(csa_tag).kv_block_stride_bytes);
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -1010,7 +1547,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                      "dsv4-decoupled-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->blocksByTag(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1020,14 +1557,13 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     ASSERT_TRUE(status.ok()) << status.ToString();
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
-            auto        positions = dsv4TransferPositions(cache_config, gid, block_num, /*reuse_block_size=*/0);
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
+            auto positions = dsv4TransferPositions(cache_config, tag, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
-                auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                auto decode_block_id = encodedPoolBlocksForTest(decode_resource->blockBinding(0, tag))[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
-                    decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
+                    decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, tag, block_pos));
             }
         }
     }
@@ -1045,7 +1581,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -1084,23 +1620,22 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     size_t expected_requests = 0;
     size_t expected_blocks   = 0;
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ++expected_requests;
-            expected_blocks += dsv4TransferPositions(cache_config, gid, block_num, reuse_num).size();
+            expected_blocks += dsv4TransferPositions(cache_config, tag, block_num, reuse_num).size();
         }
     }
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
-            auto        positions = dsv4TransferPositions(cache_config, gid, block_num, reuse_num);
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
+            auto positions = dsv4TransferPositions(cache_config, tag, block_num, reuse_num);
             for (auto block_pos : positions) {
-                auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
-                auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
+                auto prefill_block_id = encodedPoolBlocksForTest(prefill_resource->blockBinding(0, tag))[block_pos];
+                auto decode_block_id  = encodedPoolBlocksForTest(decode_resource->blockBinding(0, tag))[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill tag=" << tag << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode tag=" << tag << " pos=" << block_pos;
                 fillDsv4RegionBytes(
-                    prefill_manager, prefill_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
+                    prefill_manager, prefill_block_id, layer_id, tag, dsv4PdPattern(layer_id, tag, block_pos));
                 fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, tag, 0xEE);
             }
         }
@@ -1110,22 +1645,20 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
             ASSERT_TRUE(layout.at(tag, static_cast<size_t>(layer_id)).kv_addr.defined())
                 << "layer=" << layer_id << " tag=" << tag;
 
             auto inputs = makeDsv4WriteInputs(request_id,
                                               /*input_length=*/(block_num - reuse_num) * spb,
                                               /*prefix_length=*/reuse_num * spb,
-                                              blockIdsTensor(prefill_resource, gid),
+                                              blockIdsTensor(prefill_resource, tag),
                                               cache_keys);
 
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
-            layer_cache.seq_size_per_block = static_cast<int>(cache_config.seqSizePerBlockForGroup(gid));
+            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seq_size_per_block);
             layer_cache.layer_id           = layer_id;
-            layer_cache.group_id           = gid;
             layer_cache.tag                = tag;
 
             runtimeWriteCacheStore(inputs,
@@ -1158,7 +1691,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      "dsv4-cache-store-pd-prefix-reuse",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->blocksByTag(),
                                                      reuse_num,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1170,14 +1703,13 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
-        for (int gid : cache_config.groupIdsForLayer(layer_id)) {
-            const auto& tag       = cache_config.tagForGroup(static_cast<size_t>(gid));
-            auto        positions = dsv4TransferPositions(cache_config, gid, block_num, reuse_num);
+        for (const auto& tag : cache_config.groupTagsForLayer(layer_id)) {
+            auto positions = dsv4TransferPositions(cache_config, tag, block_num, reuse_num);
             for (auto block_pos : positions) {
-                auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
+                auto decode_block_id = encodedPoolBlocksForTest(decode_resource->blockBinding(0, tag))[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
-                    decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, gid, block_pos));
+                    decode_manager, decode_block_id, layer_id, tag, dsv4PdPattern(layer_id, tag, block_pos));
             }
         }
     }
@@ -1204,7 +1736,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     // Allocate KV blocks.
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(1);
-    resource->initGroups(manager->cacheConfig().topologyPtr());
+    resource->initGroups(manager->cacheConfig());
 
     auto input              = std::make_shared<GenerateInput>();
     input->input_ids        = torch::arange(input_length, torch::kInt32);
@@ -1218,13 +1750,14 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
     // Fill KV cache blocks with a known pattern so MemoryBackedCacheStore can
     // verify the transfer.
-    auto layout = manager->getMainModelCacheLayerLayout();
+    const std::string default_tag = "default";
+    auto              layout      = manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 3; ++layer_id) {
         auto buf = layout.at(static_cast<size_t>(layer_id)).kv_addr;
         ASSERT_TRUE(buf.defined());
         for (int b = 0; b < block_num; ++b) {
-            auto bid       = resource->blocks(0, 0)[b];
-            auto kv_stride = config.kv_block_stride_bytes;
+            auto bid       = encodedPoolBlocksForTest(resource->blockBinding(0, default_tag))[b];
+            auto kv_stride = config.group(default_tag).kv_block_stride_bytes;
             ASSERT_FALSE(isNullBlockIdx(bid));
             auto device_slice = torch::from_blob((uint8_t*)buf.data_ptr() + bid * kv_stride,
                                                  {(int64_t)kv_stride},
@@ -1257,10 +1790,11 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
     // --- Call runtimeWriteCacheStore (event->synchronize() inside) ---
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
-    auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, 0).data()),
-                                        {1, (int64_t)resource->blocks(0, 0).size()},
-                                      torch::kInt32)
-                         .clone();
+    auto block_ids =
+        torch::from_blob(const_cast<int*>(encodedPoolBlocksForTest(resource->blockBinding(0, default_tag)).data()),
+                         {1, (int64_t)encodedPoolBlocksForTest(resource->blockBinding(0, default_tag)).size()},
+                         torch::kInt32)
+            .clone();
 
     const auto& cache_config = manager->cacheConfig();
     for (int layer_id = 0; layer_id < 3; ++layer_id) {
@@ -1275,7 +1809,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         layer_cache.kv_cache_base      = layout.at(static_cast<size_t>(layer_id)).kv_addr;
         layer_cache.seq_size_per_block = spb;
         layer_cache.layer_id           = layer_id;
-        layer_cache.group_id           = 0;
         layer_cache.tag                = "default";
 
         runtimeWriteCacheStore(inputs,
@@ -1323,7 +1856,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     layer_cache.kv_cache_base      = kv_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "csa_state";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
@@ -1370,7 +1902,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
     layer_cache.kv_cache_base      = kv_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
@@ -1426,7 +1957,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     layer_cache.kv_scale_base      = kv_scale_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "csa_state";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();

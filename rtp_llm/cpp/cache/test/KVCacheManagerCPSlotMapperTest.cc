@@ -1,11 +1,11 @@
 #include <gtest/gtest.h>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -13,6 +13,10 @@
 
 namespace rtp_llm {
 namespace test {
+
+// makeTestConfig() builds a single-group MHA plan and makeSimpleMhaCacheConfig()
+// names that group "default". The tag is the only group identity used below.
+constexpr std::string_view kDefaultTag = "default";
 
 static CacheConfig makeTestConfig(int block_num = 20, int seq_size_per_block = 4) {
     return makeSimpleMhaCacheConfig(
@@ -22,6 +26,10 @@ static CacheConfig makeTestConfig(int block_num = 20, int seq_size_per_block = 4
         rtp_llm::DataType::TYPE_FP16,
         /*local_head_num_kv=*/1,
         /*size_per_head=*/16);
+}
+
+static CacheConfig makeWarmupTestConfig(int seq_size_per_block = 4) {
+    return makeTestConfig(/*block_num=*/1, seq_size_per_block);
 }
 
 static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_size) {
@@ -37,11 +45,10 @@ static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_s
     return ids;
 }
 
-static BatchKVCacheResourcePtr makeResource(int batch_size, int layer_num) {
+static BatchKVCacheResourcePtr makeResource(int batch_size, const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    std::vector<std::vector<int>> layer_group_ids(static_cast<size_t>(layer_num), std::vector<int>{0});
-    res->initGroups(makeTestCacheTopology(/*group_num=*/1, layer_num, layer_group_ids));
+    res->initGroups(config);
     return res;
 }
 
@@ -55,7 +62,7 @@ protected:
 
 // When kv_cache_sharded is false (default), cpSlotMapper() should return nullptr.
 TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
-    auto              config = makeTestConfig();
+    auto              config = makeWarmupTestConfig();
     ParallelismConfig par;
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
@@ -72,7 +79,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
 
 // When tp_size == 1, cpSlotMapper() should return nullptr even if kv_cache_sharded is true.
 TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
-    auto              config = makeTestConfig();
+    auto              config = makeWarmupTestConfig();
     ParallelismConfig par;
     par.tp_rank                            = 0;
     par.tp_size                            = 1;
@@ -90,7 +97,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
 // When kv_cache_sharded is true and tp_size > 1, cpSlotMapper() should return a valid mapper.
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 1;
@@ -114,7 +121,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
 
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -140,22 +147,22 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
-    auto resource  = makeResource(1, config.layer_num);
+    auto resource  = makeResource(1, config);
     auto token_ids = makeTokenIds(1, /*seq_len=*/1, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
     auto       cp_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
     mgr->cp_slot_mapper_ = cp_mapper;
-    mgr->allocator_->setCPSlotMapper(cp_mapper);
+    mgr->coordinator_cache_manager_->setCPSlotMapper(cp_mapper);
 
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(resource->blocksNum(0, 0), 1);
+    EXPECT_EQ(resource->blocksNum(0, kDefaultTag), 1);
 
     token_ids->setSeqLength(2);
     result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(resource->blocksNum(0, 0), 1);
+    EXPECT_EQ(resource->blocksNum(0, kDefaultTag), 1);
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
 }
 
@@ -166,7 +173,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
 // execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCount) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -180,7 +187,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
+    auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
@@ -189,7 +196,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
 
     // virtual_block_size = 4 * 2 = 8
     // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
-    EXPECT_EQ(resource->blocksNum(0, 0), 2);
+    EXPECT_EQ(resource->blocksNum(0, kDefaultTag), 2);
 }
 
 // Without CP sharding, the same seq_len should allocate more blocks.
@@ -197,7 +204,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
 // execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBlocks) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -211,7 +218,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
+    auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
@@ -219,15 +226,15 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     ASSERT_TRUE(result.success);
 
     // Without CP: ceil(16/4) = 4 blocks
-    EXPECT_EQ(resource->blocksNum(0, 0), 4);
+    EXPECT_EQ(resource->blocksNum(0, kDefaultTag), 4);
 }
 
-// Allocator-level cp_slot_mapper should drive malloc sharding.
+// Coordinator-level cp_slot_mapper should drive malloc sharding.
 // DISABLED: needs multi-rank NCCL harness (KVCacheManager::allocateAndSync calls
 // execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
+TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_CoordinatorMapperControlsMalloc) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block);
+    auto      config             = makeWarmupTestConfig(seq_size_per_block);
 
     ParallelismConfig par;
     par.tp_rank                            = 0;
@@ -241,7 +248,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 64;
-    auto      resource  = makeResource(1, config.layer_num);
+    auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     auto explicit_mapper = std::make_shared<CPSlotMapper>(0, 4, seq_size_per_block);
@@ -250,11 +257,11 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
 
     MallocInfo info{resource, token_ids};
     mgr->cp_slot_mapper_ = explicit_mapper;
-    mgr->allocator_->setCPSlotMapper(explicit_mapper);
+    mgr->coordinator_cache_manager_->setCPSlotMapper(explicit_mapper);
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 
-    EXPECT_EQ(resource->blocksNum(0, 0), 4);
+    EXPECT_EQ(resource->blocksNum(0, kDefaultTag), 4);
 }
 
 // insertIntoCache() should also use the manager-level mapper.
@@ -278,7 +285,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config.layer_num);
+    auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo malloc_info{resource, token_ids};
@@ -293,7 +300,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     EXPECT_NO_THROW(mgr->insertIntoCache(insert_info));
 
     // Now try to malloc again with the same token_ids -- should get reuse hit.
-    auto       resource2 = makeResource(1, config.layer_num);
+    auto       resource2 = makeResource(1, config);
     MallocInfo malloc_info2{resource2, token_ids};
     malloc_info2.reuse_cache         = true;
     malloc_info2.enable_device_cache = true;

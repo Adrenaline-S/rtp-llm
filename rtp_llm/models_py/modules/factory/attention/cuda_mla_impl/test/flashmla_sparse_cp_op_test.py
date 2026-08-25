@@ -80,6 +80,17 @@ def _make_block_table(
     return block_table.to(device)
 
 
+def _fill_sparse_mla_params(params, attn_inputs, page_size: int) -> None:
+    params.fill_params(
+        attn_inputs.input_lengths,
+        attn_inputs.prefix_lengths,
+        attn_inputs.sequence_lengths,
+        attn_inputs.kv_cache_kernel_block_id,
+        attn_inputs.is_prefill,
+        page_size,
+    )
+
+
 def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
     """Minimal tp_size=2 CP forward; pushes (rank, local_ids, out) and rank0 pushes ref."""
     try:
@@ -191,7 +202,7 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
         ai.kv_cache_kernel_block_id_device = block_table_device
         bt = block_table_device
         mla = rtp_llm_ops.SparseMlaParams()
-        mla.fill_params(ai, page)
+        _fill_sparse_mla_params(mla, ai, page)
 
         g_q = (torch.randn(T, H, qk, dtype=torch.bfloat16, device=cpu) * 0.1).to(dev)
         g_ckv = (torch.randn(T, R, dtype=torch.bfloat16, device=cpu) * 0.1).to(dev)
@@ -355,7 +366,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
-        mla_params.fill_params(attn_inputs, page_size)
+        _fill_sparse_mla_params(mla_params, attn_inputs, page_size)
 
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_rank = 0
@@ -521,7 +532,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
-        mla_params.fill_params(attn_inputs, page_size)
+        _fill_sparse_mla_params(mla_params, attn_inputs, page_size)
 
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_rank = 0
@@ -785,7 +796,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params = rtp_llm_ops.SparseMlaParams()
-        mla_params.fill_params(attn_inputs, page_size)
+        _fill_sparse_mla_params(mla_params, attn_inputs, page_size)
 
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_rank = tp_rank
@@ -817,7 +828,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs_write.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params_write = rtp_llm_ops.SparseMlaParams()
-        mla_params_write.fill_params(attn_inputs_write, page_size)
+        _fill_sparse_mla_params(mla_params_write, attn_inputs_write, page_size)
 
         kv_cache_ref = LayerKVCache()
         kv_cache_ref.kv_cache_base = torch.empty(
@@ -846,7 +857,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs_ref.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params_ref = rtp_llm_ops.SparseMlaParams()
-        mla_params_ref.fill_params(attn_inputs_ref, page_size)
+        _fill_sparse_mla_params(mla_params_ref, attn_inputs_ref, page_size)
 
         topk_indices = torch.randint(
             0, total_kv_len, (input_tokens, 1, top_k), dtype=torch.int32, device=device
@@ -897,7 +908,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         attn_inputs_prefix.kv_cache_kernel_block_id_device = block_table_device
 
         mla_params_prefix = rtp_llm_ops.SparseMlaParams()
-        mla_params_prefix.fill_params(attn_inputs_prefix, page_size)
+        _fill_sparse_mla_params(mla_params_prefix, attn_inputs_prefix, page_size)
         kv_cache_write_op.forward(
             prefix_ckv, prefix_k_pe, kv_cache_cp, mla_params_prefix
         )

@@ -1,5 +1,4 @@
 import logging
-from collections.abc import Mapping
 from typing import Any, Optional
 
 from torch import nn
@@ -7,10 +6,7 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import (
-    get_attention_inputs_value,
-    select_attention_inputs_for_tag,
-)
+from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
@@ -53,9 +49,11 @@ class GptModelBase(nn.Module):
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
+        self._fmha_cache_tags: Optional[tuple[str, ...]] = None
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
+        self._fmha_cache_tags = ()
         if self.kv_cache is not None:
             num_layers = self.kv_cache.layer_count
             layer0_caches = (
@@ -72,33 +70,44 @@ class GptModelBase(nn.Module):
                 f"layer0_kv_cache_shapes={layer0_shapes}, "
                 f"layer0_scale_groups={layer0_scale_count}, "
             )
+            fmha_group_tags = self._get_fmha_group_tags()
+            if fmha_group_tags is not None:
+                self._fmha_cache_tags = tuple(fmha_group_tags)
+            else:
+                seen: dict[str, None] = {}
+                for local_layer_idx in range(num_layers):
+                    for cache in self.kv_cache.get_layer_cache_groups(local_layer_idx):
+                        seen.setdefault(str(cache.tag), None)
+                self._fmha_cache_tags = tuple(seen)
         return True
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
-        if isinstance(attention_inputs, Mapping):
-            fmha_group_tags = self._get_fmha_group_tags()
-            selected_group_inputs = (
-                attention_inputs.items()
-                if fmha_group_tags is None
-                else (
-                    (tag, select_attention_inputs_for_tag(attention_inputs, tag))
-                    for tag in fmha_group_tags
+        group_attn_inputs = inputs.cache_group_attn_inputs
+        if group_attn_inputs:
+            cache_tags = self._fmha_cache_tags
+            if cache_tags is None:
+                raise RuntimeError(
+                    "FMHA cache tags were not bound during model initialization"
                 )
-            )
-            return {
-                tag: AttnImplFactory.get_fmha_impl(
+            implementations: dict[str, AttentionImpl] = {}
+            for tag in cache_tags:
+                if tag not in group_attn_inputs:
+                    raise RuntimeError(
+                        f"FMHA cache tag {tag!r} has no attention inputs; "
+                        f"available tags: {sorted(group_attn_inputs)}"
+                    )
+                implementations[tag] = AttnImplFactory.get_fmha_impl(
                     self.config,
                     self.parallelism_config,
                     self.weight,
-                    group_inputs,
+                    group_attn_inputs[tag],
                     self.fmha_config,
                     is_cuda_graph,
                 )
-                for tag, group_inputs in selected_group_inputs
-            }
+            return implementations
         return AttnImplFactory.get_fmha_impl(
             self.config,
             self.parallelism_config,

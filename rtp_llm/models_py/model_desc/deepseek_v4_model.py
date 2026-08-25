@@ -18,7 +18,7 @@ a free-function call into one of those two packages.
   - KV pools are the framework BlockPools (``self.kv_cache``). The handle is
     read on every forward and threaded as ``kv_cache=`` to each layer; per-
     request block tables come from the per-tag
-    ``attention_inputs[tag].kv_cache_kernel_block_id_device`` via
+    the selected cache group's ``kv_cache_kernel_block_id_device`` via
     ``kv_cache_utils.build_block_tables``.
 
 Weight loading: `_initialize_impl` reads `self.weight` (a `ModelWeights`
@@ -56,8 +56,8 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -113,7 +113,6 @@ class Dsv4MtpHiddenBufferSpec:
 
 
 class Dsv4SharedRuntimeBufferStore:
-
     _instance: Optional["Dsv4SharedRuntimeBufferStore"] = None
     _mtp_hidden_requested = False
 
@@ -456,6 +455,7 @@ class DeepSeekV4Model(GptModelBase):
         self.v4: Optional[V4Transformer] = None
 
         self._materialized = False
+        self._dsv4_cache_group_bindings: tuple[str, ...] = ()
         self._ckpt_path: str = model_config.ckpt_path
 
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
@@ -598,6 +598,9 @@ class DeepSeekV4Model(GptModelBase):
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
         super().initialize(init_resource)
+        self._dsv4_cache_group_bindings = tuple(
+            self.kv_cache.group_tags if self.kv_cache is not None else ()
+        )
         if self._materialized:
             return True
 
@@ -1070,9 +1073,8 @@ class DeepSeekV4Model(GptModelBase):
         if not is_cuda_graph:
             return None
 
-        # ``attention_inputs`` is a ``{tag: PyAttentionInputs}`` mapping for the
-        # multi-group DSV4 cache; the capture gate only reads group-invariant
-        # fields, so take the primary entry.
+        # The capture gate only reads group-invariant fields from the single
+        # common attention input. Group-local tables remain in ordinal views.
         attn = primary_attention_inputs(inputs.attention_inputs, self.kv_cache)
         # V4 captures CUDA graphs for decode AND target verify — but not
         # plain prefill. Verify carries ``is_prefill==True`` (C++ MtpExecutor
@@ -1132,15 +1134,6 @@ class DeepSeekV4Model(GptModelBase):
         paged_pool_specs = build_paged_pool_specs(
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
         )
-        # Snapshot framework's group ordering — CUDA-graph replay path
-        # inside the impl's ``prepare`` has no live kv_cache, so carry
-        # the list in the config. Position IS the topology group id.
-        group_tags_snapshot = (
-            [str(tag) for tag in (self.kv_cache.group_tags or [])]
-            if self.kv_cache is not None
-            else []
-        )
-
         if self.kv_cache is None:
             raise RuntimeError(
                 "DSV4 prepare_decode_metadata: self.kv_cache is None; "
@@ -1157,13 +1150,13 @@ class DeepSeekV4Model(GptModelBase):
             ],
             index_topk=int(self._v4_args.index_topk),
             paged_pool_specs=paged_pool_specs,
-            group_tags=group_tags_snapshot,
+            group_bindings=self._dsv4_cache_group_bindings,
         )
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
         impl = _DecodeFmhaImpl(
             cfg,
             device=device,
-            attn_inputs=attn,
+            attn_inputs=inputs,
         )
         # Phase F: pool views resolved on demand in Attention — no
         # per-layer descriptor cache to stash on metadata.
@@ -1281,6 +1274,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.kv_cache,
                 self._v4_args,
                 inputs,
+                self._dsv4_cache_group_bindings,
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
             )
@@ -1290,6 +1284,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.kv_cache,
                 self.parallelism_config,
                 inputs,
+                self._dsv4_cache_group_bindings,
                 prepare_hidden_fn=prep_prefill,
             )
         else:
@@ -1298,6 +1293,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.kv_cache,
                 self._v4_args,
                 inputs,
+                self._dsv4_cache_group_bindings,
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
             )

@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
@@ -21,7 +22,9 @@ public:
                       int64_t                  kernel_tokens_per_block,
                       std::vector<int>         prefill_capture_seq_lens,
                       int64_t                  hidden_size,
-                      std::vector<std::string> group_tags) {
+                      std::vector<std::string> group_tags,
+                      std::vector<size_t>      pool_widths,
+                      std::vector<size_t>      kernel_widths) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = true;
@@ -35,7 +38,20 @@ public:
         params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
-        params.kv_cache_group_tags          = std::move(group_tags);
+        auto tags                           = sortedCacheGroupTags(group_tags, "CUDA graph test");
+        if (pool_widths.empty()) {
+            pool_widths.assign(tags.size(),
+                               static_cast<size_t>((max_seq_len + tokens_per_block - 1) / tokens_per_block));
+        }
+        if (kernel_widths.empty()) {
+            kernel_widths.assign(
+                tags.size(),
+                static_cast<size_t>((max_seq_len + kernel_tokens_per_block - 1) / kernel_tokens_per_block));
+        }
+        for (size_t ordinal = 0; ordinal < tags.size(); ++ordinal) {
+            params.kv_cache_block_table_groups.push_back(
+                {tags[ordinal], pool_widths.at(ordinal), kernel_widths.at(ordinal)});
+        }
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
@@ -48,7 +64,9 @@ public:
                      std::vector<int>         decode_capture_batch_sizes,
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
-                     int64_t                  num_tokens_per_bs) {
+                     int64_t                  num_tokens_per_bs,
+                     std::vector<size_t>      pool_widths,
+                     std::vector<size_t>      kernel_widths) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -62,8 +80,21 @@ public:
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.max_context_batch_size       = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
-        params.kv_cache_group_tags          = std::move(group_tags);
-        params.is_target_verify             = is_target_verify;
+        auto tags                           = sortedCacheGroupTags(group_tags, "CUDA graph test");
+        if (pool_widths.empty()) {
+            pool_widths.assign(tags.size(),
+                               static_cast<size_t>((max_seq_len + tokens_per_block - 1) / tokens_per_block));
+        }
+        if (kernel_widths.empty()) {
+            kernel_widths.assign(
+                tags.size(),
+                static_cast<size_t>((max_seq_len + kernel_tokens_per_block - 1) / kernel_tokens_per_block));
+        }
+        for (size_t ordinal = 0; ordinal < tags.size(); ++ordinal) {
+            params.kv_cache_block_table_groups.push_back(
+                {tags[ordinal], pool_widths.at(ordinal), kernel_widths.at(ordinal)});
+        }
+        params.is_target_verify = is_target_verify;
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -78,8 +109,28 @@ public:
         // read-only, so reproduce that input-building step in the test wrapper.
         inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
-        refreshTaggedAttentionInputs(inputs);
         return runner_->forward(inputs, state_);
+    }
+
+    std::vector<torch::Tensor> updateKernelTables(torch_ext::PyModelInputs& inputs) {
+        runner_->updateKVCacheKernelBlockTableValues(inputs, state_);
+        return runner_->kernelValidLengthsForTest(state_);
+    }
+
+    std::vector<int64_t> packedCachePointers() const {
+        return runner_->packedCachePointersForTest(state_);
+    }
+
+    std::vector<int64_t> packedCacheNumel() const {
+        return runner_->packedCacheNumelForTest(state_);
+    }
+
+    std::vector<std::vector<int64_t>> packedCacheDescriptors() const {
+        return runner_->packedCacheDescriptorsForTest(state_);
+    }
+
+    std::vector<torch::Tensor> capturedKernelTables() const {
+        return runner_->kernelTablesForTest(state_);
     }
 
     int getCurrentRealGraphSize() {
@@ -117,7 +168,9 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags") = std::vector<std::string>{})
+             py::arg("group_tags")    = std::vector<std::string>{},
+             py::arg("pool_widths")   = std::vector<size_t>{},
+             py::arg("kernel_widths") = std::vector<size_t>{})
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -128,8 +181,15 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("decode_capture_batch_sizes"),
              py::arg("group_tags")        = std::vector<std::string>{},
              py::arg("is_target_verify")  = false,
-             py::arg("num_tokens_per_bs") = 1)
+             py::arg("num_tokens_per_bs") = 1,
+             py::arg("pool_widths")       = std::vector<size_t>{},
+             py::arg("kernel_widths")     = std::vector<size_t>{})
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
+        .def("update_kernel_tables", &CudaGraphTestRunner::updateKernelTables)
+        .def("packed_cache_pointers", &CudaGraphTestRunner::packedCachePointers)
+        .def("packed_cache_numel", &CudaGraphTestRunner::packedCacheNumel)
+        .def("packed_cache_descriptors", &CudaGraphTestRunner::packedCacheDescriptors)
+        .def("captured_kernel_tables", &CudaGraphTestRunner::capturedKernelTables)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }

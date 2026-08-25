@@ -117,7 +117,9 @@ cc_test(
     name = "decode_rpc_server_test",
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+    ],
     env = {},
     exec_properties = {'gpu':'H20'},
 )

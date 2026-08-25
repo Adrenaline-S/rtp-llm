@@ -1,6 +1,16 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+# Staged for the Phase 2 terminal block-expression source gate.
+filegroup(
+    name = "cache_block_expression_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
+)
+
 # Sample infos - model sampling data structures
 cc_library(
     name = "sample_infos",
@@ -157,14 +167,37 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_block_table_packing",
+    hdrs = ["CacheBlockTablePacking.h"],
+    srcs = ["CacheBlockTablePacking.cc"],
+    deps = [
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
-    ], exclude = ["ModelInputsLogger.h"]),
+    ], exclude = [
+        "CacheBlockTablePacking.h",
+        "CacheGroupAttentionInputs.h",
+        "PackedBlockTableStorage.h",
+        "ModelInputsLogger.h",
+    ]),
     srcs = glob([
         "*.cc",
-    ], exclude = ["ModelInputsLogger.cc"]),
+    ], exclude = [
+        "CacheBlockTablePacking.cc",
+        "CacheGroupAttentionInputs.cc",
+        "ModelInputsLogger.cc",
+    ]),
     deps = [
+        ":cache_block_table_packing",
+        ":cache_group_attention_inputs",
         ":model_inputs_logger",
         ":sample_infos",
         ":logits_processor",
@@ -175,6 +208,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:tensor_holder",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/cache:block_expression",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/metrics",
@@ -234,5 +268,29 @@ cc_library(
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/cache:cache_types",
     ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cache_group_attention_inputs",
+    srcs = ["CacheGroupAttentionInputs.cc"],
+    hdrs = [
+        "CacheGroupAttentionInputs.h",
+        "PackedBlockTableStorage.h",
+    ],
+    copts = copts(),
+    deps = [
+        ":cache_block_table_packing",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:block_expression",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+    ] + select({
+        "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )

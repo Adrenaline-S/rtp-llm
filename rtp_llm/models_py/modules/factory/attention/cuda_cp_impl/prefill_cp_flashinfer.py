@@ -136,7 +136,12 @@ class CPFlashInferImpl(FMHAImplBase):
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
 
         method = parallelism_config.prefill_cp_config.method
-        self.fmha_impl = impl_map[method](attn_configs, attn_inputs, parallelism_config)
+        self.fmha_impl = impl_map[method](
+            attn_configs,
+            attn_inputs,
+            parallelism_config,
+            attn_inputs.kv_cache_kernel_block_id,
+        )
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 
         # Store input info

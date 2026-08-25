@@ -12,6 +12,9 @@ from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_utils import (
 )
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB,
+)
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
 
 
@@ -46,6 +49,20 @@ class TestCudaGraphPrefill(unittest.TestCase):
             init_kv_cache=False, is_casual=False
         )
         model = build_result.model
+        self.graph_workspace_records: list[tuple[int, int]] = []
+        original_prepare_fmha_impl = model.prepare_fmha_impl
+
+        def tracked_prepare_fmha_impl(inputs, is_cuda_graph: bool = False):
+            impl = original_prepare_fmha_impl(inputs, is_cuda_graph)
+            if is_cuda_graph:
+                workspace = inputs.attention_inputs.cuda_graph_shared_workspace
+                self.assertIsNotNone(workspace)
+                self.graph_workspace_records.append(
+                    (workspace.data_ptr(), workspace.numel())
+                )
+            return impl
+
+        model.prepare_fmha_impl = tracked_prepare_fmha_impl
         self.model_config = build_result.model_config
         self.compute_dtype = build_result.compute_dtype
         self.kernel_tokens_per_block = int(
@@ -183,6 +200,18 @@ class TestCudaGraphPrefill(unittest.TestCase):
         attention_inputs.is_prefill = True
         attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
         attention_inputs.is_s_padded = use_max_padded_mode
+        attention_inputs.kv_cache_block_id = torch.empty(
+            (batch_size, 0), dtype=torch.int32
+        ).pin_memory()
+        attention_inputs.kv_cache_block_id_device = torch.empty(
+            (batch_size, 0), dtype=torch.int32, device="cuda"
+        )
+        attention_inputs.kv_cache_kernel_block_id = torch.empty(
+            (batch_size, 0), dtype=torch.int32
+        ).pin_memory()
+        attention_inputs.kv_cache_kernel_block_id_device = torch.empty(
+            (batch_size, 0), dtype=torch.int32, device="cuda"
+        )
 
         cu_len = batch_size + 1
         cu_seqlens = torch.zeros(cu_len, dtype=torch.int32, device="cuda")
@@ -218,34 +247,6 @@ class TestCudaGraphPrefill(unittest.TestCase):
         outputs1 = self.normal_model.forward(inputs1)
         torch.cuda.synchronize()
 
-        inputs2 = self.build_inputs(
-            batch_size, max_seq_len, kernel_seq_size_per_block, True
-        )
-        outputs2 = self.normal_model.forward(inputs2)
-        torch.cuda.synchronize()
-
-        print(
-            f"outputs1.shape: {outputs1.hidden_states.shape}, outputs2.shape: {outputs2.hidden_states.shape}"
-        )
-
-        valid_outputs2 = []
-        for i in range(batch_size):
-            batch_start = i * max_seq_len
-            actual_length = min(max_seq_len, 10 * (i + 1))
-            valid_outputs2.append(
-                outputs2.hidden_states[batch_start : batch_start + actual_length]
-            )
-        valid_outputs2_tensor = torch.cat(valid_outputs2, dim=0)
-        print(f"valid_outputs2.shape: {valid_outputs2_tensor.shape}")
-        close_mask = torch.isclose(
-            outputs1.hidden_states, valid_outputs2_tensor, rtol=1e-2, atol=1e-2
-        )
-        padded_pass_ratio = close_mask.float().mean().item()
-        print(
-            f"padded vs non-padded pass ratio: {padded_pass_ratio*100:.2f}%", flush=True
-        )
-        print(f"trt padded mode success for batch: {batch_size}!!", flush=True)
-
         inputs3 = self.build_inputs(
             batch_size, max_seq_len, kernel_seq_size_per_block, False
         )
@@ -268,13 +269,35 @@ class TestCudaGraphPrefill(unittest.TestCase):
             outputs1.hidden_states, outputs3.hidden_states, rtol=1e-2, atol=1e-2
         )
         pass_ratio = close_mask.float().mean().item()
-        print(f"normal vs cuda_graph pass ratio: {pass_ratio*100:.2f}%", flush=True)
+        print(f"normal vs cuda_graph pass ratio: {pass_ratio * 100:.2f}%", flush=True)
 
         assert (
             pass_ratio >= 0.999
-        ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.99%"
+        ), f"Only {pass_ratio * 100:.2f}% elements pass, expected >= 99.99%"
 
     def test_batch_prefill(self):
+        self.assertEqual(DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB, 128)
+        # One runner captures 16 sequence-length keys. Their graph-retained
+        # attention objects must alias one scoped workspace instead of each
+        # retaining a globally enlarged buffer.
+        self.assertGreaterEqual(
+            len(self.graph_workspace_records), len(self.prefill_capture_seq_lens)
+        )
+        self.assertEqual(
+            len({pointer for pointer, _ in self.graph_workspace_records}), 1
+        )
+        self.assertEqual(
+            {size for _, size in self.graph_workspace_records}, {144 * 1024 * 1024}
+        )
+        self.assertEqual(
+            sum(
+                {
+                    pointer: size for pointer, size in self.graph_workspace_records
+                }.values()
+            ),
+            144 * 1024 * 1024,
+        )
+
         # Batch 6 has 210 actual tokens and replays the 278-token capture bucket
         batch_range = [1, 2, 4, 5, 6, 8]
         for bs in batch_range:

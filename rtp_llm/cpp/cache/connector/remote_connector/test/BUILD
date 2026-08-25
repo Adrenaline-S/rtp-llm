@@ -5,6 +5,11 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+remote_test_copts = test_copts + select({
+    "//:using_remote_kv_cache": ["-DUSE_REMOTE_KV_CACHE=1"],
+    "//conditions:default": [],
+})
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -85,12 +90,14 @@ cc_test(
     srcs = [
         "RemoteConnectorMockOnlyFullTest.cc",
     ],
-    copts = test_copts,
+    copts = remote_test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
     target_compatible_with = cuda13_target_compatibility,
     deps = test_deps + [
         ":remote_connector_mock_base",
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/connector:connector",
     ],
 )
 
@@ -129,4 +136,15 @@ cc_library(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test, the terminal
+# source gate that rejects positional cache group routing in this package.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
 )

@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
@@ -7,14 +8,17 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_layer_caches_for_tags,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
     Embedding,
     FakeBalanceExpert,
-    FMHAImplBase,
     FusedMoeFactory,
     GroupTopK,
     LinearFactory,
@@ -28,7 +32,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    LayerKVCache,
+    PyModelInitResources,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
@@ -342,8 +351,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        fmha_impl: FMHAImplBase,
-        kv_cache: Optional[LayerKVCache] = None,
+        fmha_impl: Any,
+        kv_cache: Optional[LayerKVCache] | Mapping[str, LayerKVCache] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -412,6 +421,37 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._sparse_layer_kv_caches: Optional[tuple[dict[str, LayerKVCache], ...]] = (
+            None
+        )
+
+    def _uses_sparse_mla(self) -> bool:
+        return bool(
+            self.config.attn_config.use_mla and self.config.attn_config.is_sparse
+        )
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self._uses_sparse_mla():
+            return ["default", "indexer_kv"]
+        return None
+
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        initialized = super().initialize(init_resource)
+        if self._uses_sparse_mla():
+            raw_tags = self._get_fmha_group_tags() or []
+            required_tags = {"default", "indexer_kv"}
+            if len(raw_tags) != len(required_tags) or set(raw_tags) != required_tags:
+                raise RuntimeError(
+                    "sparse MLA requires exactly attention input tags "
+                    f"{sorted(required_tags)}; available tags={raw_tags}"
+                )
+            self._sparse_layer_kv_caches = tuple(
+                get_layer_caches_for_tags(
+                    self.kv_cache, layer_idx, ("default", "indexer_kv")
+                )
+                for layer_idx in range(self.layer_num)
+            )
+        return initialized
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -421,13 +461,40 @@ class GenericMoeModel(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
+        is_sparse_mla = self._uses_sparse_mla()
+        if is_sparse_mla:
+            if not isinstance(fmha_impl, Mapping):
+                raise RuntimeError("sparse MLA requires tag-keyed FMHA implementations")
+            if self._sparse_layer_kv_caches is None:
+                raise RuntimeError(
+                    "sparse MLA cache bindings were not resolved during initialization"
+                )
+            try:
+                sparse_fmha_impl = {
+                    "default": fmha_impl["default"],
+                    "indexer_kv": fmha_impl["indexer_kv"],
+                }
+            except KeyError as error:
+                raise RuntimeError(
+                    "sparse MLA FMHA implementation is missing for tag "
+                    f"{error.args[0]!r}"
+                ) from error
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            if is_sparse_mla:
+                layer_fmha_impl = sparse_fmha_impl
+                layer_kv_cache = self._sparse_layer_kv_caches[i]
+            else:
+                layer_fmha_impl = select_fmha_impl_for_layer(
+                    fmha_impl, self.kv_cache, i
+                )
+                layer_kv_cache = (
+                    self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                )
             output = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_kv_cache,
             )
             hidden_states = output.hidden_states
             residual = output.residual

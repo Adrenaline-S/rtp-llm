@@ -7,7 +7,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
     get_group_tags_for_layers,
-    select_attention_inputs_for_layer,
+    select_cache_group_attn_inputs_for_layer,
     select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -113,7 +113,7 @@ class Qwen3NextMTPModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers):
-            layer_attention_inputs = select_attention_inputs_for_layer(
+            layer_group_attn_inputs = select_cache_group_attn_inputs_for_layer(
                 inputs, self.kv_cache, i
             )
             layer_fmha_impl = (
@@ -126,7 +126,8 @@ class Qwen3NextMTPModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=layer_attention_inputs,
+                attention_inputs=inputs.attention_inputs,
+                group_view=layer_group_attn_inputs,
                 attn_meta=Qwen3NextMetadata(),
             )
         hidden_states, residual = self.norm(hidden_states, residual)

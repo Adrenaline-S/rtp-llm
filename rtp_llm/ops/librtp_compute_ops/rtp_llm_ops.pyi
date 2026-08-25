@@ -148,7 +148,7 @@ class SparseMlaParams(FlashInferMlaAttnParams):
     schedule_metadata: torch.Tensor
     def __init__(self) -> None:
         ...
-    def fill_params(self, attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
+    def fill_params(self, input_lengths: torch.Tensor, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, kv_cache_kernel_block_id: torch.Tensor, is_prefill: bool, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
         ...
     @property
     def expanded_seq_lens(self) -> torch.Tensor:
@@ -202,11 +202,11 @@ class XQAAttnOp:
         ...
     def forward(self, input: torch.Tensor, kv_cache: librtp_compute_ops.KVCache | None, params: XQAParams) -> torch.Tensor:
         ...
-    def prepare(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> librtp_compute_ops.ParamsBase:
+    def prepare(self, sequence_lengths: torch.Tensor, kv_cache_kernel_block_id_device: torch.Tensor) -> librtp_compute_ops.ParamsBase:
         ...
-    def support(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> bool:
+    def support(self) -> bool:
         ...
-    def update(self, params: XQAParams, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> None:
+    def update(self, params: XQAParams, sequence_lengths: torch.Tensor, kv_cache_kernel_block_id_device: torch.Tensor) -> None:
         ...
 
     def update_kv_cache_offset(self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor) -> None:
@@ -353,7 +353,7 @@ def per_token_quant_fp8(input: torch.Tensor, output_q: torch.Tensor, output_s: t
     ...
 def cublas_gemm_bf16_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """BF16 x BF16 GEMM with FP32 accumulation and FP32 output."""
-def prepare_sparse_mla_params(attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> SparseMlaParams:
+def prepare_sparse_mla_params(input_lengths: torch.Tensor, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, kv_cache_kernel_block_id: torch.Tensor, is_prefill: bool, seq_size_per_block: int) -> SparseMlaParams:
     ...
 def register_buffer_to_communicator(comm_ptr: int, buffer_ptrs: list[int]) -> int:
     """

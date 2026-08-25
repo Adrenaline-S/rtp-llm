@@ -14,7 +14,7 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
-        "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager_hdr",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
@@ -23,4 +23,15 @@ cc_library(
     ] + torch_deps() + no_block_copy_link_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
+)
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test, the terminal
+# source gate that rejects positional cache group routing in this package.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
 )

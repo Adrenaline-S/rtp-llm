@@ -58,7 +58,11 @@ class PrefillImplBench(ABC):
             raise UnsupportedImpl("support()==False")
         if not self.impl.support_parallelism_config(parallelism):
             raise UnsupportedImpl("support_parallelism_config()==False")
-        return self.impl(configs, case_data.attn_inputs, parallelism)
+        return self.impl(
+            configs,
+            case_data.attn_inputs,
+            parallelism,
+        )
 
     @staticmethod
     def tolerance(case: BenchCase) -> Tolerance:

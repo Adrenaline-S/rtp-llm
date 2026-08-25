@@ -71,7 +71,16 @@ class _PrefillPagedCudaGraphTestMixin:
             nb = math.ceil(s / PAGE_SIZE)
             block_ids[i, :nb] = torch.arange(offset, offset + nb)
             offset += nb
+        block_ids_device = block_ids.to("cuda")
+        inp.kv_cache_block_id = block_ids
+        inp.kv_cache_block_id_device = block_ids_device
         inp.kv_cache_kernel_block_id = block_ids
+        inp.kv_cache_kernel_block_id_device = block_ids_device
+        valid_lengths = torch.tensor(
+            [math.ceil(s / PAGE_SIZE) for s in seq_lengths], dtype=torch.int32
+        )
+        inp.pool_valid_lengths = valid_lengths
+        inp.kernel_valid_lengths = valid_lengths.clone()
 
         if with_copy_params:
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)
@@ -161,7 +170,7 @@ class _PrefillPagedCudaGraphTestMixin:
         cg_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, cg_init)
         cg_op.prepare(cg_init)
         cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
-        cg_op.prepare(cg_replay, forbid_realloc=True)
+        cg_op.prepare(cg_replay)
         cg_out = cg_op.forward(q, kv_cache)
 
         if verify_cast_buffer_reuse:

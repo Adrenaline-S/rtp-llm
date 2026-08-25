@@ -12,6 +12,7 @@
 #include "autil/ThreadPool.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
@@ -21,7 +22,6 @@
 
 namespace rtp_llm {
 
-class KVCacheAllocator;
 class RemoteAsyncMatchContext;
 class RemoteConnectorAsyncContext;
 
@@ -34,10 +34,12 @@ public:
                     const SpeculativeExecutionConfig&         sp_config,
                     void*                                     register_buffer_addr,
                     size_t                                    register_buffer_size,
-                    std::shared_ptr<KVCacheAllocator>         allocator,
+                    CoordinatorCacheManagerPtr                coordinator_cache_manager,
                     const kmonitor::MetricsReporterPtr        metrics_reporter = nullptr,
                     const std::map<std::string, std::string>& lora_info_map    = {});
     ~RemoteConnector() override;
+
+    static void validateConfig(const CacheConfig& cache_config);
 
     bool init();
 

@@ -24,9 +24,11 @@ cc_library(
     ],
     deps = [
         ":layer_block_converter",
+        "//rtp_llm/cpp/cache:block_expression",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@havenask//aios/autil:thread",
     ],
@@ -135,4 +137,15 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/p2p/transfer:backend_factory",
     ],
     visibility = ["//visibility:public"],
+)
+
+# Staged for //rtp_llm/cpp/cache/test:cache_tag_routing_source_test, the terminal
+# source gate that rejects positional cache group routing in this package.
+filegroup(
+    name = "cache_tag_routing_scan_srcs",
+    srcs = glob([
+        "*.h",
+        "*.cc",
+    ]),
+    visibility = ["//rtp_llm/cpp/cache/test:__pkg__"],
 )

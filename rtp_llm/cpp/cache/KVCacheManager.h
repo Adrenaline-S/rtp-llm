@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -45,6 +45,9 @@ public:
 
     const CacheConfig& cacheConfig() const;
     const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
+    int64_t            memoryCacheSyncTimeoutMs() const {
+        return kv_cache_config_.memory_cache_sync_timeout_ms;
+    }
 
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);
@@ -65,7 +68,6 @@ public:
     // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
@@ -79,11 +81,7 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
                   convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int group_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
+    BlockAddrInfo convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
     std::vector<BlockInfo> convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const;
     std::vector<BlockInfo> convertIndexToBufferByTag(
         int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
@@ -173,8 +171,8 @@ private:
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
 
     // 成员变量
-    CacheConfig         config_;
-    KVCacheAllocatorPtr allocator_;
+    CacheConfig                config_;
+    CoordinatorCacheManagerPtr coordinator_cache_manager_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;
