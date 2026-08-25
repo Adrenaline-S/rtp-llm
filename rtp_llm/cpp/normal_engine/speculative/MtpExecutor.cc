@@ -1710,18 +1710,22 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         }
 
         if (tp_rank_ == 0) {
-            auto snapshot = batch_stream_processor_
-                                ->gatherKvCacheKernelBlockId(stream_groups, buffer_holder_, requires_full_prepare)
-                                .value();
+            auto snapshot =
+                batch_stream_processor_
+                    // Stable geometry can still backfill an existing NULL slot
+                    // with a new independent-pool ID, so values always include
+                    // both pool and kernel tables.
+                    ->gatherKvCacheKernelBlockId(stream_groups, buffer_holder_, /*include_pool_tables=*/true)
+                    .value();
             RTP_LLM_CHECK_WITH_INFO(
                 CacheBlockTablePackingSignature::fromPlan(refreshed_plan).matches(snapshot.plan),
                 "MTP gathered block-table snapshot does not match the locally refreshed packing plan");
             if (requires_full_prepare) {
-                model_input.kv_cache_block_table_plan   = snapshot.plan;
-                model_input.kv_cache_block_id           = std::move(snapshot.pool_host);
-                model_input.kv_cache_block_id_device    = std::move(snapshot.pool_device);
-                model_input.kv_cache_pool_valid_lengths = std::move(snapshot.pool_valid_lengths);
+                model_input.kv_cache_block_table_plan = snapshot.plan;
             }
+            model_input.kv_cache_block_id               = std::move(snapshot.pool_host);
+            model_input.kv_cache_block_id_device        = std::move(snapshot.pool_device);
+            model_input.kv_cache_pool_valid_lengths     = std::move(snapshot.pool_valid_lengths);
             model_input.kv_cache_kernel_block_id        = std::move(snapshot.kernel_host);
             model_input.kv_cache_kernel_block_id_device = std::move(snapshot.kernel_device);
             model_input.kv_cache_kernel_valid_lengths   = std::move(snapshot.kernel_valid_lengths);
@@ -1748,28 +1752,23 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         }
 
         if (parallelism_config_.tp_size > 1) {
-            torch::Tensor packed_pool_valid_lengths;
-            if (requires_full_prepare) {
-                execBroadcast({{model_input.kv_cache_block_id_device}, 0});
-                // The TP wire helper is geometry-generic; pool and kernel
-                // valid lengths share the same [group, batch] representation.
-                packed_pool_valid_lengths = packKernelValidLengthsForTp(model_input.kv_cache_pool_valid_lengths,
-                                                                        model_input.kv_cache_block_table_plan);
-                execBroadcastCpu({{packed_pool_valid_lengths}, 0});
-            }
+            execBroadcast({{model_input.kv_cache_block_id_device}, 0});
+            // The TP wire helper is geometry-generic; pool and kernel valid
+            // lengths share the same [group, batch] representation.
+            auto packed_pool_valid_lengths = packKernelValidLengthsForTp(model_input.kv_cache_pool_valid_lengths,
+                                                                         model_input.kv_cache_block_table_plan);
+            execBroadcastCpu({{packed_pool_valid_lengths}, 0});
             execBroadcast({{model_input.kv_cache_kernel_block_id_device}, 0});
             auto packed_kernel_valid_lengths = packKernelValidLengthsForTp(model_input.kv_cache_kernel_valid_lengths,
                                                                            model_input.kv_cache_block_table_plan);
             execBroadcastCpu({{packed_kernel_valid_lengths}, 0});
             if (tp_rank_ != 0) {
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(kv_cache_kernel_block_id_to_host)");
-                if (requires_full_prepare) {
-                    model_input.kv_cache_block_id.copy_(model_input.kv_cache_block_id_device,
-                                                        /*non_blocking=*/false);
-                    unpackKernelValidLengthsFromTp(packed_pool_valid_lengths,
-                                                   model_input.kv_cache_pool_valid_lengths,
-                                                   model_input.kv_cache_block_table_plan);
-                }
+                model_input.kv_cache_block_id.copy_(model_input.kv_cache_block_id_device,
+                                                    /*non_blocking=*/false);
+                unpackKernelValidLengthsFromTp(packed_pool_valid_lengths,
+                                               model_input.kv_cache_pool_valid_lengths,
+                                               model_input.kv_cache_block_table_plan);
                 RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_kernel_block_id.numel()
                                             == model_input.kv_cache_kernel_block_id_device.numel(),
                                         "MTP host/device kernel block-table sizes diverged after TP broadcast");
@@ -1782,17 +1781,17 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         }
 
         // Root receives both replicas and valid row lengths from the gatherer.
-        // Other TP ranks refresh their pinned host table from the broadcast
-        // device replica and receive every per-group valid-length vector via
-        // the CPU broadcast, so planners observe one consistent snapshot.
+        // Other TP ranks refresh both pinned host tables from the broadcast
+        // device replicas and receive every per-group valid-length vector via
+        // CPU broadcast, so planners observe one consistent snapshot.
 
         if (requires_full_prepare) {
             // Geometry changed (usually a row grew by one physical block):
             // rebuild the model-owned packed views before the next forward.
             model_->prepareAttentionInputs(model_input);
         } else {
-            // Structurally identical: refresh only kernel values/lengths while
-            // retaining all four packed backings and their group views.
+            // Structurally identical: refresh pool/kernel values and lengths
+            // while retaining all four packed backings and their group views.
             model_->updateKVCacheKernelBlockTableValues(model_input);
         }
 

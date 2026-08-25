@@ -170,37 +170,53 @@ size_t normalizeKernelTailFill(const std::map<std::string, torch_ext::PyAttentio
 #endif
 }
 
-void refreshPackedBlockTableValues(const torch::Tensor&                                 kernel_host,
+void refreshPackedBlockTableValues(const torch::Tensor&                                 pool_host,
+                                   const torch::Tensor&                                 pool_device,
+                                   const std::vector<torch::Tensor>&                    pool_valid_lengths,
+                                   const torch::Tensor&                                 kernel_host,
                                    const torch::Tensor&                                 kernel_device,
                                    const std::vector<torch::Tensor>&                    kernel_valid_lengths,
                                    PackedBlockTableStorage&                             storage,
                                    const std::vector<CacheGroupBinding>&                bindings,
                                    std::map<std::string, torch_ext::PyAttentionInputs>& group_inputs) {
     RTP_LLM_CHECK_WITH_INFO(storage.defined(), "value-only update requires a fully prepared packed snapshot");
+    RTP_LLM_CHECK_WITH_INFO(storage.pool_host.sizes() == pool_host.sizes(),
+                            "value-only update got a pool backing of a different shape; full prepare required");
+    RTP_LLM_CHECK_WITH_INFO(storage.pool_device.sizes() == pool_device.sizes(),
+                            "value-only update got a device pool backing of a different shape");
     RTP_LLM_CHECK_WITH_INFO(storage.kernel_host.sizes() == kernel_host.sizes(),
                             "value-only update got a kernel backing of a different shape; full prepare required");
     RTP_LLM_CHECK_WITH_INFO(storage.kernel_device.sizes() == kernel_device.sizes(),
                             "value-only update got a device kernel backing of a different shape");
+    RTP_LLM_CHECK_WITH_INFO(pool_valid_lengths.size() == bindings.size(),
+                            "value-only update got %zu pool valid-length tensors for %zu groups",
+                            pool_valid_lengths.size(),
+                            bindings.size());
     RTP_LLM_CHECK_WITH_INFO(kernel_valid_lengths.size() == bindings.size(),
-                            "value-only update got %zu valid-length tensors for %zu groups",
+                            "value-only update got %zu kernel valid-length tensors for %zu groups",
                             kernel_valid_lengths.size(),
                             bindings.size());
 
+    storage.pool_host.copy_(pool_host, /*non_blocking=*/false);
     storage.kernel_host.copy_(kernel_host, /*non_blocking=*/false);
-    storage.kernel_device.copy_(kernel_device, /*non_blocking=*/true);
+    storage.pool_device.copy_(storage.pool_host, /*non_blocking=*/true);
+    storage.kernel_device.copy_(storage.kernel_host, /*non_blocking=*/true);
 
     for (size_t idx = 0; idx < bindings.size(); ++idx) {
-        const auto& source = kernel_valid_lengths[idx];
-        RTP_LLM_CHECK_WITH_INFO(source.defined(), "valid lengths for group %zu are undefined", idx);
         const auto it = group_inputs.find(bindings[idx].tag);
         RTP_LLM_CHECK_WITH_INFO(it != group_inputs.end(),
                                 "value-only update has no attention inputs for tag=%s",
                                 bindings[idx].tag.c_str());
-        auto& target = it->second.kernel_valid_lengths;
-        if (!target.defined() || target.sizes() != source.sizes()) {
-            target = torch::empty(source.sizes(), source.options());
-        }
-        target.copy_(source, /*non_blocking=*/false);
+        const auto copy_lengths = [idx](const torch::Tensor& source, torch::Tensor& target, const char* kind) {
+            RTP_LLM_CHECK_WITH_INFO(source.defined(), "%s valid lengths for group %zu are undefined", kind, idx);
+            RTP_LLM_CHECK_WITH_INFO(target.defined() && target.sizes() == source.sizes(),
+                                    "%s valid-length geometry changed for group %zu; full prepare required",
+                                    kind,
+                                    idx);
+            target.copy_(source, /*non_blocking=*/false);
+        };
+        copy_lengths(pool_valid_lengths[idx], it->second.pool_valid_lengths, "pool");
+        copy_lengths(kernel_valid_lengths[idx], it->second.kernel_valid_lengths, "kernel");
     }
 }
 

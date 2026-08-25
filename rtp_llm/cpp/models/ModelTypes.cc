@@ -585,9 +585,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
-    // Host block tables are authoritative on every rank. In particular, rank
-    // 0 may enter TP sync with device replicas from the preceding MTP step.
-    refreshKVCacheBlockTableDeviceReplicas(inputs);
+    if (!is_root) {
+        // Non-root reconstructs device replicas from the host tables received
+        // above. Rank 0's PyWrappedModel materializes its address-stable device
+        // backing directly from the same authoritative host tables.
+        refreshKVCacheBlockTableDeviceReplicas(inputs);
+    }
 }
 
 }  // namespace rtp_llm

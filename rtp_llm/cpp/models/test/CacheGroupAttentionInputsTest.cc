@@ -217,19 +217,36 @@ TEST(CacheGroupAttentionInputsTest, RefreshKeepsDataPtrAndUpdatesValues) {
     auto                           group_inputs = bindCacheGroupAttentionInputs(base, plan, storage, bindings);
 
     const auto i32                                  = torch::TensorOptions().dtype(torch::kInt32);
+    group_inputs.at("default").pool_valid_lengths   = torch::full({4}, 8, i32);
+    group_inputs.at("linear").pool_valid_lengths    = torch::full({4}, 2, i32);
     group_inputs.at("default").kernel_valid_lengths = torch::full({4}, 16, i32);
     group_inputs.at("linear").kernel_valid_lengths  = torch::full({4}, 2, i32);
 
     const auto* before = group_inputs.at("linear").kv_cache_kernel_block_id.data_ptr<int32_t>();
 
-    auto                       fresh_host   = torch::full({72}, 3, i32);
-    auto                       fresh_device = torch::full({72}, 3, i32);
-    std::vector<torch::Tensor> fresh_lengths{torch::full({4}, 16, i32), torch::full({4}, 2, i32)};
-    refreshPackedBlockTableValues(fresh_host, fresh_device, fresh_lengths, storage, bindings, group_inputs);
+    auto                       fresh_pool_host     = torch::full({40}, 4, i32);
+    auto                       fresh_pool_device   = torch::full({40}, 94, i32);
+    auto                       fresh_kernel_host   = torch::full({72}, 3, i32);
+    auto                       fresh_kernel_device = torch::full({72}, 93, i32);
+    std::vector<torch::Tensor> fresh_pool_lengths{torch::full({4}, 8, i32), torch::full({4}, 2, i32)};
+    std::vector<torch::Tensor> fresh_kernel_lengths{torch::full({4}, 16, i32), torch::full({4}, 2, i32)};
+    refreshPackedBlockTableValues(fresh_pool_host,
+                                  fresh_pool_device,
+                                  fresh_pool_lengths,
+                                  fresh_kernel_host,
+                                  fresh_kernel_device,
+                                  fresh_kernel_lengths,
+                                  storage,
+                                  bindings,
+                                  group_inputs);
 
     const auto* after = group_inputs.at("linear").kv_cache_kernel_block_id.data_ptr<int32_t>();
     EXPECT_EQ(before, after);
+    EXPECT_EQ(group_inputs.at("linear").kv_cache_block_id.index({0, 0}).item<int32_t>(), 4);
+    EXPECT_EQ(group_inputs.at("linear").kv_cache_block_id_device.index({0, 0}).item<int32_t>(), 4);
+    EXPECT_EQ(group_inputs.at("default").pool_valid_lengths.index({0}).item<int32_t>(), 8);
     EXPECT_EQ(group_inputs.at("linear").kv_cache_kernel_block_id.index({0, 0}).item<int32_t>(), 3);
+    EXPECT_EQ(group_inputs.at("linear").kv_cache_kernel_block_id_device.index({0, 0}).item<int32_t>(), 3);
     EXPECT_EQ(group_inputs.at("default").kv_cache_kernel_block_id.index({0, 0}).item<int32_t>(), 3);
 }
 
@@ -242,12 +259,16 @@ TEST(CacheGroupAttentionInputsTest, RefreshRejectsShapeChange) {
     auto                           group_inputs = bindCacheGroupAttentionInputs(base, plan, storage, bindings);
 
     const auto                 i32          = torch::TensorOptions().dtype(torch::kInt32);
+    auto                       pool         = torch::full({40}, 4, i32);
     auto                       wrong_host   = torch::full({8}, 3, i32);
     auto                       wrong_device = torch::full({8}, 3, i32);
-    std::vector<torch::Tensor> lengths{torch::full({4}, 16, i32), torch::full({4}, 2, i32)};
+    std::vector<torch::Tensor> pool_lengths{torch::full({4}, 8, i32), torch::full({4}, 2, i32)};
+    std::vector<torch::Tensor> kernel_lengths{torch::full({4}, 16, i32), torch::full({4}, 2, i32)};
 
-    EXPECT_THROW(refreshPackedBlockTableValues(wrong_host, wrong_device, lengths, storage, bindings, group_inputs),
-                 std::exception);
+    EXPECT_THROW(
+        refreshPackedBlockTableValues(
+            pool, pool, pool_lengths, wrong_host, wrong_device, kernel_lengths, storage, bindings, group_inputs),
+        std::exception);
 }
 
 TEST(CacheGroupAttentionInputsTest, EmptyPlanProducesNoGroups) {

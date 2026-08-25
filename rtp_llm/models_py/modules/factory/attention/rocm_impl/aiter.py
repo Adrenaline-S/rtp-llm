@@ -275,7 +275,7 @@ class AiterPrefillAttnOp:
         block table, and KV pad tensors so _forward_paged can skip them
         on every layer."""
         block_table = fmha_params.kv_cache_block_id_device
-        if block_table is None:
+        if block_table is None or block_table.numel() == 0:
             fmha_params.sanitized_block_table = None
             fmha_params.block_indices = None
             fmha_params.compact_block_table = None
@@ -676,7 +676,7 @@ def _sanitize_and_pad_block_table(
 
     Returns (sanitized_and_padded_block_table, updated_block_positions_cache).
     """
-    if block_table is None:
+    if block_table is None or block_table.numel() == 0:
         return None, block_positions_cache
 
     if seqlen_k is None or block_table.dim() != 2:

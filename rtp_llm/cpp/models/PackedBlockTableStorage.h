@@ -7,10 +7,10 @@
 
 namespace rtp_llm {
 
-// References to the caller's four flat packed backings, adopted at full prepare.
-// Tensor reference counting keeps this storage alive and address-stable for the
-// whole CUDA Graph capture lifetime, so no copy is needed here; value-only update
-// writes into these same tensors via copy_.
+// References to the authoritative packed host backings and the model-owned
+// device replicas created at full prepare. Tensor reference counting keeps the
+// storage alive and address-stable for the whole CUDA Graph capture lifetime;
+// value-only update writes into these same tensors via copy_.
 struct PackedBlockTableStorage {
     torch::Tensor pool_host;
     torch::Tensor pool_device;

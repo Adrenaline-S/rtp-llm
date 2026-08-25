@@ -127,7 +127,7 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
 }
 
-TEST_F(ModelDataTest, testRefreshKVCacheBlockTableDeviceReplicasUsesHostTables) {
+TEST_F(ModelDataTest, testRefreshNonRootKVCacheBlockTableDeviceReplicasUsesHostTables) {
     GptModelInputs inputs;
     inputs.kv_cache_block_id        = torch::tensor({0, 7, 11, -1}, torch::kInt32);
     inputs.kv_cache_kernel_block_id = torch::tensor({0, 14, 15, 22, 23, -1}, torch::kInt32);

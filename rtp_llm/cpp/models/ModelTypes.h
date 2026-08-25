@@ -120,9 +120,9 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
 torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
 std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 
-// Restore the direct CUDA replicas from the authoritative packed host tables.
-// Call this after TP synchronization on every rank: rank 0's host tables may
-// have advanced since its device replicas were last published.
+// Materialize non-root device replicas from the authoritative packed host
+// tables after TP synchronization. Rank 0's model-owned replicas are created
+// by PyWrappedModel when the per-group inputs are bound.
 void refreshKVCacheBlockTableDeviceReplicas(GptModelInputs& inputs);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
@@ -163,7 +163,7 @@ public:
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
 
-    // Refresh only kernel-table values and valid lengths on a previously
+    // Refresh pool/kernel table values and valid lengths on a previously
     // prepared, structurally identical packed snapshot.
     virtual void updateKVCacheKernelBlockTableValues(const GptModelInputs& inputs) {}
 

@@ -848,7 +848,41 @@ py::dict runKernelBlockTableUpdateLifecycle(py::object py_model) {
                               std::nullopt};
 
     PyWrappedModel model(params, std::move(py_model));
+
+    // Caller-owned device replicas are deliberately stale. Full prepare must
+    // derive the model-owned graph backing from the authoritative pinned host
+    // tables rather than adopting these tensors.
+    const auto caller_pool_device_ptr   = scenario.inputs.kv_cache_block_id_device.data_ptr();
+    const auto caller_kernel_device_ptr = scenario.inputs.kv_cache_kernel_block_id_device.data_ptr();
+    scenario.inputs.kv_cache_block_id_device.fill_(999);
+    scenario.inputs.kv_cache_kernel_block_id_device.fill_(999);
     model.prepareAttentionInputs(scenario.inputs);
+    torch::cuda::synchronize();
+
+    const bool device_backings_owned = model.packed_tables_.pool_device.data_ptr() != caller_pool_device_ptr
+                                       && model.packed_tables_.kernel_device.data_ptr() != caller_kernel_device_ptr;
+    const bool device_backings_from_host =
+        torch::equal(model.packed_tables_.pool_device.cpu(), model.packed_tables_.pool_host)
+        && torch::equal(model.packed_tables_.kernel_device.cpu(), model.packed_tables_.kernel_host);
+    const auto holds_pointer = [&](const torch::Tensor& source) {
+        return std::any_of(
+            model.buffer_holder_.tensors.begin(), model.buffer_holder_.tensors.end(), [&](const torch::Tensor& held) {
+                return held.defined() && held.data_ptr() == source.data_ptr();
+            });
+    };
+    const bool host_backings_held =
+        holds_pointer(scenario.inputs.kv_cache_block_id) && holds_pointer(scenario.inputs.kv_cache_kernel_block_id);
+    bool group_device_views_owned = true;
+    for (const auto& binding : model.group_bindings_) {
+        const auto& region = scenario.inputs.kv_cache_block_table_plan.group(binding.execution_ordinal);
+        const auto& view   = model.cache_group_attn_inputs_.at(binding.tag);
+        group_device_views_owned =
+            group_device_views_owned
+            && view.kv_cache_block_id_device.data_ptr<int32_t>()
+                   == model.packed_tables_.pool_device.data_ptr<int32_t>() + region.pool.offset
+            && view.kv_cache_kernel_block_id_device.data_ptr<int32_t>()
+                   == model.packed_tables_.kernel_device.data_ptr<int32_t>() + region.kernel.offset;
+    }
 
     const auto               pool_host_ptr     = model.packed_tables_.pool_host.data_ptr();
     const auto               pool_device_ptr   = model.packed_tables_.pool_device.data_ptr();
@@ -862,13 +896,26 @@ py::dict runKernelBlockTableUpdateLifecycle(py::object py_model) {
         view_ptrs.push_back(view.kv_cache_kernel_block_id.data_ptr());
         view_ptrs.push_back(view.kv_cache_kernel_block_id_device.data_ptr());
     }
-    auto pool_before = model.packed_tables_.pool_host.clone();
+    // CacheStoreForwardModel passes this group view directly to the real
+    // cache-store writer. It must remain an alias of the model-owned backing.
+    const auto& cache_store_pool_alias = model.cache_group_attn_inputs_.at("full").kv_cache_block_id;
+    const auto  cache_store_alias_ptr  = cache_store_pool_alias.data_ptr();
 
     auto refreshed                            = scenario.inputs;
+    refreshed.kv_cache_block_id               = torch::arange(201,
+                                                201 + refreshed.kv_cache_block_id.numel(),
+                                                torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    refreshed.kv_cache_block_id_device        = refreshed.kv_cache_block_id.cuda();
     refreshed.kv_cache_kernel_block_id        = torch::arange(101,
                                                        101 + refreshed.kv_cache_kernel_block_id.numel(),
                                                        torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
     refreshed.kv_cache_kernel_block_id_device = refreshed.kv_cache_kernel_block_id.cuda();
+    // Device arguments are transport/geometry inputs, not value authority.
+    // Stable refresh must reproduce the authoritative host snapshot.
+    refreshed.kv_cache_block_id_device.fill_(999);
+    refreshed.kv_cache_kernel_block_id_device.fill_(999);
+    refreshed.kv_cache_pool_valid_lengths[0].copy_(pinnedTensor({1, 2, 1}, {3}));
+    refreshed.kv_cache_pool_valid_lengths[1].copy_(pinnedTensor({2, 3, 1}, {3}));
     refreshed.kv_cache_kernel_valid_lengths[0].copy_(pinnedTensor({1, 0, 2}, {3}));
     refreshed.kv_cache_kernel_valid_lengths[1].copy_(pinnedTensor({2, 3, 1}, {3}));
     model.updateKVCacheKernelBlockTableValues(refreshed);
@@ -899,12 +946,22 @@ py::dict runKernelBlockTableUpdateLifecycle(py::object py_model) {
     }
 
     py::dict result;
-    result["backings_stable"] = pool_host_ptr == model.packed_tables_.pool_host.data_ptr()
+    result["device_backings_owned"]     = device_backings_owned;
+    result["device_backings_from_host"] = device_backings_from_host;
+    result["host_backings_held"]        = host_backings_held;
+    result["group_device_views_owned"]  = group_device_views_owned;
+    result["backings_stable"]           = pool_host_ptr == model.packed_tables_.pool_host.data_ptr()
                                 && pool_device_ptr == model.packed_tables_.pool_device.data_ptr()
                                 && kernel_host_ptr == model.packed_tables_.kernel_host.data_ptr()
                                 && kernel_device_ptr == model.packed_tables_.kernel_device.data_ptr();
-    result["views_stable"]         = views_stable;
-    result["pool_unchanged"]       = torch::equal(pool_before, model.packed_tables_.pool_host);
+    result["views_stable"]              = views_stable;
+    result["cache_store_alias_stable"]  = cache_store_alias_ptr == cache_store_pool_alias.data_ptr();
+    result["cache_store_alias_pool_id"] = cache_store_pool_alias.index({0, 0}).item<int32_t>();
+    result["pool_host_values"]          = model.packed_tables_.pool_host;
+    result["pool_device_values"]        = model.packed_tables_.pool_device.cpu();
+    result["pool_valid_lengths"] =
+        py::make_tuple(model.cache_group_attn_inputs_.at(model.group_bindings_[0].tag).pool_valid_lengths,
+                       model.cache_group_attn_inputs_.at(model.group_bindings_[1].tag).pool_valid_lengths);
     result["kernel_host_values"]   = model.packed_tables_.kernel_host;
     result["kernel_device_values"] = model.packed_tables_.kernel_device.cpu();
     result["kernel_valid_lengths"] =

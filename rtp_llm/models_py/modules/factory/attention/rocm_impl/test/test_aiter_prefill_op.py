@@ -483,6 +483,26 @@ class TestAiterPrefillAttnOp(unittest.TestCase):
         # The forward() path moves them to query.device internally.
         return op, params
 
+    def test_prepare_treats_defined_empty_block_tables_as_non_paged(self):
+        batch_size = 2
+        attn_inputs = _make_prefill_inputs([4, 7], self.device)
+        host_table = torch.empty(batch_size, 0, dtype=torch.int32).pin_memory()
+        device_table = torch.empty(batch_size, 0, dtype=torch.int32, device=self.device)
+        # Cache-free production inputs retain four defined [batch, 0] tables.
+        attn_inputs.kv_cache_block_id = host_table
+        attn_inputs.kv_cache_block_id_device = device_table
+        attn_inputs.kv_cache_kernel_block_id = host_table.clone()
+        attn_inputs.kv_cache_kernel_block_id_device = device_table.clone()
+
+        op = AiterPrefillAttnOp(_make_attn_configs(8, 8, 64))
+        params = op.prepare(attn_inputs)
+
+        self.assertIsNone(params.sanitized_block_table)
+        self.assertIsNone(params.block_indices)
+        self.assertIsNone(params.compact_block_table)
+        self.assertIsNone(params.k_compact_buf)
+        self.assertIsNone(params.v_compact_buf)
+
     def _check_varlen_no_kv_cache(
         self,
         input_lengths: List[int],

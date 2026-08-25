@@ -373,12 +373,15 @@ PyWrappedModel::bindCacheGroupsForInputs(torch_ext::PyAttentionInputs& py_attn_i
         return result;
     }
 
-    adoptPackedBlockTables(plan,
-                           inputs.kv_cache_block_id,
-                           inputs.kv_cache_block_id_device,
-                           inputs.kv_cache_kernel_block_id,
-                           inputs.kv_cache_kernel_block_id_device,
-                           result.storage);
+    // The pinned host tables are the authoritative packed snapshot. Build
+    // model-owned device replicas from them so attention never depends on a
+    // caller-owned device tensor that may still contain the preceding MTP/TP
+    // step's values. tensorHoldHostAndToCuda also keeps the host staging
+    // storage alive until the deferred fused H2D copy has completed.
+    auto pool_device   = tensorHoldHostAndToCuda(inputs.kv_cache_block_id);
+    auto kernel_device = tensorHoldHostAndToCuda(inputs.kv_cache_kernel_block_id);
+    adoptPackedBlockTables(
+        plan, inputs.kv_cache_block_id, pool_device, inputs.kv_cache_kernel_block_id, kernel_device, result.storage);
 
     // The base carries shared fields only; each per-group copy rebinds the tables.
     py_attn_inputs.kv_cache_block_id               = torch::Tensor();
@@ -576,8 +579,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatchedValidated(const GptModelInput
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // d2d_copies_ accumulates across ALL micro-batches before the single
-    // fusedCopy() flush below. The packed cache tables already carry direct
-    // device replicas, so building group views adds no H2D copies.
+    // fusedCopy() flush below. Binding each micro-batch adds two copies for
+    // its packed pool/kernel host backings, independent of group count.
     // If new tensorHoldHostAndToCuda call sites land below — or if
     // planMicroBatches starts producing >2 micro-batches — re-check
     // MAX_FUSED_D2D_COPIES.
@@ -838,7 +841,10 @@ void PyWrappedModel::updateKVCacheKernelBlockTableValues(const GptModelInputs& i
                                 && cache_block_table_signature_->matches(inputs.kv_cache_block_table_plan),
                             "KV cache block-table structure changed during value-only update; full prepare required");
 
-    refreshPackedBlockTableValues(inputs.kv_cache_kernel_block_id,
+    refreshPackedBlockTableValues(inputs.kv_cache_block_id,
+                                  inputs.kv_cache_block_id_device,
+                                  inputs.kv_cache_pool_valid_lengths,
+                                  inputs.kv_cache_kernel_block_id,
                                   inputs.kv_cache_kernel_block_id_device,
                                   inputs.kv_cache_kernel_valid_lengths,
                                   packed_tables_,
@@ -1073,7 +1079,11 @@ static void slicePackedCacheTablesByBatch(const GptModelInputs& inputs,
     }
 
     auto concatenate = [](const std::vector<torch::Tensor>& parts, const torch::Tensor& source) {
-        return parts.empty() ? torch::empty({0}, source.options()) : torch::cat(parts);
+        auto result = parts.empty() ? torch::empty({0}, source.options()) : torch::cat(parts);
+        if (result.device().is_cpu() && !result.is_pinned()) {
+            result = result.pin_memory();
+        }
+        return result;
     };
     output.kv_cache_block_id               = concatenate(pool_host_parts, inputs.kv_cache_block_id);
     output.kv_cache_block_id_device        = concatenate(pool_device_parts, inputs.kv_cache_block_id_device);

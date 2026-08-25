@@ -139,9 +139,21 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
     def test_kernel_value_update_preserves_prepared_packed_storage(self) -> None:
         result = run_kernel_block_table_update_lifecycle(CacheStoreForwardModel())
+        self.assertTrue(result["device_backings_owned"])
+        self.assertTrue(result["device_backings_from_host"])
+        self.assertTrue(result["host_backings_held"])
+        self.assertTrue(result["group_device_views_owned"])
         self.assertTrue(result["backings_stable"])
         self.assertTrue(result["views_stable"])
-        self.assertTrue(result["pool_unchanged"])
+        self.assertTrue(result["cache_store_alias_stable"])
+        self.assertEqual(result["cache_store_alias_pool_id"], 201)
+        expected_pool_values = list(range(201, 219))
+        self.assertEqual(result["pool_host_values"].tolist(), expected_pool_values)
+        self.assertEqual(result["pool_device_values"].tolist(), expected_pool_values)
+        self.assertEqual(
+            tuple(value.tolist() for value in result["pool_valid_lengths"]),
+            ([1, 2, 1], [2, 3, 1]),
+        )
         expected_kernel_values = [
             101,
             -1,

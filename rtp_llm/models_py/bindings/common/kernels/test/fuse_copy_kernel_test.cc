@@ -232,17 +232,18 @@ TEST_F(FusedCopyTest, MaxFusedCopies) {
 
 // Documented worst-case contract: PyWrappedModel::forwardMicroBatched
 // accumulates copies across all micro-batches before a single flush. With
-// the planMicroBatches cap of 2 micro-batches and a hybrid KV-cache
-// group_count of 4, the total is (6 base + 4 group) * 2 = 20 copies.
+// the planMicroBatches cap of 2 micro-batches, the total is
+// (6 base + 2 packed cache backings) * 2 = 16 copies. The packed copies are
+// independent of the number of cache groups.
 // This test pins that scenario down so any regression in the accounting
 // (or in MAX_FUSED_D2D_COPIES) fails here rather than at production runtime.
 TEST_F(FusedCopyTest, MicroBatchedAccumulationWorstCase) {
-    constexpr int    NUM_MICRO_BATCHES  = 2;
-    constexpr int    BASE_COPIES_PER_MB = 6;
-    constexpr int    GROUP_COUNT        = 4;
-    constexpr int    COPIES_PER_MB      = BASE_COPIES_PER_MB + GROUP_COUNT;
-    constexpr int    TOTAL_COPIES       = NUM_MICRO_BATCHES * COPIES_PER_MB;  // 20
-    constexpr size_t N                  = 256;
+    constexpr int    NUM_MICRO_BATCHES   = 2;
+    constexpr int    BASE_COPIES_PER_MB  = 6;
+    constexpr int    PACKED_CACHE_COPIES = 2;
+    constexpr int    COPIES_PER_MB       = BASE_COPIES_PER_MB + PACKED_CACHE_COPIES;
+    constexpr int    TOTAL_COPIES        = NUM_MICRO_BATCHES * COPIES_PER_MB;  // 16
+    constexpr size_t N                   = 256;
 
     static_assert(TOTAL_COPIES <= rtp_llm::MAX_FUSED_D2D_COPIES,
                   "MAX_FUSED_D2D_COPIES is below the documented forwardMicroBatched worst case; "

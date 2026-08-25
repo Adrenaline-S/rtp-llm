@@ -39,11 +39,15 @@ size_t normalizeKernelTailFill(const std::map<std::string, torch_ext::PyAttentio
                                const torch::Tensor&                                       regions_device,
                                size_t                                                     region_capacity);
 
-// Value-only refresh: copies new values into the storage we already hold. Never
-// reallocates and never rebuilds views, so CUDA Graph capture stays valid. New
-// per-group valid lengths are copied in place into each per-group PyAttentionInputs
-// (keyed by binding tag).
-void refreshPackedBlockTableValues(const torch::Tensor&                                 kernel_host,
+// Value-only refresh: copies authoritative host values into the storage we
+// already hold, then updates model-owned device replicas from those host
+// backings. Never reallocates or rebuilds views, so CUDA Graph capture and
+// cache-store aliases stay valid. New per-group valid lengths are copied in
+// place into each per-group PyAttentionInputs (keyed by binding tag).
+void refreshPackedBlockTableValues(const torch::Tensor&                                 pool_host,
+                                   const torch::Tensor&                                 pool_device,
+                                   const std::vector<torch::Tensor>&                    pool_valid_lengths,
+                                   const torch::Tensor&                                 kernel_host,
                                    const torch::Tensor&                                 kernel_device,
                                    const std::vector<torch::Tensor>&                    kernel_valid_lengths,
                                    PackedBlockTableStorage&                             storage,
