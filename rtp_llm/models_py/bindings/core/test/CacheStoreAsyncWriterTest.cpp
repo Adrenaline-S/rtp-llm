@@ -343,7 +343,7 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
         /*device_id=*/-1, cache_manager, /*cache_model_id=*/7, /*mtp_cache_config_index=*/0);
 
     EXPECT_EQ(writer.cache_manager_, cache_manager);
-    EXPECT_EQ(writer.cache_config_->tagForGroup(0), "draft");
+    EXPECT_EQ(writer.cache_config_->topology().groups().front().tag, "draft");
     EXPECT_EQ(writer.cache_model_id_, 7);
     EXPECT_EQ(writer.cp_rank_, 0);
     EXPECT_EQ(writer.cp_size_, 1);
