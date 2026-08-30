@@ -340,6 +340,7 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDu
     EXPECT_EQ(projected.blockDependencies()[2].parent_key, 13);
     EXPECT_EQ(projected.blockDependencies()[2].ordinal, 2u);
     EXPECT_FALSE(projected.lastBlockAligned());
+    EXPECT_TRUE(projected.cacheKeysAreCpCanonical());
 }
 
 TEST_F(CPSlotMapperTest, ConnectorProjectionKeepsGlobalReuseCounters) {
@@ -422,6 +423,7 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagMappedBlocks) {
     CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*global key B=*/8);
     auto projected = mapper.projectConnectorResource(source, config, mapper.canonicalCacheKeys(source.cacheKeys()));
 
+    EXPECT_TRUE(projected.cacheKeysAreCpCanonical());
     EXPECT_EQ(projected.blocks("full"), (BlockIndicesType{101, 103}));
     EXPECT_EQ(projected.blocks("swa"), (BlockIndicesType{201, 203}));
 }
