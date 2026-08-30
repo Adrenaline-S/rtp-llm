@@ -48,8 +48,8 @@ from rtp_llm.models.dsv4_kv_cache import (
     DSV4_FIXED_POOL_TAGS,
     HCA_STATE_TAG,
     apply_dsv4_explicit_pool_blocks,
-    DSV4_TOKENS_PER_BLOCK,
     build_dsv4_kv_cache_spec_descs,
+    resolve_dsv4_tokens_per_block,
 )
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType, RoleType
 from rtp_llm.utils.model_weight import (
@@ -564,10 +564,6 @@ class DeepSeekV4(DeepSeekV2):
     """
 
     @classmethod
-    def default_kv_cache_tokens_per_block(cls) -> int:
-        return DSV4_TOKENS_PER_BLOCK
-
-    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
         config.attn_config.head_num = 0
@@ -607,12 +603,24 @@ class DeepSeekV4(DeepSeekV2):
         attn_config = model_config.attn_config
         layer_num = int(model_config.num_layers)
 
+        promoted = resolve_dsv4_tokens_per_block(int(attn_config.tokens_per_block))
+        if promoted is not None:
+            # kernel_tokens_per_block mirrors tokens_per_block unless the user
+            # asked for a distinct --kernel_seq_size_per_block; C++ derives the
+            # kernel block the same way.
+            if int(attn_config.kernel_tokens_per_block) == int(
+                attn_config.tokens_per_block
+            ):
+                attn_config.kernel_tokens_per_block = promoted
+            attn_config.tokens_per_block = promoted
+            logging.info(
+                "DeepSeek-V4 promoted tokens_per_block to %d (kernel %d)",
+                attn_config.tokens_per_block,
+                attn_config.kernel_tokens_per_block,
+            )
+
         hybrid_config = model_config.hybrid_attention_config
         hybrid_config.hybrid_attention_types = [HybridAttentionType.NONE] * layer_num
-        # Without this the C++ side never dispatches into CacheConfigCreator
-        # and falls back to a single homogeneous pool.
-        hybrid_config.enable_independent_kv_cache_pools = True
-
         descs = build_dsv4_kv_cache_spec_descs(
             layer_num=layer_num,
             layer_compress_ratios=list(attn_config.layer_compress_ratios),

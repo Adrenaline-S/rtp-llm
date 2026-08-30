@@ -26,9 +26,8 @@ namespace rtp_llm {
 namespace {
 
 bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
-    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
-        return scheduler.enqueue(stream).ok();
-    });
+    return std::all_of(
+        streams.begin(), streams.end(), [&scheduler](const auto& stream) { return scheduler.enqueue(stream).ok(); });
 }
 
 }  // namespace
@@ -52,7 +51,7 @@ static PDSepConfig makePDFusionPDSepConfig() {
 
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
     ResourceContext resource_context;
@@ -97,7 +96,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
 
 TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 2, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
     ResourceContext resource_context;
@@ -128,7 +127,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
 
 TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsBlocksNewInit) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 10, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -177,7 +176,7 @@ TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsBlocksNewInit) {
 
 TEST_F(FIFOSchedulerTest, testRejectInputWithoutSpeculativeReserveSpace) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 32, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -221,7 +220,7 @@ TEST_F(FIFOSchedulerTest, testRejectInputWithoutSpeculativeReserveSpace) {
 
 TEST_F(FIFOSchedulerTest, testRejectSpeculativeTailWithoutReserveSpace) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 128, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -307,7 +306,7 @@ TEST_F(FIFOSchedulerTest, testDSparkGammaThreeReservesThreeWindows) {
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
     ResourceContext resource_context;
@@ -359,7 +358,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     kv_cache_config.reserve_block_ratio = 50;  // reserve = 50% * available(10) = 5 blocks
 
     std::shared_ptr<KVCacheManager> cache_manager =
-        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+        std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false, nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
 
@@ -403,7 +402,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
 // evaluateRunningMemory), not the multi-sequence batch fan-out at enqueue.
 TEST_F(FIFOSchedulerTest, testCheckInputLengthIgnoresBatchSizeFanOut) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -463,7 +462,7 @@ TEST_F(FIFOSchedulerTest, testCheckInputLengthIgnoresBatchSizeFanOut) {
 TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
     auto schedule_two_prefills = [](bool cp_force_single_prefill) {
         CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-        std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
         EXPECT_TRUE(cache_manager->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
@@ -471,9 +470,9 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                         = 100;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size     = 8192;
-        runtime_config.fifo_scheduler_config.cp_force_single_prefill   = cp_force_single_prefill;
+        runtime_config.max_generate_batch_size                       = 100;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+        runtime_config.fifo_scheduler_config.cp_force_single_prefill = cp_force_single_prefill;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
@@ -507,13 +506,13 @@ static std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids,
                                                   const ModelConfig&      model_config,
                                                   const RuntimeConfig&    runtime_config,
                                                   const ResourceContext&  resource_context,
-                                                  int                     max_new_tokens      = 1,
+                                                  int                     max_new_tokens       = 1,
                                                   int                     num_return_sequences = 1,
-                                                  const std::vector<int>&  variable_num_beams   = {}) {
-    auto query             = std::make_shared<GenerateInput>();
-    query->input_ids       = torch::tensor(ids, torch::kInt32);
-    query->generate_config = makeTestGenerateConfig();
-    query->generate_config->max_new_tokens      = max_new_tokens;
+                                                  const std::vector<int>& variable_num_beams   = {}) {
+    auto query                                   = std::make_shared<GenerateInput>();
+    query->input_ids                             = torch::tensor(ids, torch::kInt32);
+    query->generate_config                       = makeTestGenerateConfig();
+    query->generate_config->max_new_tokens       = max_new_tokens;
     query->generate_config->num_return_sequences = num_return_sequences;
     query->generate_config->variable_num_beams   = variable_num_beams;
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -525,7 +524,7 @@ static std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids,
 
 TEST_F(FIFOSchedulerTest, testPrefillFirstAlternation) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -576,7 +575,7 @@ TEST_F(FIFOSchedulerTest, testPrefillFirstAlternation) {
 
 TEST_F(FIFOSchedulerTest, testDecodeHeavyCadence) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -622,7 +621,7 @@ TEST_F(FIFOSchedulerTest, testDecodeHeavyCadence) {
 
 TEST_F(FIFOSchedulerTest, testDecodeRoundReapsErroredWaitingStream) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -670,7 +669,7 @@ TEST_F(FIFOSchedulerTest, testInvalidDecodePrefillRatioFallsBackToAlternation) {
     const std::vector<std::string> invalid_ratios = {"", "1/0", "-1", "abc", "2/3"};
     for (const auto& ratio : invalid_ratios) {
         CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-        auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
         ASSERT_TRUE(cache_manager->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
@@ -710,7 +709,7 @@ TEST_F(FIFOSchedulerTest, testInvalidDecodePrefillRatioFallsBackToAlternation) {
 
 TEST_F(FIFOSchedulerTest, testDecodeHeavyCadenceSeedsAfterInFlightDrains) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -751,7 +750,7 @@ TEST_F(FIFOSchedulerTest, testDecodeHeavyCadenceSeedsAfterInFlightDrains) {
 
 TEST_F(FIFOSchedulerTest, testPrefillHeavyCadence) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -811,7 +810,7 @@ TEST_F(FIFOSchedulerTest, testPrefillHeavyCadence) {
 
 TEST_F(FIFOSchedulerTest, testLargeStepDecodeFirst) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -854,7 +853,7 @@ TEST_F(FIFOSchedulerTest, testLargeStepDecodeFirst) {
 
 TEST_F(FIFOSchedulerTest, testZeroRatioTriesPrefillBeforeDecode) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -893,7 +892,7 @@ TEST_F(FIFOSchedulerTest, testZeroRatioTriesPrefillBeforeDecode) {
 
 TEST_F(FIFOSchedulerTest, testConcurrencyCapCountsPending) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -935,7 +934,7 @@ TEST_F(FIFOSchedulerTest, testConcurrencyCapCountsPending) {
 
 TEST_F(FIFOSchedulerTest, testZeroRatioFallsBackToDecodeWhenKvAdmissionRejectsAllWaiting) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 4);
     ResourceContext resource_context;
@@ -977,7 +976,7 @@ TEST_F(FIFOSchedulerTest, testZeroRatioFallsBackToDecodeWhenKvAdmissionRejectsAl
 
 TEST_F(FIFOSchedulerTest, testEmptyDegradedPrefillDoesNotAdvanceDecodeCounter) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -1014,7 +1013,7 @@ TEST_F(FIFOSchedulerTest, testKvGatedAdmission) {
     // Only 2 free KV blocks: with max_new_tokens=1, two 1-token prompts can both prefill and
     // still satisfy the estimated peak check.
     CacheConfig cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
     ResourceContext resource_context;
@@ -1050,7 +1049,7 @@ TEST_F(FIFOSchedulerTest, testMultiBlockPromptPromotesWithIncrementalKv) {
     // incremental block, so promotion must succeed even when free blocks are fewer than the
     // prompt's total block count.
     CacheConfig cache_config  = makeMhaCacheConfig(1, 8, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
     ResourceContext resource_context;
@@ -1090,7 +1089,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsPromptBlocksAcrossRound) {
     // Two block-aligned 8-token prompts need 4 blocks each. With 7
     // free blocks, scheduler-side admission admits only the first and leaves the second waiting.
     CacheConfig cache_config  = makeMhaCacheConfig(1, 8, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
     ResourceContext resource_context;
@@ -1129,7 +1128,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak)
     // peak exceeds the remaining KV capacity.
     constexpr int kTokensPerBlock = 8;
     CacheConfig   cache_config    = makeMhaCacheConfig(1, 81, 1, 4, kTokensPerBlock, rtp_llm::DataType::TYPE_FP16);
-    auto          cache_manager   = std::make_shared<KVCacheManager>(cache_config);
+    auto          cache_manager   = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 80);
     ResourceContext resource_context;
@@ -1182,8 +1181,8 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak)
 }
 
 TEST_F(FIFOSchedulerTest, testPeakEstimateSharesAlignedPromptAcrossMaximumBatchWidth) {
-    CacheConfig cache_config = makeMhaCacheConfig(1, 64, 1, 4, 4, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 4, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -1194,20 +1193,20 @@ TEST_F(FIFOSchedulerTest, testPeakEstimateSharesAlignedPromptAcrossMaximumBatchW
     RuntimeConfig runtime_config;
 
     const std::vector<int> aligned_prompt{1, 2, 3, 4, 5, 6, 7, 8};
-    auto single_beam = makeStream(aligned_prompt,
+    auto                   single_beam  = makeStream(aligned_prompt,
                                   model_config,
                                   runtime_config,
                                   resource_context,
                                   /*max_new_tokens=*/3,
                                   /*num_return_sequences=*/1,
                                   /*variable_num_beams=*/{1});
-    auto multi_return = makeStream(aligned_prompt,
+    auto                   multi_return = makeStream(aligned_prompt,
                                    model_config,
                                    runtime_config,
                                    resource_context,
                                    /*max_new_tokens=*/3,
                                    /*num_return_sequences=*/4);
-    auto dynamic_beam = makeStream(aligned_prompt,
+    auto                   dynamic_beam = makeStream(aligned_prompt,
                                    model_config,
                                    runtime_config,
                                    resource_context,
@@ -1234,7 +1233,7 @@ TEST_F(FIFOSchedulerTest, testPeakEstimateSharesAlignedPromptAcrossMaximumBatchW
 TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWatermark) {
     constexpr int kTokensPerBlock = 4;
     CacheConfig   cache_config    = makeMhaCacheConfig(1, 8, 1, 4, kTokensPerBlock, rtp_llm::DataType::TYPE_FP16);
-    auto          cache_manager   = std::make_shared<KVCacheManager>(cache_config);
+    auto          cache_manager   = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
 
@@ -1264,7 +1263,7 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
     ASSERT_EQ(first_prefill.value().size(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
 
-    auto candidate = makeStream({1, 2, 3, 4, 5, 6, 7, 8},
+    auto         candidate             = makeStream({1, 2, 3, 4, 5, 6, 7, 8},
                                 model_config,
                                 runtime_config,
                                 resource_context,
@@ -1305,14 +1304,15 @@ TEST_F(FIFOSchedulerTest, testHybridAdmissionAllowsUnderestimateAtDifferentBlock
     // Admission intentionally accepts this underestimate instead of scanning every endpoint.
     auto cache_config = test::makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/64, /*tokens_per_block=*/1, rtp_llm::DataType::TYPE_FP16);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext no_reuse_context;
     no_reuse_context.cache_manager = cache_manager;
     no_reuse_context.reuse_cache   = false;
-    ResourceContext reuse_context  = no_reuse_context;
-    reuse_context.reuse_cache      = true;
+    ResourceContext reuse_context;
+    reuse_context.cache_manager = cache_manager;
+    reuse_context.reuse_cache   = true;
 
     ModelConfig model_config;
     model_config.max_seq_len                  = 8192;
@@ -1355,7 +1355,7 @@ TEST_F(FIFOSchedulerTest, testKVAdmissionCostAcrossStreamCounts) {
     constexpr int kTokensPerBlock = 8;
     auto          cache_config    = test::makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/64, kTokensPerBlock, rtp_llm::DataType::TYPE_FP16);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -1435,7 +1435,7 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
 
     for (const int stream_count : {256, 512}) {
         // Block zero is unavailable for allocation, leaving exactly one physical block per stream.
-        auto cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+        auto          cache_config = makeMhaCacheConfig(/*layer_num=*/1,
                                                /*block_num=*/stream_count + 1,
                                                /*local_head_num_kv=*/1,
                                                /*size_per_head=*/4,
@@ -1444,7 +1444,7 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.reserve_block_ratio = 0;
         auto cache_manager =
-            std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+            std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false, nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager->init());
         ASSERT_EQ(cache_manager->availableBlocksNum(), stream_count);
         ASSERT_EQ(cache_manager->reserveBlocksNum(), 0);
@@ -1487,8 +1487,8 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
         ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), stream_count);
         ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
 
-        std::cout << "[KV_BATCH_ADMISSION_COST] waiting_streams=" << stream_count
-                  << " schedule_total_ms=" << elapsed_ms << std::endl;
+        std::cout << "[KV_BATCH_ADMISSION_COST] waiting_streams=" << stream_count << " schedule_total_ms=" << elapsed_ms
+                  << std::endl;
         RecordProperty("waiting_streams_" + std::to_string(stream_count) + "_schedule_total_ms", elapsed_ms);
         // Keep ample headroom for loaded CI hosts while bounding scheduler-lock latency for the largest batch.
         EXPECT_LT(elapsed_ms, 100);
@@ -1496,7 +1496,7 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
 }
 
 TEST_F(FIFOSchedulerTest, testReserveOnlyLimitsInitialAllocationNotLifecycleGrowth) {
-    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+    CacheConfig   cache_config = makeMhaCacheConfig(/*layer_num=*/1,
                                                   /*block_num=*/11,
                                                   /*local_head_num_kv=*/1,
                                                   /*size_per_head=*/4,
@@ -1504,7 +1504,8 @@ TEST_F(FIFOSchedulerTest, testReserveOnlyLimitsInitialAllocationNotLifecycleGrow
                                                   rtp_llm::DataType::TYPE_FP16);
     KVCacheConfig kv_cache_config;
     kv_cache_config.reserve_block_ratio = 20;
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false, nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->availableBlocksNum(), 10);
     ASSERT_EQ(cache_manager->reserveBlocksNum(), 2);
@@ -1575,7 +1576,7 @@ TEST_F(FIFOSchedulerTest, testMaxNewTokensOneDoesNotReserveFinalTokenKVBlock) {
     // Keep one stream running so KV admission is enforced. The aligned candidate prompt needs two
     // blocks; its only generated token completes the request and is never written into KV cache.
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 4, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
     ResourceContext resource_context;
@@ -1642,7 +1643,7 @@ TEST_F(FIFOSchedulerTest, testMaxNewTokensOneDoesNotReserveFinalTokenKVBlock) {
 }
 
 TEST_F(FIFOSchedulerTest, testSinglePrefillDefersReserveCapacityFailureToAllocator) {
-    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+    CacheConfig   cache_config = makeMhaCacheConfig(/*layer_num=*/1,
                                                   /*block_num=*/11,
                                                   /*local_head_num_kv=*/1,
                                                   /*size_per_head=*/4,
@@ -1651,7 +1652,7 @@ TEST_F(FIFOSchedulerTest, testSinglePrefillDefersReserveCapacityFailureToAllocat
     KVCacheConfig kv_cache_config;
     kv_cache_config.reserve_block_ratio = 50;
     auto cache_manager =
-        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+        std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false, nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->totalBlocksNum(), 10);
     ASSERT_EQ(cache_manager->reserveBlocksNum(), 5);
@@ -1698,7 +1699,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionUsesMaxTokenNumRemainingTokens) {
     // for far more tokens than model max_seq_len allows; admission should use GenerateStream::maxTokenNum(),
     // not the raw max_new_tokens request value.
     CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 4, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 4);
     ResourceContext resource_context;
@@ -1743,7 +1744,7 @@ TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureFinishes) {
     // Pending decode promotion uses moveToNext() directly. If incrKVBlock cannot allocate, the
     // state machine reports MALLOC_FAILED and the scheduler removes the finished stream.
     CacheConfig cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
     ResourceContext resource_context;
@@ -1777,7 +1778,7 @@ TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureFinishes) {
 
 TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureDoesNotSpin) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 4);
     ResourceContext resource_context;
@@ -1821,7 +1822,7 @@ TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureDoesNotSpin) {
 
 TEST_F(FIFOSchedulerTest, testNoIncrKvBlockOnPrefillRounds) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -1871,7 +1872,7 @@ TEST_F(FIFOSchedulerTest, testNoIncrKvBlockOnPrefillRounds) {
 
 TEST_F(FIFOSchedulerTest, testPrefillRoundDoesNotAccountHeldDecodeAsBatchedWithPrefill) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -1907,7 +1908,6 @@ TEST_F(FIFOSchedulerTest, testPrefillRoundDoesNotAccountHeldDecodeAsBatchedWithP
     ASSERT_EQ(held->batch_with_prefill_len_, 0);
 }
 
-
 // ---------------------------------------------------------------------------
 // FIFOScheduler per-round token-budget and retryable-admission cases
 // ---------------------------------------------------------------------------
@@ -1921,7 +1921,7 @@ TEST_F(FIFOSchedulerTest, permanentlyOversizedStreamDoesNotBlockLaterStream) {
                                                   rtp_llm::DataType::TYPE_FP16);
     KVCacheConfig kv_cache_config;
     kv_cache_config.reserve_block_ratio = 50;
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), false, nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -1961,7 +1961,7 @@ TEST_F(FIFOSchedulerTest, permanentlyOversizedStreamDoesNotBlockLaterStream) {
 
 TEST_F(FIFOSchedulerTest, retryableKVShortageStillAdmitsLaterSmallerStreams) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 5);
 
@@ -2016,7 +2016,7 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageStillAdmitsLaterSmallerStreams) {
 
 TEST_F(FIFOSchedulerTest, retryableKVShortageDoesNotConsumeBatchTokenBudget) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 4);
 
@@ -2065,7 +2065,7 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageDoesNotConsumeBatchTokenBudget) {
 
 TEST_F(FIFOSchedulerTest, batchTokenQuotaIncludesPostAllocationPrefixLength) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -2111,7 +2111,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaIncludesPostAllocationPrefixLength) {
 
 TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -2151,7 +2151,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
 
 TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndStopsTail) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -2188,8 +2188,8 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     auto tail_stream               = make_stream(1);
     auto errored_tail_stream       = make_stream(1);
     errored_tail_stream->reportError(ErrorCode::CANCELLED, "cancelled before admission");
-    ASSERT_TRUE(enqueueIndividually(
-        scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
+    ASSERT_TRUE(
+        enqueueIndividually(scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -2211,7 +2211,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
 
 TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -2257,7 +2257,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) 
 
 TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesUnpaddedFullInputLength) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -2290,7 +2290,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesUnpaddedFullInputLength) {
 
 TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsMetadataResidualToProgress) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -2352,7 +2352,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsMetadataResidualToProgress) {
 
 TEST_F(FIFOSchedulerTest, retryableMetadataStreamDoesNotBlockFollowingNormalStream) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -2404,7 +2404,7 @@ TEST_F(FIFOSchedulerTest, retryableMetadataStreamDoesNotBlockFollowingNormalStre
 
 TEST_F(FIFOSchedulerTest, explicitGroupResidualPrecedesFollowingExplicitGroup) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -2480,7 +2480,7 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
     kv_cache_config.reserve_block_ratio = 50;  // reserve = 5 blocks
 
     std::shared_ptr<KVCacheManager> cache_manager =
-        std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+        std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false, nullptr, kv_cache_config);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
 
@@ -2525,7 +2525,7 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
 
 TEST_F(FIFOSchedulerTest, testReuseCache) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
     ResourceContext resource_context;
@@ -2596,7 +2596,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
 
 TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
     ResourceContext resource_context;
@@ -2672,7 +2672,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
 
 TEST_F(FIFOSchedulerTest, testEnqueueGroup) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
     ResourceContext resource_context;
@@ -2736,7 +2736,7 @@ std::shared_ptr<GenerateStream> makeSingleStream(const ModelConfig&     model_co
 TEST_F(FIFOSchedulerTest, prefillShapeLimitAppliesToOrdinaryAndGroupAdmission) {
     auto verify_admission = [](bool grouped) {
         CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-        auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
         ASSERT_TRUE(cache_manager->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
@@ -2775,7 +2775,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeLimitAppliesToOrdinaryAndGroupAdmission) {
 
 TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -2792,8 +2792,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto cached_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
+    auto cached_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(60, 1));
     cached_stream->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(cached_stream->moveToNext(), StreamState::RUNNING);
     cached_stream->setReuseLength(59);
@@ -2801,8 +2800,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
     ASSERT_EQ(cached_stream->contextLength(), 1);
     ASSERT_EQ(cached_stream->prefixLength(), 59);
 
-    auto short_stream =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
+    auto short_stream = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(39, 1));
     ASSERT_TRUE(enqueueIndividually(scheduler, {cached_stream, short_stream}));
 
     auto result = scheduler.schedule();
@@ -2814,7 +2812,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
 
 TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -2830,9 +2828,8 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    auto long_single =
-        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
-    auto batched_query                                   = std::make_shared<GenerateInput>();
+    auto long_single   = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1));
+    auto batched_query = std::make_shared<GenerateInput>();
     batched_query->input_ids                             = torch::ones({10}, torch::kInt32);
     batched_query->generate_config                       = std::make_shared<GenerateConfig>();
     batched_query->generate_config->num_return_sequences = 3;
@@ -2852,7 +2849,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
 
 TEST_F(FIFOSchedulerTest, groupIsolation_size2) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -2890,7 +2887,7 @@ TEST_F(FIFOSchedulerTest, groupIsolation_size2) {
 
 TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExceedsInitedLimit) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -2932,7 +2929,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExcee
 
 TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExceedsBatchLimit) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -2969,7 +2966,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExcee
 
 TEST_F(FIFOSchedulerTest, enqueueGroupIgnoresCurrentlyInitedStreamsWhenGroupFitsLimit) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3012,7 +3009,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupIgnoresCurrentlyInitedStreamsWhenGroupFits
 
 TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupAtInitedLimit) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3054,7 +3051,7 @@ TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupAtInitedLimit) {
 
 TEST_F(FIFOSchedulerTest, groupTokenCapExceededKeepsResidualGroup) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3092,7 +3089,7 @@ TEST_F(FIFOSchedulerTest, groupTokenCapExceededKeepsResidualGroup) {
 
 TEST_F(FIFOSchedulerTest, groupCacheShortageDefersUnallocatedStreams) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
     ResourceContext resource_context;
@@ -3133,7 +3130,7 @@ TEST_F(FIFOSchedulerTest, groupCacheShortageStillAdmitsLaterSmallerStreams) {
     // needs three and must be deferred, the one-block request still fits, and
     // the final two-block request remains in the residual group.
     CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 5);
     ResourceContext resource_context;
@@ -3182,7 +3179,7 @@ TEST_F(FIFOSchedulerTest, groupCacheShortageStillAdmitsLaterSmallerStreams) {
 
 TEST_F(FIFOSchedulerTest, residualGroupPrecedesFollowingGroups) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3229,7 +3226,7 @@ TEST_F(FIFOSchedulerTest, residualGroupPrecedesFollowingGroups) {
 
 TEST_F(FIFOSchedulerTest, groupTokenCapStillAdmitsLaterSmallerStreams) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 100, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3262,7 +3259,7 @@ TEST_F(FIFOSchedulerTest, groupTokenCapStillAdmitsLaterSmallerStreams) {
 
 TEST_F(FIFOSchedulerTest, groupIsolation_size3) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3292,7 +3289,7 @@ TEST_F(FIFOSchedulerTest, groupIsolation_size3) {
 
 TEST_F(FIFOSchedulerTest, groupIsolation_size4) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3322,7 +3319,7 @@ TEST_F(FIFOSchedulerTest, groupIsolation_size4) {
 
 TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupWhenGroupWasEnqueuedFirst) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3364,7 +3361,7 @@ TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupWhenGroupWasEnqueuedFirst)
 
 TEST_F(FIFOSchedulerTest, waitingStreamsRunBeforeGroupWhenEnqueuedFirst) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3408,7 +3405,7 @@ TEST_F(FIFOSchedulerTest, waitingStreamsRunBeforeGroupWhenEnqueuedFirst) {
 
 TEST_F(FIFOSchedulerTest, continuousOrdinaryTrafficCannotStarveExplicitGroup) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 20, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3468,7 +3465,7 @@ TEST_F(FIFOSchedulerTest, continuousOrdinaryTrafficCannotStarveExplicitGroup) {
 
 TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 8, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3486,8 +3483,7 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
 
     // This ordinary stream is permanently too large for the per-round token
     // budget but valid against the Engine's total KV capacity.
-    auto blocked_normal = makeSingleStream(
-        model_config, runtime_config, resource_context, std::vector<int>(6, 1));
+    auto blocked_normal = makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(6, 1));
     vector<GenerateStreamPtr> small_group = {
         makeSingleStream(model_config, runtime_config, resource_context, {1}),
         makeSingleStream(model_config, runtime_config, resource_context, {2}),
@@ -3505,7 +3501,7 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
 
 TEST_F(FIFOSchedulerTest, groupIsolation_twoGroupsNotMixed) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3548,7 +3544,7 @@ TEST_F(FIFOSchedulerTest, groupIsolation_twoGroupsNotMixed) {
 
 TEST_F(FIFOSchedulerTest, waitingFallbackFromFrontGroupPrecedesNextGroup) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 10, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3622,7 +3618,7 @@ TEST_F(FIFOSchedulerTest, waitingFallbackFromFrontGroupPrecedesNextGroup) {
 
 TEST_F(FIFOSchedulerTest, groupIsolation_singlesCanMix) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3655,7 +3651,7 @@ TEST_F(FIFOSchedulerTest, groupIsolation_singlesCanMix) {
 
 TEST_F(FIFOSchedulerTest, groupIsolation_interleavedSinglesAndGroup) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto        cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3701,7 +3697,7 @@ TEST_F(FIFOSchedulerTest, groupIsolation_interleavedSinglesAndGroup) {
 
 TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunStillRespectsMaxGenerateBatchSize) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 10, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -3757,7 +3753,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunStillRespectsMaxGenerateBatchSize
 
 TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunCanTopUpToMaxGenerateBatchSize) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 10, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -3822,7 +3818,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunCanTopUpToMaxGenerateBatchSize) {
 
 TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsAllowsAlreadyInitedStreams) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 10, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -3870,7 +3866,7 @@ TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsAllowsAlreadyInitedStreams)
 
 TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunningStream) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 10, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
 
     ResourceContext resource_context;
@@ -3943,7 +3939,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunnin
 
 TEST_F(FIFOSchedulerTest, testCpPrefillBatchesMultipleStreams) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -3979,7 +3975,7 @@ TEST_F(FIFOSchedulerTest, testCpPrefillBatchesMultipleStreams) {
 
 TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotDelayWaitingStreams) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -4020,7 +4016,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotDelayWaitingStreams) {
 
 TEST_F(FIFOSchedulerTest, enqueueGroupDissolvesWhenOnlyPartFitsTokenCap) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -4065,7 +4061,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupDissolvesWhenOnlyPartFitsTokenCap) {
 
 TEST_F(FIFOSchedulerTest, testExpiredGroupMetadataDoesNotAffectWaitingStreams) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -4120,7 +4116,7 @@ TEST_F(FIFOSchedulerTest, testExpiredGroupMetadataDoesNotAffectWaitingStreams) {
 
 TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotBypassNormalTokenCap) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -4163,7 +4159,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotBypassNormalTokenCap) {
 
 TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotIsolateWaitingStreams) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
@@ -4226,7 +4222,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotIsolateWaitingStreams) {
 
 TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;

@@ -209,7 +209,7 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&     source,
         }
         groups.emplace(target_group.tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
+    return GroupedCacheLayerLayout(std::move(groups));
 }
 
 bool cacheStatusSnapshotEnabled() {
@@ -219,7 +219,7 @@ bool cacheStatusSnapshotEnabled() {
 
 }  // namespace
 
-KVCacheManager::KVCacheManager(const CacheConfig&                 config,
+KVCacheManager::KVCacheManager(CacheConfig&&                      config,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                const KVCacheConfig&               kv_cache_config,
@@ -239,6 +239,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool),
     warmup_(warmup) {
+    initialize(warmup);
+}
+
+void KVCacheManager::initialize(bool warmup) {
+
     if (warmup) {
         config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
     } else {
@@ -488,7 +493,7 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
     const auto          all_layout = allocator_->allLayerCacheBase();
     std::vector<size_t> global_layer_ids(config_.layer_num);
     std::iota(global_layer_ids.begin(), global_layer_ids.end(), 0);
-    auto main_topology = projectTopology(all_layout.topology(), global_layer_ids);
+    auto main_topology = projectTopology(config_, global_layer_ids);
     return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
 }
 
