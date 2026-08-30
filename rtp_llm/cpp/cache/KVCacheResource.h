@@ -83,8 +83,6 @@ private:
     const size_t     kernel_blocks_per_block_;
 };
 
-using PoolBlockIds = BlockIds;
-
 class KVCacheResource {
 public:
     void initGroups(const CacheConfig& config);
@@ -137,14 +135,20 @@ public:
         return local;
     }
 
+    // Reuse counters are always measured in global cache-key blocks, where one
+    // block is `CacheConfig::seq_size_per_block` tokens. CP projection does not
+    // change this unit.
     size_t reuseBlockNum() const;
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t deviceReuseBlockNum() const;
     void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t memoryReuseBlockNum() const;
     void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t remoteReuseBlockNum() const;
     void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
 
