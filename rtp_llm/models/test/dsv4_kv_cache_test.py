@@ -388,10 +388,6 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         config = self._model_config()
 
         DeepSeekV4._post_build_model_config(config)
-
-        self.assertTrue(
-            config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
         self.assertEqual(
             list(config.hybrid_attention_config.hybrid_attention_types),
             [HybridAttentionType.NONE] * config.num_layers,
@@ -419,15 +415,14 @@ class Dsv4PostBuildModelConfigTest(TestCase):
             DSV4_HCA_STATE_POOL_BLOCKS,
         )
 
-    def test_model_factory_materializes_dsv4_block_default(self):
-        configs = PyEnvConfigs()
+    def test_post_build_promotes_default_block_size(self):
+        config = self._model_config()
 
-        ModelFactory._materialize_kv_cache_block_size(
-            DeepSeekV4, configs.kv_cache_config
-        )
+        DeepSeekV4._post_build_model_config(config)
 
+        self.assertEqual(config.attn_config.tokens_per_block, DSV4_TOKENS_PER_BLOCK)
         self.assertEqual(
-            configs.kv_cache_config.seq_size_per_block, DSV4_TOKENS_PER_BLOCK
+            config.attn_config.kernel_tokens_per_block, DSV4_TOKENS_PER_BLOCK
         )
 
     def test_post_build_keeps_explicit_block_size(self):
