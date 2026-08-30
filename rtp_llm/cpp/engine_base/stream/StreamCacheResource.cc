@@ -593,9 +593,9 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     *batch_kv_cache_resource_ = kv_cache_resource;
 }
 
-bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
+bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, int previous_seq_len) {
     return resource_context_.cache_manager->updateKVBlock(
-        batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
+        batch_kv_cache_resource_, block_src_batch, previous_seq_len, block_update_mapping_);
 }
 
 bool StreamCacheResource::hasCacheKeys() const {
@@ -701,11 +701,10 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
     const auto& resource     = *read_context->resource();
-    const int   block_tokens = reuseBlockTokens();
+    const int   block_tokens = seqSizePerBlock();
 
     // Reuse counters are expressed in canonical cache-key units. Cap them before token conversion so
-    // every reused key is complete while at least one prompt token remains executable. Under CP this
-    // preserves a complete virtual block even when the prompt ends in an incomplete next virtual block.
+    // every reused key is complete while at least one prompt token remains executable. Counters remain in global cache-key units under CP.
     const int    reusable_tokens = std::max(stream_->seqLength() - 1, 0);
     const size_t reusable_block_cap =
         std::min(resource.reuseBlockNum(), static_cast<size_t>(reusable_tokens / block_tokens));

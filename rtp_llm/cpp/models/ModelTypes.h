@@ -13,6 +13,7 @@
 #include <string>
 #include <utility>
 #include <memory>
+#include <vector>
 
 namespace kmonitor {
 class MetricsReporter;
@@ -64,6 +65,13 @@ struct GptModelInitParams {
     // input_hiddens.
     int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
+    // Fallback block geometry for cacheless CUDA-graph prefill. Cache-backed
+    // graphs derive the same values from CacheConfig.
+    size_t tokens_per_block        = 0;
+    size_t kernel_tokens_per_block = 0;
+    // Cache routing topology remains available during cacheless prefill warm-up,
+    // where no KVCacheManager or block table exists yet.
+    std::vector<std::string> kv_cache_group_tags;
 };
 
 enum GptModelInputIndex : size_t {

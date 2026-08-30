@@ -11,8 +11,8 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
@@ -44,7 +44,7 @@ public:
     // 初始化和配置相关
     bool init();
     bool initialized() const {
-        return allocator_ != nullptr;
+        return coordinator_cache_manager_ != nullptr;
     }
 
     const CacheConfig& cacheConfig() const;
@@ -67,14 +67,11 @@ public:
                                int                            target_batch_size) const;
 
     // 块操作相关
-    void blockCopy(int src_block_index, int dest_block_index);
-    void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-    void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
+                       int                             previous_seq_len,
                        std::vector<TaggedBlockIdPair>& block_update_mapping);
 
     // 地址转换和缓冲区访问
@@ -82,9 +79,9 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
                   convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(
+    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBuffer(
         int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
@@ -166,7 +163,6 @@ public:
     }
 
 private:
-    void initialize(bool warmup);
     void initConnectorCoordinator();
     void initCacheEventPublisher();
     void stopCacheEventPublisher();
@@ -175,8 +171,10 @@ private:
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
 
     // 成员变量
-    CacheConfig         config_;
-    KVCacheAllocatorPtr allocator_;
+    void initialize(bool warmup);
+
+    CacheConfig                config_;
+    CoordinatorCacheManagerPtr coordinator_cache_manager_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;
