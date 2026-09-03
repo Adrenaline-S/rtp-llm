@@ -253,6 +253,7 @@ def build_metadata_eager(
         device=device,
         paged_block_tables=paged_block_tables or None,
         paged_pool_entries_per_block=paged_entries_per_block or None,
+        paged_pool_tokens_per_block=paged_tokens_per_block or None,
     )
 
 
