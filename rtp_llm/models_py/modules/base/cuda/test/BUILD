@@ -74,8 +74,9 @@ py_test (
     name = "get_topk_ragged_cp_test",
     srcs = ["get_topk_ragged_cp_test.py"],
     deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    env = {"GPU_COUNT": "2"},
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'2'},
 )
 
 py_test (
