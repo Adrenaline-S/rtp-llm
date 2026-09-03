@@ -9,6 +9,7 @@ from unittest.mock import patch
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
@@ -60,8 +61,30 @@ class ServerConfigPortLayoutTest(TestCase):
 class GenerateConfigTest(TestCase):
 
     @patch.dict("os.environ", _jit_env(), clear=True)
-    def test_sequence_block_platform_defaults_preserve_explicit_64(self):
+    def test_setup_preserves_sequence_block_size_provenance(self):
         from rtp_llm.config.server_config_setup import setup_default_args
+
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = "fake_model"
+        setup_default_args(configs)
+        self.assertEqual(configs.kv_cache_config.seq_size_per_block, 0)
+
+        explicit = PyEnvConfigs()
+        explicit.model_args.model_type = "fake_model"
+        explicit.kv_cache_config.seq_size_per_block = 64
+        setup_default_args(explicit)
+        self.assertEqual(explicit.kv_cache_config.seq_size_per_block, 64)
+
+    def test_model_factory_materializes_model_or_platform_block_default(self):
+        class PlatformDefaultModel:
+            @classmethod
+            def default_kv_cache_tokens_per_block(cls):
+                return 0
+
+        class ModelDefault256:
+            @classmethod
+            def default_kv_cache_tokens_per_block(cls):
+                return 256
 
         for device_path, expected in (
             (None, 64),
@@ -70,22 +93,27 @@ class GenerateConfigTest(TestCase):
         ):
             with self.subTest(device_path=device_path):
                 configs = PyEnvConfigs()
-                configs.model_args.model_type = "fake_model"
                 with patch(
                     "rtp_llm.config.kv_cache_config.os.path.exists",
                     side_effect=lambda path, selected=device_path: path == selected,
                 ):
-                    setup_default_args(configs)
+                    ModelFactory._materialize_kv_cache_block_size(
+                        PlatformDefaultModel, configs.kv_cache_config
+                    )
                 self.assertEqual(configs.kv_cache_config.seq_size_per_block, expected)
 
+        model_default = PyEnvConfigs()
+        ModelFactory._materialize_kv_cache_block_size(
+            ModelDefault256, model_default.kv_cache_config
+        )
+        self.assertEqual(model_default.kv_cache_config.seq_size_per_block, 256)
+
         explicit = PyEnvConfigs()
-        explicit.model_args.model_type = "fake_model"
         explicit.kv_cache_config.seq_size_per_block = 64
-        with patch(
-            "rtp_llm.config.kv_cache_config.os.path.exists",
-            return_value=True,
-        ):
-            setup_default_args(explicit)
+        with patch("rtp_llm.config.kv_cache_config.os.path.exists", return_value=True):
+            ModelFactory._materialize_kv_cache_block_size(
+                ModelDefault256, explicit.kv_cache_config
+            )
         self.assertEqual(explicit.kv_cache_config.seq_size_per_block, 64)
 
     def _build_block_sizes(
