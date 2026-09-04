@@ -54,6 +54,7 @@ cc_library(
     ],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:model_config",
     ],
@@ -61,15 +62,38 @@ cc_library(
 )
 
 cc_test(
-    name = "cache_topology_test",
-    srcs = ["CacheTopologyTest.cc"],
+    name = "cache_config_ownership_test",
+    srcs = ["CacheConfigOwnershipTest.cc"],
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_config",
+        ":cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
     env = {},
+)
+
+cc_test(
+    name = "cache_semantic_snapshot_test",
+    srcs = ["CacheSemanticSnapshotTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "cache_config_creator_test",
+    srcs = ["CacheConfigCreatorTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -89,12 +113,19 @@ cc_test(
     srcs = ["KVCacheLayoutViewTest.cc"],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps(),
+    ] + torch_deps() + cuda13_torch_link_deps,
     env = {},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -106,6 +137,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
@@ -160,25 +192,15 @@ cc_library(
 )
 
 cc_test(
-    name = "block_cache_test",
-    srcs = [
-        "BlockCacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = block_cache_test_deps,
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "shared_block_cache_test",
     srcs = [
         "SharedBlockCacheTest.cc",
     ],
     data = [],
     copts = test_copts,
-    deps = block_cache_test_deps,
+    deps = block_cache_test_deps + [
+        ":block_pool_test_helper",
+    ],
     env = {},
     exec_properties = {'gpu':'H20'},
 )
@@ -210,9 +232,9 @@ cc_test(
 )
 
 cc_test(
-    name = "full_kv_cache_group_test",
+    name = "full_cache_manager_test",
     srcs = [
-        "FullKVCacheGroupTest.cc",
+        "FullCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -224,15 +246,15 @@ cc_test(
 )
 
 cc_test(
-    name = "single_type_kv_cache_allocator_test",
+    name = "coordinator_cache_manager_single_path_test",
     srcs = [
-        "SingleTypeKVCacheAllocatorTest.cc",
+        "CoordinatorCacheManagerSinglePathTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/test/mock:mock_coordinator_cache_manager_lib",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -247,7 +269,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/test/mock:mock_coordinator_cache_manager_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
@@ -272,9 +294,9 @@ cc_test(
 )
 
 cc_test(
-    name = "linear_kv_cache_group_test",
+    name = "linear_cache_manager_test",
     srcs = [
-        "LinearKVCacheGroupTest.cc",
+        "LinearCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -286,9 +308,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_kv_cache_allocator_test",
+    name = "coordinator_cache_manager_hybrid_path_test",
     srcs = [
-        "HybridTypeKVCacheAllocatorTest.cc",
+        "CoordinatorCacheManagerHybridPathTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -300,9 +322,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_kv_cache_allocator_cp_shard_test",
+    name = "coordinator_cache_manager_cp_shard_test",
     srcs = [
-        "HybridKVCacheAllocatorCPShardTest.cc",
+        "CoordinatorCacheManagerCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -314,9 +336,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_test",
+    name = "coordinator_cache_manager_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorTest.cc",
+        "CoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -328,9 +350,9 @@ cc_test(
 )
 
 cc_test(
-    name = "swa_kv_cache_group_test",
+    name = "swa_cache_manager_test",
     srcs = [
-        "SWAKVCacheGroupTest.cc",
+        "SWACacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -342,14 +364,14 @@ cc_test(
 )
 
 cc_test(
-    name = "swa_kv_cache_group_malloc_range_test",
+    name = "swa_cache_manager_malloc_range_test",
     srcs = [
-        "SWAKVCacheGroupMallocRangeTest.cc",
+        "SWACacheManagerMallocRangeTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache:kv_cache_group",
+        "//rtp_llm/cpp/cache:single_type_cache_manager",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,

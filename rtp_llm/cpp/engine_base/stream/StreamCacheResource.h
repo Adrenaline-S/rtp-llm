@@ -58,7 +58,7 @@ public:
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via
     // getKVBlockUpdateMapping/KVCacheManager::blockBatchCopy before reuse.
-    bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block);
+    bool updateKVBlock(const std::vector<int>& block_src_batch, int previous_seq_len);
 
     // clear block copy mapping
     void clearKVBlockUpdateMapping() {
@@ -76,16 +76,6 @@ public:
 
     int seqSizePerBlock() const {
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-    }
-
-    // KVCacheResource reuse counters follow the canonical cache-key namespace.
-    // Under CP sharding one canonical block spans cp_size physical blocks.
-    int reuseBlockTokens() const {
-        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
-        if (mapper && mapper->isSharded()) {
-            return mapper->virtualBlockSize();
-        }
-        return seqSizePerBlock();
     }
 
     void setNeedReleaseResource(bool need_release_resource) {
