@@ -36,7 +36,7 @@ TEST_F(NormalEngineTest, testDecodeWarmupReserveTokensAreConvertedToBlocksAfterA
         NormalEngine::warmUpReservedBlockCount(/*seq_len=*/1, /*reserve_tokens=*/1, /*tokens_per_block=*/0));
 }
 
-TEST_F(NormalEngineTest, testPrefillWarmUpPreservesCachelessGroupTags) {
+TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     CustomConfig config;
     config.warm_up = true;
 
@@ -48,13 +48,19 @@ TEST_F(NormalEngineTest, testPrefillWarmUpPreservesCachelessGroupTags) {
     const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
     const KVCacheSpecDesc indexer_desc{"indexer_kv", KVCacheSpecType::MultiHeadAttention};
     params.model_config_.kv_cache_spec_descs.assign(static_cast<size_t>(params.model_config_.num_layers),
-                                                     {default_desc, indexer_desc});
+                                                    {default_desc, indexer_desc});
 
-    std::vector<std::string> warmup_group_tags;
+    bool saw_cacheless_warmup          = false;
     NormalExecutor::test_model_factory = [&](const GptModelInitParams& init_params) {
         if (init_params.cache_manager == nullptr) {
             EXPECT_FALSE(init_params.kv_cache_layer_layout.has_value());
-            warmup_group_tags = init_params.kv_cache_group_tags;
+            EXPECT_TRUE(init_params.kv_cache_group_tags.empty());
+            return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+                saw_cacheless_warmup = true;
+                EXPECT_TRUE(inputs.warmup);
+                EXPECT_FALSE(inputs.kv_cache_block_id.defined());
+                EXPECT_FALSE(inputs.kv_cache_kernel_block_id.defined());
+            });
         }
         return std::make_unique<MockModel>(model_config.vocab_size);
     };
@@ -66,7 +72,7 @@ TEST_F(NormalEngineTest, testPrefillWarmUpPreservesCachelessGroupTags) {
 
     auto engine = std::make_shared<NormalEngine>(params, nullptr);
 
-    EXPECT_EQ(warmup_group_tags, (std::vector<std::string>{"default", "indexer_kv"}));
+    EXPECT_TRUE(saw_cacheless_warmup);
 }
 
 TEST_F(NormalEngineTest, testDecodeWarmUpUsesHybridCacheTagsAndGeometry) {
