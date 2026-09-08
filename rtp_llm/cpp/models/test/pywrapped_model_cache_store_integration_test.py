@@ -100,6 +100,30 @@ def _offsets_by_tag(result: dict) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_cacheless_multigroup_warmup_exposes_single_input(self):
+        class WarmupModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs):
+                assert self.kv_cache is None
+                attention_inputs = inputs.attention_inputs
+                assert not isinstance(attention_inputs, dict)
+                assert attention_inputs.is_prefill
+                assert not attention_inputs.is_target_verify
+                assert attention_inputs.kv_cache_kernel_block_id is None
+                assert attention_inputs.kv_cache_kernel_block_id_device is None
+                assert attention_inputs.cache_store_inputs is None
+                return PyModelOutputs(
+                    torch.zeros(
+                        (inputs.input_ids.numel(), 1),
+                        dtype=torch.float16,
+                        device=inputs.input_ids.device,
+                    )
+                )
+
+        model = WarmupModel()
+        result = run_scenario(model, "cacheless_warmup")
+        self.assertEqual(model.forward_calls, 1)
+        self.assertEqual(result["records"], [])
+
     def _assert_group_input_failure_has_no_publication(self, scenario: str) -> None:
         model = CacheStoreForwardModel()
         result = run_invalid_group_input_diagnostics(model, scenario)

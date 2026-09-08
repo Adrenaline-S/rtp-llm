@@ -572,9 +572,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                     MlaOpsType::AUTO);
     });
 
-    auto scenario    = makeScenario(scenario_name);
-    auto cache_store = std::make_shared<RecordingCacheStore>();
-    auto manager     = std::make_shared<KVCacheManager>(std::move(scenario).manager_config,
+    const bool cacheless_warmup = scenario_name == "cacheless_warmup";
+    auto       scenario         = makeScenario(cacheless_warmup ? "multi_tag" : scenario_name);
+    auto       cache_store      = std::make_shared<RecordingCacheStore>();
+    auto       manager          = std::make_shared<KVCacheManager>(std::move(scenario).manager_config,
                                                     /*warmup=*/true,
                                                     /*metrics_reporter=*/nullptr,
                                                     KVCacheConfig{},
@@ -592,7 +593,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     GptModelInitParams params{weights,
                               description,
-                              scenario.layout,
+                              cacheless_warmup ? std::nullopt : std::make_optional(scenario.layout),
                               scenario.model_id,
                               scenario.parallelism,
                               HWKernelConfig{},
@@ -606,6 +607,14 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               /*hidden_size=*/1,
                               manager,
                               scenario.mtp_cache_config_index};
+
+    if (cacheless_warmup) {
+        params.cache_manager                     = nullptr;
+        params.kv_cache_group_tags               = {"full", "linear"};
+        scenario.inputs.warmup                   = true;
+        scenario.inputs.kv_cache_block_id        = torch::Tensor();
+        scenario.inputs.kv_cache_kernel_block_id = torch::Tensor();
+    }
 
     {
         PyWrappedModel model(params, std::move(py_model));

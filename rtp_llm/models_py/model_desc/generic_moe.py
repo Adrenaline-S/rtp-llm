@@ -344,8 +344,7 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         fmha_impl: Any,
-        kv_cache: Optional[LayerKVCache]
-        | Mapping[str, Optional[LayerKVCache]] = None,
+        kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -430,6 +429,10 @@ class GenericMoeModel(GptModelBase):
     ) -> Any:
         if self._uses_sparse_mla():
             attention_inputs = get_attention_inputs_value(inputs)
+            if not isinstance(attention_inputs, Mapping) and self.kv_cache is None:
+                # Cacheless warmup shares one input and skips the indexer.
+                fmha_impl = super().prepare_fmha_impl(inputs, is_cuda_graph)
+                return {"default": fmha_impl, "indexer_kv": fmha_impl}
             raw_tags = (
                 list(attention_inputs) if isinstance(attention_inputs, Mapping) else []
             )

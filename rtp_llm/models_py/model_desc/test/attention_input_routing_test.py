@@ -18,6 +18,7 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     _maybe_write_cp_cache_store,
     _write_cp_cache_store,
 )
+from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 class FakeKVCache:
@@ -56,6 +57,40 @@ class RoutingModel(GptModelBase):
 
 
 class AttentionInputRoutingTest(unittest.TestCase):
+    def test_sparse_mla_cacheless_single_input_prepares_one_shared_impl(self):
+        model = object.__new__(GenericMoeModel)
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+            ),
+            kv_cache=None,
+            parallelism_config=object(),
+            weight=object(),
+            fmha_config=object(),
+        )
+        attention_inputs = PyAttentionInputs()
+        inputs = SimpleNamespace(attention_inputs=attention_inputs)
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl"
+        ) as factory:
+            routes = model.prepare_fmha_impl(inputs)
+            factory.assert_called_once_with(
+                model.config,
+                model.parallelism_config,
+                model.weight,
+                attention_inputs,
+                model.fmha_config,
+                False,
+            )
+            self.assertIs(routes["default"], factory.return_value)
+            self.assertIs(routes["indexer_kv"], factory.return_value)
+
+            model.__dict__["kv_cache"] = FakeKVCache([["default", "indexer_kv"]])
+            factory.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, "exactly.*tags"):
+                model.prepare_fmha_impl(inputs)
+            factory.assert_not_called()
+
     def test_generic_sparse_mla_prepares_only_exact_semantic_groups(self):
         model = object.__new__(GenericMoeModel)
         model.__dict__["config"] = SimpleNamespace(
