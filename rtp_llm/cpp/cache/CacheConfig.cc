@@ -43,6 +43,8 @@ uint32_t checkedLayerCount(size_t layer_count) {
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
+           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget
+           && lhs.memory_placement == rhs.memory_placement
            && lhs.explicit_block_num == rhs.explicit_block_num && lhs.active_tail_blocks == rhs.active_tail_blocks
            && lhs.validate_tail_blocks == rhs.validate_tail_blocks && lhs.cp_mapping == rhs.cp_mapping
            && lhs.cp_slice == rhs.cp_slice;
@@ -96,6 +98,7 @@ void CacheConfig::validateAndBuildIndex(std::vector<CacheGroup>&                
                                         std::unordered_map<std::string, std::vector<int>>& tag_to_layer_ids) {
     for (size_t idx = 0; idx < groups.size(); ++idx) {
         auto& group = groups[idx];
+        checkGroupResidencyBudget(group.policy, group.tag);
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "CacheConfig group %zu has empty tag", idx);
         RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig tag=%s has null spec", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
@@ -193,6 +196,9 @@ size_t CacheConfig::swaBlockSizeBytes() const {
 size_t CacheConfig::explicitlySizedPoolReserveBytes() const {
     size_t bytes = 0;
     for (const auto& group_config : groups_) {
+        if (!group_config.policy.charge_to_paged_budget) {
+            continue;
+        }
         const auto reserve = checkedMultiply(static_cast<size_t>(group_config.policy.explicit_block_num),
                                              blockSizeBytes(group_config.tag),
                                              "explicit pool reserve bytes");

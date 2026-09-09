@@ -4,6 +4,8 @@ import unittest
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
+    CacheMemoryPlacement,
+    CacheMemoryPolicyDesc,
     CacheTailPolicyDesc,
     CpBlockMappingMode,
     CpBlockSliceMode,
@@ -59,7 +61,7 @@ class _PreviousKVCacheConfig:
         config.load_cache_retry_times = 17
         config.dsv4_fixed_pool_blocks = 101
         config.dsv4_hca_state_pool_blocks = 203
-        previous_state = config.__getstate__() + (True,)
+        previous_state = config.__getstate__()[:-1] + (True,)
         return _new_kv_cache_config, (), previous_state
 
 
@@ -99,13 +101,13 @@ class _PreviousKVCacheSpecDesc:
         tail.validate_tail_blocks = True
         desc.tail = tail
 
-        # Drop the newly restored alignment suffix to reproduce the preceding
-        # 19-item layout, then insert the removed memory policy field.
+        # Reproduce the upstream layout without the alignment suffix.
         current_state = list(desc.__getstate__())[:-1]
         current_state[16] = _PreviousCacheCapacityPolicyDesc()
-        current_state[18] = _PreviousCacheCpPolicyDesc()
+        current_state[19] = _PreviousCacheCpPolicyDesc()
         # Previous 20-item layout inserted memory between capacity and tail.
-        previous_state = tuple(current_state[:17] + [self.memory] + current_state[17:])
+        current_state[17] = self.memory
+        previous_state = tuple(current_state)
         return _new_kv_cache_spec_desc, (), previous_state
 
 
@@ -204,8 +206,7 @@ class CacheConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.load_cache_retry_times, 17)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 101)
         self.assertEqual(restored.dsv4_hca_state_pool_blocks, 203)
-        with self.assertRaises(AttributeError):
-            _ = restored.dsv4_fixed_pool_use_memory
+        self.assertFalse(restored.dsv4_fixed_pool_use_memory)
 
     def test_previous_57_item_format_is_loaded(self):
         restored = pickle.loads(pickle.dumps(_PreviousKVCacheConfig()))
@@ -214,13 +215,12 @@ class CacheConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.load_cache_retry_times, 17)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 101)
         self.assertEqual(restored.dsv4_hca_state_pool_blocks, 203)
-        with self.assertRaises(AttributeError):
-            _ = restored.dsv4_fixed_pool_use_memory
+        self.assertTrue(restored.dsv4_fixed_pool_use_memory)
 
     def test_unknown_kv_cache_config_layout_is_rejected(self):
         config = KVCacheConfig()
         for state in (
-            config.__getstate__()[:-1],
+            config.__getstate__()[:-2],
             config.__getstate__() + (True, False),
         ):
             with (
@@ -280,6 +280,9 @@ class CacheConfigPickleTest(unittest.TestCase):
         desc.tag = "pickle-policy"
         desc.cache_type = KVCacheSpecType.OPAQUE_STATE
         desc.kernel_tokens_per_block_alignment = 128
+        memory = CacheMemoryPolicyDesc()
+        memory.placement = CacheMemoryPlacement.HOST
+        desc.memory = memory
         desc.capacity = capacity
         desc.tail = tail
         desc.cp = cp
@@ -290,6 +293,7 @@ class CacheConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.tag, "pickle-policy")
         self.assertEqual(restored.cache_type, KVCacheSpecType.OPAQUE_STATE)
         self.assertEqual(restored.kernel_tokens_per_block_alignment, 128)
+        self.assertEqual(restored.memory.placement, CacheMemoryPlacement.HOST)
         self.assertIs(type(restored.capacity), CacheCapacityPolicyDesc)
         self.assertIs(restored.capacity.reservable, True)
         self.assertEqual(restored.capacity.explicit_block_num, 409)
@@ -305,9 +309,9 @@ class CacheConfigPickleTest(unittest.TestCase):
         )
 
     def test_current_policy_writers_keep_compact_layouts(self):
-        self.assertEqual(len(CacheCapacityPolicyDesc().__getstate__()), 2)
+        self.assertEqual(len(CacheCapacityPolicyDesc().__getstate__()), 3)
         self.assertEqual(len(CacheCpPolicyDesc().__getstate__()), 4)
-        self.assertEqual(len(KVCacheSpecDesc().__getstate__()), 20)
+        self.assertEqual(len(KVCacheSpecDesc().__getstate__()), 21)
 
     def test_previous_kv_cache_spec_without_alignment_is_loaded(self):
         state = KVCacheSpecDesc().__getstate__()[:-1]
@@ -334,16 +338,14 @@ class CacheConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.cp.mapping, CpBlockMappingMode.COMPACT_LAST_RANK)
         self.assertIs(restored.cp.align_payload, False)
 
-    def test_previous_kv_cache_spec_with_memory_policy_is_rejected(self):
-        with self.assertRaisesRegex(
-            RuntimeError, "convert the pickle offline with the previous RTP-LLM version"
-        ):
-            pickle.loads(
-                pickle.dumps(
-                    _PreviousKVCacheSpecDesc(memory="legacy-memory-policy"),
-                    protocol=4,
-                )
-            )
+    def test_previous_kv_cache_spec_with_memory_policy_is_loaded(self):
+        memory = CacheMemoryPolicyDesc()
+        memory.placement = CacheMemoryPlacement.HOST_PINNED
+        restored = pickle.loads(
+            pickle.dumps(_PreviousKVCacheSpecDesc(memory=memory), protocol=4)
+        )
+        self.assertEqual(restored.memory.placement, CacheMemoryPlacement.HOST_PINNED)
+        self.assertTrue(restored.capacity.charge_to_paged_budget)
 
     def test_unknown_policy_layouts_are_rejected(self):
         invalid_cases = (
@@ -351,7 +353,7 @@ class CacheConfigPickleTest(unittest.TestCase):
             (CacheCapacityPolicyDesc, (True, 1, False, None)),
             (CacheCpPolicyDesc, (None, None, None)),
             (CacheCpPolicyDesc, (None, None, None, None, None, None)),
-            (KVCacheSpecDesc, KVCacheSpecDesc().__getstate__()[:-2]),
+            (KVCacheSpecDesc, KVCacheSpecDesc().__getstate__()[:-3]),
             (KVCacheSpecDesc, KVCacheSpecDesc().__getstate__() + (None, None)),
         )
         for config_type, state in invalid_cases:

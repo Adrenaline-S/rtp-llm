@@ -39,14 +39,14 @@ class HybridKVCacheSpecTest(TestCase):
 
         self.assertEqual(desc.tag, "semantic_group")
 
-    def test_removed_group_memory_policy_keys_are_unknown(self):
+    def test_group_memory_policy_keys_are_available(self):
         capacity = CacheCapacityPolicyDesc()
-        with self.assertRaises(AttributeError):
-            setattr(capacity, "charge_to_" + "paged_budget", True)
+        capacity.charge_to_paged_budget = True
+        self.assertTrue(capacity.charge_to_paged_budget)
 
         desc = KVCacheSpecDesc()
-        with self.assertRaises(AttributeError):
-            desc.memory = None
+        desc.memory = None
+        self.assertIsNone(desc.memory)
 
     def test_qwen_v2_mtp_default_desc_matches_model_layers(self):
         config = ModelConfig()

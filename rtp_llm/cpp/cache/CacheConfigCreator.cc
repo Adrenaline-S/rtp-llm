@@ -352,7 +352,10 @@ TopologyStorageSummary finalizeGroupStorage(CacheTopologyPair& topology) {
                                                                  / explicit_blocks,
                                     "cache group tag=%s explicit reserve bytes overflow",
                                     group.tag.c_str());
-            summary.block_budget.explicit_pool_reserve_bytes += explicit_blocks * bytes_per_pool;
+            checkGroupResidencyBudget(group.policy, group.tag);
+            if (group.policy.charge_to_paged_budget) {
+                summary.block_budget.explicit_pool_reserve_bytes += explicit_blocks * bytes_per_pool;
+            }
         } else if (group.policy.group_type == CacheGroupType::SWA) {
             summary.block_budget.swa_block_bytes += bytes_per_pool;
         } else if (group.policy.group_type == CacheGroupType::FULL
@@ -421,6 +424,8 @@ std::string mtpSharedPoolSummary(const CacheGroup& group) {
        << ",prefix_reuse=" << group.policy.enable_prefix_reuse
        << ",evict=" << static_cast<int>(group.policy.evict_policy) << ",reservable=" << group.policy.reservable
        << ",explicit_blocks=" << group.policy.explicit_block_num
+       << ",charge_to_paged_budget=" << group.policy.charge_to_paged_budget
+       << ",memory_placement=" << static_cast<int>(group.policy.memory_placement)
        << ",active_tail_blocks=" << group.policy.active_tail_blocks
        << ",validate_tail_blocks=" << group.policy.validate_tail_blocks
        << ",cp_mapping=" << static_cast<int>(group.policy.cp_mapping)

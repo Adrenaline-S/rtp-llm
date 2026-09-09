@@ -86,6 +86,7 @@ public:
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
+    virtual CacheMemoryPlacement memoryPlacement() const;
     uint32_t                explicitBlockNum() const;
     size_t                  activeTailBlocks() const;
 
