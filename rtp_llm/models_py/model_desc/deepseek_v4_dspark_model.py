@@ -596,7 +596,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         attention_inputs = inputs.attention_inputs
         block_table = self._swa_block_table(attention_inputs, batch_size)
         tokens_per_block = int(require_pool_tokens_per_block(self.kv_cache, tag=SWA_KV))
-        swa_attention_inputs = as_attention_inputs_by_tag(
+        swa_attention_inputs = as_attention_inputs_by_group(
             attention_inputs, self.kv_cache
         ).get(SWA_KV)
         write_cache_store_impl = create_write_cache_store_impl(

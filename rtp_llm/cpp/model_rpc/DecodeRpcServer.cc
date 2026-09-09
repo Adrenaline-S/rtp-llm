@@ -430,7 +430,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     const auto& error_info      = load_result.error_info;
     auto&       generate_stream = decode_context.getStream();
     const bool  use_independent_block_pools =
-        generate_stream->resourceContext().cache_manager->cacheConfig().use_independent_block_pools;
+        generate_stream->resourceContext().cache_manager->cacheConfig().groupNums() > 0;
     const int loaded_reuse_len = markLoadedCacheReuse(
         generate_stream, load_result, generate_stream->seqSizePerBlock(), use_independent_block_pools);
     if (loaded_reuse_len > 0) {
@@ -965,13 +965,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                                         load_context.reuse_block_size,
                                                         load_context.prefill_cp_size);
     if (!geometry_error.ok()) {
-        return geometry_error;
+        return {geometry_error, 0};
     }
     if (engine_->isMTPEagle() && propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
         && !propose_maga_init_params_->mtp_model_params_->empty()) {
         const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
         if (mtp_load_plan.empty()) {
-            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing");
+            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing"), 0};
         }
         for (const auto& module_plan : mtp_load_plan) {
             const auto& mtp_cache_config =
@@ -982,7 +982,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                                            load_context.reuse_block_size,
                                                            load_context.prefill_cp_size);
             if (!geometry_error.ok()) {
-                return geometry_error;
+                return {geometry_error, 0};
             }
         }
     }
@@ -1135,7 +1135,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, tag);
                 const auto     load_plan  = groupLoadPlan(cache_config, use_hybrid, tag, block_num);
                 const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
-                    cache_config.seqSizePerBlockForTag(tag), cache_config.seq_size_per_block);
+                    cache_config.group(tag).seqSizePerBlock(), cache_config.seq_size_per_block);
 
                 if (!shouldLoadGroupFromPeer(cache_config, group_type, tag, i)) {
                     continue;

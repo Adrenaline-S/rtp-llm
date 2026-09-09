@@ -777,7 +777,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig());
         return resource;
     };
     auto makeCompleteTokens = [spb](int seq_len) {
@@ -795,7 +795,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
     for (int cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
         // Each producer owns the rank-local compact table. Passing cp_rank/cp_size
         // to runtimeWriteCacheStore below projects it into the global key space.
-        auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+        auto manager = std::make_shared<KVCacheManager>(CacheConfig(config), /*warmup=*/false, nullptr);
         ASSERT_TRUE(manager->init());
         auto resource = makeResource(manager);
         ASSERT_TRUE(manager
@@ -806,12 +806,12 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                   false,
                                   false})
                         .success);
-        ASSERT_EQ(resource->blocksNum(0, 0), logical_blocks / cp_size);
+        ASSERT_EQ(resource->blocksNum(0, "default"), logical_blocks / cp_size);
         prefill_managers.push_back(std::move(manager));
         prefill_resources.push_back(std::move(resource));
     }
 
-    auto decode_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    auto decode_manager = std::make_shared<KVCacheManager>(CacheConfig(config), /*warmup=*/false, nullptr);
     ASSERT_TRUE(decode_manager->init());
     auto decode_resource = makeResource(decode_manager);
     ASSERT_TRUE(decode_manager
@@ -822,7 +822,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                               false,
                               false})
                     .success);
-    ASSERT_EQ(decode_resource->blocksNum(0, 0), logical_blocks);
+    ASSERT_EQ(decode_resource->blocksNum(0, "default"), logical_blocks);
 
     std::vector<CacheKeyType> cache_keys;
     for (int logical_pos = 0; logical_pos < logical_blocks; ++logical_pos) {
@@ -833,7 +833,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
     for (int cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
         const auto& manager  = prefill_managers[cp_rank];
         const auto& resource = prefill_resources[cp_rank];
-        const auto& blocks   = resource->blocks(0, 0);
+        const auto& blocks   = resource->blocks(0, "default");
         auto        layout   = manager->getMainModelCacheLayerLayout();
         auto        kv_base  = layout.at("default", 0).kv_addr;
 
@@ -846,13 +846,12 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
         auto inputs = makeDsv4WriteInputs(request_id,
                                           logical_blocks * spb,
                                           /*prefix_length=*/0,
-                                          blockIdsTensor(resource, /*gid=*/0),
+                                          blockIdsTensor(resource, "default"),
                                           cache_keys);
         torch_ext::LayerKVCache layer_cache;
         layer_cache.kv_cache_base      = kv_base;
         layer_cache.seq_size_per_block = spb;
         layer_cache.layer_id           = 0;
-        layer_cache.group_id           = 0;
         layer_cache.tag                = "default";
         runtimeWriteCacheStore(inputs,
                                layer_cache,
@@ -871,7 +870,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                          model_id, std::to_string(cache_keys[logical_pos]), /*layer_id=*/0, "default");
             const auto block = stored_request->getBlock(key);
             ASSERT_NE(block, nullptr) << "cp_rank=" << cp_rank << " logical_pos=" << logical_pos;
-            const auto transfer_bytes = manager->cacheConfig().kvBlockStrideBytesForGroup(0);
+            const auto transfer_bytes = manager->cacheConfig().group("default").kv_block_stride_bytes;
             const auto expected_address = static_cast<uint8_t*>(kv_base.data_ptr())
                                           + static_cast<size_t>(blocks[local_pos]) * transfer_bytes;
             EXPECT_EQ(block->addr.get(), expected_address);
@@ -887,7 +886,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
     ASSERT_EQ(cache_store->stored_blocks_.size(), static_cast<size_t>(logical_blocks));
 
     for (int logical_pos = 0; logical_pos < logical_blocks; ++logical_pos) {
-        const auto decode_block = decode_resource->blocks(0, 0)[static_cast<size_t>(logical_pos)];
+        const auto decode_block = decode_resource->blocks(0, "default")[static_cast<size_t>(logical_pos)];
         fillDsv4RegionBytes(decode_manager, decode_block, /*layer_id=*/0, "default", 0xEE);
     }
 
@@ -908,7 +907,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                                      "cp-sharded-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->groupBlocks(),
+                                                     decode_resource->blocksByGroup(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -928,8 +927,8 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
                                          model_id, std::to_string(cache_keys[logical_pos]), /*layer_id=*/0, "default");
             const auto block = loaded_request->getBlock(key);
             ASSERT_NE(block, nullptr) << "cp_rank=" << cp_rank << " logical_pos=" << logical_pos;
-            const auto decode_block = decode_resource->blocks(0, 0)[static_cast<size_t>(logical_pos)];
-            const auto expected = decode_manager->convertIndexToBufferByTag(decode_block, 0, "default");
+            const auto decode_block = decode_resource->blocks(0, "default")[static_cast<size_t>(logical_pos)];
+            const auto expected = decode_manager->convertIndexToBuffer(decode_block, 0, "default");
             ASSERT_EQ(expected.size(), 1u);
             EXPECT_EQ(block->addr.get(), expected[0].addr);
             EXPECT_EQ(block->len, expected[0].size_bytes);

@@ -12,7 +12,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
@@ -107,7 +107,7 @@ makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride, uint32_t blo
     ctx.seq_size_per_block = 1;
     ctx.attn_config        = &attn_config;
     ctx.parallelism_config = &parallelism_config;
-    auto spec              = SpecBuilder::build(desc, ctx);
+    auto spec              = SpecBuilder::build(desc, ctx).spec;
 
     CacheGroup group;
     group.tag                       = tag;
@@ -443,15 +443,15 @@ TEST_F(CacheStoreAsyncWriterTest, LatePublicationCallbackAfterTimeoutIsIgnored) 
 
 TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicationCompletes) {
     auto config    = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/2);
-    auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());
     const auto initial_free_blocks = allocator->freeBlocksNum();
     ASSERT_GT(initial_free_blocks, 0u);
 
     KVCacheResource resource;
-    resource.initGroups(config.topologyPtr());
+    resource.initGroups(config);
     resource.setCacheKeys({42});
-    resource.mutableBlockIds(0).assign({1});
+    resource.mutableBlockIds("default").assign({1});
     auto publication_lease = allocator->incrKVCacheRef(resource, {42}, /*is_connector=*/true);
     ASSERT_NE(publication_lease, nullptr);
     ASSERT_EQ(allocator->freeBlocksNum() + 1, initial_free_blocks);
@@ -472,7 +472,7 @@ TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicati
 
 TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCallback) {
     auto config        = makeWriterTestCacheConfig("default", /*kv_stride=*/16, /*block_num=*/3);
-    auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
     auto cache_store = std::make_shared<DelayedCacheStore>();
     cache_manager->setCacheStore(cache_store);
@@ -490,7 +490,6 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     layer_cache.kv_cache_base      = layout.at("default", 0).kv_addr;
     layer_cache.seq_size_per_block = 1;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
     const auto initial_free_blocks = cache_manager->freeBlocksNum();

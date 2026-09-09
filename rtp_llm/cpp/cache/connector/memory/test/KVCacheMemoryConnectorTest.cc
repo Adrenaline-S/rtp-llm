@@ -2469,7 +2469,7 @@ TEST_F(KVCacheMemoryConnectorTest, CpCanonicalReadConvertsOnlyConnectorEntryRang
     res->setDeviceReuseBlockNum(0);
     auto match_ctx = connector_->asyncMatch(res, meta);
     ASSERT_NE(match_ctx, nullptr);
-    EXPECT_EQ(match_ctx->matchedBlockCount(), 4u);
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 6u);
 
     EXPECT_ANY_THROW(
         (void)connector_->asyncRead(res, meta, match_ctx, /*start_read_block_index=*/1, /*read_block_num=*/2));

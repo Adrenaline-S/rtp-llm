@@ -622,7 +622,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
     auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
     const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
-    const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().use_independent_block_pools;
+    const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().groupNums() > 0;
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
