@@ -171,6 +171,7 @@ TEST(CacheConfigCreatorTest, ExplicitPoolReservationMustLeavePagedBudget) {
     desc.group_type                   = CacheGroupType::SWA;
     desc.capacity                     = CacheCapacityPolicyDesc{};
     desc.capacity->explicit_block_num = 1;
+    desc.capacity->charge_to_paged_budget = true;
     model_config.kv_cache_spec_descs  = {{desc}};
 
     KVCacheConfig kv_cache_config;
@@ -180,6 +181,27 @@ TEST(CacheConfigCreatorTest, ExplicitPoolReservationMustLeavePagedBudget) {
         (void)CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
     });
     EXPECT_NE(message.find("must be greater than explicitly-sized pool reservation"), std::string::npos);
+}
+
+TEST(CacheConfigCreatorTest, HostPlacementPreservesExplicitCapacityWithoutChargingDeviceBudget) {
+    auto model = makeMhaModel();
+    for (auto& layer : model.kv_cache_spec_descs) {
+        auto& desc = layer.front();
+        desc.capacity = CacheCapacityPolicyDesc{};
+        desc.capacity->explicit_block_num = 17;
+        desc.capacity->charge_to_paged_budget = false;
+        desc.memory = CacheMemoryPolicyDesc{};
+        desc.memory->placement = CacheMemoryPlacement::HOST_PINNED;
+    }
+    const auto config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, KVCacheConfig{}, 0);
+    EXPECT_EQ(config.group("default").policy.memory_placement, CacheMemoryPlacement::HOST_PINNED);
+    EXPECT_EQ(config.group("default").policy.explicit_block_num, 17u);
+    EXPECT_EQ(config.explicitlySizedPoolReserveBytes(), 0u);
+
+    for (auto& layer : model.kv_cache_spec_descs) {
+        layer.front().capacity->charge_to_paged_budget = true;
+    }
+    EXPECT_ANY_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, KVCacheConfig{}, 0));
 }
 
 TEST(CacheConfigCreatorTest, BasicConfigMaterializesResolvedGeometryAndExplicitReserveWithoutCapacityPrepass) {

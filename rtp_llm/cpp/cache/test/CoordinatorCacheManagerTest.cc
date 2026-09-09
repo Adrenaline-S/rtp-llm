@@ -526,6 +526,25 @@ TEST_F(CoordinatorCacheManagerTest, InitCreatesIndependentBlockPoolPerGroup) {
     EXPECT_EQ(coordinator_cache_manager->blockPool("full")->totalBlocksNum(), 8u - 1u);
 }
 
+TEST_F(CoordinatorCacheManagerTest, HostPlacementControlsEachPoolBacking) {
+    for (const auto placement : {CacheMemoryPlacement::HOST, CacheMemoryPlacement::HOST_PINNED}) {
+        auto config = makeTinyMultiPoolHybridConfig();
+        auto groups = config.groups();
+        groups.front().policy.memory_placement = placement;
+        auto placed_config = CacheConfig(std::move(groups), config.layers(), config.layer_num);
+        copyCacheConfigScalars(config, placed_config);
+        auto manager = makeCoordinatorCacheManager(placed_config);
+        manager->setUseCudaMallocBlockPool(true);
+        ASSERT_TRUE(manager->init());
+        EXPECT_EQ(manager->singleTypeManager("linear")->memoryPlacement(), placement);
+        EXPECT_NE(manager->blockPool("linear")->where(), MemoryType::MEMORY_GPU);
+        if (placement == CacheMemoryPlacement::HOST_PINNED) {
+            EXPECT_EQ(manager->blockPool("linear")->where(), MemoryType::MEMORY_CPU_PINNED);
+        }
+        EXPECT_EQ(manager->blockPool("full")->where(), MemoryType::MEMORY_GPU);
+    }
+}
+
 TEST_F(CoordinatorCacheManagerTest, OrdinarySingleMtpUsesCompatibleMainAndProposeMemoryLayouts) {
     auto score_config = makeOrdinaryMtpModelConfig(
         /*num_layers=*/2, /*kv_head_num=*/1, /*size_per_head=*/8, KvCacheDataType::BASE);
@@ -1559,6 +1578,32 @@ TEST_F(CoordinatorCacheManagerTest, DSV4ConfigUsesGroupOwnedBytesForPagedBlockSi
     EXPECT_GT(expected_paged_bytes, 0u);
 
     EXPECT_EQ(config.pagedBlockSizeBytes(), expected_paged_bytes);
+}
+
+TEST_F(CoordinatorCacheManagerTest, DSV4FixedTagPoolsUsePinnedHostBackingWhenPlacementIsHostPinned) {
+    auto config = makeDSV4CoordinatorConfig(/*block_num=*/200);
+    auto groups = config.groups();
+    std::unordered_set<std::string> pinned_tags;
+    for (auto& group : groups) {
+        if (group.policy.evict_policy == CacheEvictPolicy::INDEPENDENT && group.policy.explicit_block_num > 0) {
+            group.policy.memory_placement = CacheMemoryPlacement::HOST_PINNED;
+            group.policy.charge_to_paged_budget = false;
+            pinned_tags.insert(group.tag);
+        }
+    }
+    ASSERT_FALSE(pinned_tags.empty());
+    ASSERT_LT(pinned_tags.size(), groups.size());
+    auto placed_config = CacheConfig(std::move(groups), config.layers(), config.layer_num);
+    copyCacheConfigScalars(config, placed_config);
+    auto manager = makeCoordinatorCacheManager(placed_config);
+    ASSERT_TRUE(manager->init());
+
+    ASSERT_EQ(placed_config.groups().size(), 7u);
+    for (const auto& group : placed_config.groups()) {
+        EXPECT_EQ(manager->blockPool(group.tag)->where(),
+                  pinned_tags.count(group.tag) ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
+            << "tag=" << group.tag;
+    }
 }
 
 TEST_F(CoordinatorCacheManagerTest, ReserveRatioExcludesExplicitIndependentPools) {

@@ -31,6 +31,7 @@ from rtp_llm.models.dsv4_kv_cache import (
 )
 from rtp_llm.ops import (
     CacheEvictPolicy,
+    CacheMemoryPlacement,
     CpBlockSliceMode,
     CpPrefillSliceLayout,
     DataType,
@@ -84,13 +85,14 @@ class Dsv4ConfigFactoryTest(TestCase):
 
 
 class Dsv4KvCacheSpecTest(TestCase):
-    def _build(self, fp8_kv=True):
+    def _build(self, fp8_kv=True, fixed_pool_use_host_memory=False):
         return build_dsv4_kv_cache_spec_descs(
             layer_num=len(LAYER_COMPRESS_RATIOS),
             layer_compress_ratios=LAYER_COMPRESS_RATIOS,
             fp8_kv=fp8_kv,
             head_dim=HEAD_DIM,
             indexer_head_dim=INDEXER_HEAD_DIM,
+            fixed_pool_use_host_memory=fixed_pool_use_host_memory,
         )
 
     def _by_tag(self, layer_descs):
@@ -258,6 +260,7 @@ class Dsv4KvCacheSpecTest(TestCase):
         self.assertEqual(
             hca_state.capacity.explicit_block_num, DSV4_HCA_STATE_POOL_BLOCKS
         )
+        self.assertTrue(hca_state.capacity.charge_to_paged_budget)
         self.assertFalse(hca_state.reuse.enable_prefix_reuse)
         self.assertIsNotNone(hca_state.tail)
         self.assertEqual(hca_state.tail.active_tail_blocks, 1)
@@ -274,15 +277,43 @@ class Dsv4KvCacheSpecTest(TestCase):
             self.assertIsNone(by_tag[tag].capacity, tag)
             self.assertIsNone(by_tag[tag].tail, tag)
 
-    def test_descriptors_have_no_memory_policy_key(self):
+    def test_no_memory_placement_by_default(self):
         for desc in self._by_tag(self._build()).values():
-            self.assertFalse(hasattr(desc, "memory"), desc.tag)
+            self.assertIsNone(desc.memory, desc.tag)
+
+    def test_host_pinned_fixed_pools_leave_paged_budget(self):
+        by_tag = self._by_tag(self._build(fixed_pool_use_host_memory=True))
+        for tag in (INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG):
+            desc = by_tag[tag]
+            self.assertIsNotNone(desc.memory, tag)
+            self.assertEqual(
+                desc.memory.placement, CacheMemoryPlacement.HOST_PINNED, tag
+            )
+            self.assertIsNotNone(desc.capacity, tag)
+            self.assertFalse(desc.capacity.charge_to_paged_budget, tag)
+        # hca_state keeps its explicit sizing while leaving the HBM budget.
+        self.assertEqual(
+            by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
+            DSV4_HCA_STATE_POOL_BLOCKS,
+        )
+        # Compressed pools stay on device.
+        for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
+            self.assertIsNone(by_tag[tag].memory, tag)
+            self.assertIsNone(by_tag[tag].capacity, tag)
 
     def test_explicit_pool_blocks_helper(self):
         layer_descs = self._build()
         apply_dsv4_explicit_pool_blocks(layer_descs, SWA_KV_TAG, 512)
         swa = self._by_tag(layer_descs)[SWA_KV_TAG]
         self.assertEqual(swa.capacity.explicit_block_num, 512)
+        self.assertTrue(swa.capacity.charge_to_paged_budget)
+
+    def test_explicit_pool_blocks_helper_keeps_host_pool_off_budget(self):
+        layer_descs = self._build(fixed_pool_use_host_memory=True)
+        apply_dsv4_explicit_pool_blocks(layer_descs, SWA_KV_TAG, 512)
+        swa = self._by_tag(layer_descs)[SWA_KV_TAG]
+        self.assertEqual(swa.capacity.explicit_block_num, 512)
+        self.assertFalse(swa.capacity.charge_to_paged_budget)
 
     def test_rejects_zero_layers(self):
         with self.assertRaises(ValueError):
@@ -409,11 +440,25 @@ class Dsv4PostBuildModelConfigTest(TestCase):
             for desc in layer_descs
         }
         for tag, desc in by_tag.items():
-            self.assertFalse(hasattr(desc, "memory"), tag)
+            self.assertIsNone(desc.memory, tag)
         self.assertEqual(
             by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
             DSV4_HCA_STATE_POOL_BLOCKS,
         )
+
+    def test_post_build_restores_host_placement_from_environment(self):
+        config = self._model_config()
+        with patch.dict("os.environ", {"DSV4_FIXED_POOL_USE_MEMORY": "1"}):
+            DeepSeekV4._post_build_model_config(config)
+        for layer in config.kv_cache_spec_descs:
+            for desc in layer:
+                if desc.tag in (INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG):
+                    self.assertEqual(
+                        desc.memory.placement, CacheMemoryPlacement.HOST_PINNED
+                    )
+                    self.assertFalse(desc.capacity.charge_to_paged_budget)
+                else:
+                    self.assertIsNone(desc.memory)
 
     def test_post_build_promotes_default_block_size(self):
         config = self._model_config()

@@ -206,6 +206,10 @@ struct KVCacheConfig {
     // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;
 
+    // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
+    // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
+    bool dsv4_fixed_pool_use_memory = false;
+
     // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
     std::string kv_cache_event_publisher_type        = "none";  // none | kvcm
     std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint

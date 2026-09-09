@@ -92,7 +92,7 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
         self.assertEqual(configs.moe_config.moe_strategy, "local_loop")
 
-    def test_removed_dsv4_fixed_pool_memory_inputs_are_ignored(self):
+    def test_dsv4_fixed_pool_memory_inputs_are_bound(self):
         from rtp_llm.server.server_args import server_args
 
         cases = [
@@ -106,7 +106,6 @@ class ServerArgsPyEnvConfigsTest(TestCase):
                 self.subTest(source=source),
                 patch.dict(os.environ, env, clear=True),
                 patch.object(sys, "argv", argv),
-                self.assertLogs(level="WARNING") as logs,
             ):
                 configs = (
                     server_args.setup_args(args)
@@ -114,15 +113,7 @@ class ServerArgsPyEnvConfigsTest(TestCase):
                     else server_args.setup_args()
                 )
 
-            self.assertFalse(
-                hasattr(configs.kv_cache_config, "dsv4_fixed_pool_use_memory")
-            )
-            matching_logs = [
-                message
-                for message in logs.output
-                if "DSV4_FIXED_POOL_USE_MEMORY" in message
-            ]
-            self.assertEqual(len(matching_logs), 1)
+            self.assertTrue(configs.kv_cache_config.dsv4_fixed_pool_use_memory)
 
     def test_internal_backend_registers_moe_choice_before_parser_initialization(self):
         from rtp_llm.server.server_args import server_args

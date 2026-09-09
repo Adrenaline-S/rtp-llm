@@ -394,6 +394,7 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         desc.cp->slice                    = CpBlockSliceMode::PAYLOAD_BYTES;
         desc.capacity                     = CacheCapacityPolicyDesc{};
         desc.capacity->explicit_block_num = 256;
+        desc.capacity->charge_to_paged_budget = true;
         desc.reuse->enable_prefix_reuse   = false;
         desc.tail                         = CacheTailPolicyDesc{};
         desc.tail->active_tail_blocks     = 1;
@@ -523,6 +524,7 @@ inline void setDsv4ExplicitPoolBlocks(ModelConfig& model_config, const std::stri
                     desc.capacity = CacheCapacityPolicyDesc{};
                 }
                 desc.capacity->explicit_block_num = block_num;
+                desc.capacity->charge_to_paged_budget = block_num > 0;
             }
         }
     }

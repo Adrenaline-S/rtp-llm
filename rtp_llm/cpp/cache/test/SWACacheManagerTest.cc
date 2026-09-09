@@ -120,6 +120,7 @@ TEST_F(SWACacheManagerTest, DefaultPolicyDrivesBehaviorInterfaces) {
     EXPECT_FALSE(group.hasKernelBlockSubdiv());
     EXPECT_TRUE(group.transferTailBlocks());
     EXPECT_TRUE(group.isReservable());
+    EXPECT_FALSE(group.memoryPlacement() == CacheMemoryPlacement::HOST_PINNED);
 }
 
 // ==================== needBlocksNum ====================

@@ -135,6 +135,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("INDEPENDENT", CacheEvictPolicy::INDEPENDENT)
         .value("NONE", CacheEvictPolicy::NONE);
 
+    py::enum_<CacheMemoryPlacement>(m, "CacheMemoryPlacement")
+        .value("DEVICE", CacheMemoryPlacement::DEVICE)
+        .value("HOST", CacheMemoryPlacement::HOST)
+        .value("HOST_PINNED", CacheMemoryPlacement::HOST_PINNED);
+
     py::enum_<CpBlockMappingMode>(m, "CpBlockMappingMode")
         .value("NONE", CpBlockMappingMode::NONE)
         .value("BLOCK_ROUND_ROBIN", CpBlockMappingMode::BLOCK_ROUND_ROBIN)
@@ -491,6 +496,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
+        .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("kv_cache_event_publisher_type", &KVCacheConfig::kv_cache_event_publisher_type)
@@ -579,6 +585,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_retry_times,
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
+                                      self.dsv4_fixed_pool_use_memory,
                                       // This unreleased event-field block follows declaration order.
                                       // Future fields must be appended after the block.
                                       self.kv_cache_event_publisher_type,
@@ -653,6 +660,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         // DSV4 fixed-pool knobs.
                         c.dsv4_fixed_pool_blocks     = t[54].cast<uint32_t>();
                         c.dsv4_hca_state_pool_blocks = t[55].cast<uint32_t>();
+                    }
+                    if (t.size() == 57 || t.size() == 62) {
+                        c.dsv4_fixed_pool_use_memory = t[56].cast<bool>();
                     }
                     if (t.size() == 61 || t.size() == 62) {
                         // Keep these indices aligned with the event-field declaration order
@@ -1787,20 +1797,34 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("reservable", &CacheCapacityPolicyDesc::reservable)
         .def_readwrite("explicit_block_num", &CacheCapacityPolicyDesc::explicit_block_num)
+        .def_readwrite("charge_to_paged_budget", &CacheCapacityPolicyDesc::charge_to_paged_budget)
         .def(py::pickle(
             [](const CacheCapacityPolicyDesc& self) {
-                return py::make_tuple(self.reservable, self.explicit_block_num);
+                return py::make_tuple(self.reservable, self.explicit_block_num, self.charge_to_paged_budget);
             },
             [](py::tuple t) {
                 CacheCapacityPolicyDesc c;
-                // The previous 3-item layout appended charge_to_paged_budget.
-                // That field no longer has runtime semantics; accept and ignore it.
                 if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
                 c.reservable         = t[0].cast<std::optional<bool>>();
                 c.explicit_block_num = t[1].cast<std::optional<uint32_t>>();
+                if (t.size() == 3) {
+                    c.charge_to_paged_budget = t[2].cast<std::optional<bool>>();
+                }
                 return c;
             }));
+
+    py::class_<CacheMemoryPolicyDesc>(m, "CacheMemoryPolicyDesc")
+        .def(py::init<>())
+        .def_readwrite("placement", &CacheMemoryPolicyDesc::placement)
+        .def(py::pickle([](const CacheMemoryPolicyDesc& self) { return py::make_tuple(self.placement); },
+                        [](py::tuple t) {
+                            CacheMemoryPolicyDesc c;
+                            if (t.size() != 1)
+                                throw std::runtime_error("Invalid CacheMemoryPolicyDesc state!");
+                            c.placement = t[0].cast<std::optional<CacheMemoryPlacement>>();
+                            return c;
+                        }));
 
     py::class_<CacheTailPolicyDesc>(m, "CacheTailPolicyDesc")
         .def(py::init<>())
@@ -1863,6 +1887,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("group_type", &KVCacheSpecDesc::group_type)
         .def_readwrite("reuse", &KVCacheSpecDesc::reuse)
         .def_readwrite("capacity", &KVCacheSpecDesc::capacity)
+        .def_readwrite("memory", &KVCacheSpecDesc::memory)
         .def_readwrite("tail", &KVCacheSpecDesc::tail)
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
         .def(py::pickle(
@@ -1884,20 +1909,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.group_type,
                                       self.reuse,
                                       self.capacity,
+                                      self.memory,
                                       self.tail,
                                       self.cp,
                                       self.kernel_tokens_per_block_alignment);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 19 && t.size() != 20)
+                if (t.size() != 19 && t.size() != 20 && t.size() != 21)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
-                const bool current_layout = t.size() == 20 && py::isinstance<py::int_>(t[19]);
-                const bool legacy_layout  = t.size() == 20 && !current_layout;
-                if (legacy_layout && !t[17].is_none()) {
-                    throw std::runtime_error("KVCacheSpecDesc legacy memory policy is not supported; "
-                                             "convert the pickle offline with the previous RTP-LLM version");
-                }
+                const bool alignment_without_memory = t.size() == 20 && py::isinstance<py::int_>(t[19]);
+                const bool has_memory = t.size() == 21 || (t.size() == 20 && !alignment_without_memory);
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
                 c.dtype                                = t[2].cast<DataType>();
@@ -1915,10 +1937,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.group_type                           = t[14].cast<std::optional<CacheGroupType>>();
                 c.reuse                                = t[15].cast<std::optional<CacheReusePolicyDesc>>();
                 c.capacity                             = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
-                c.tail = t[legacy_layout ? 18 : 17].cast<std::optional<CacheTailPolicyDesc>>();
-                c.cp   = t[legacy_layout ? 19 : 18].cast<std::optional<CacheCpPolicyDesc>>();
-                if (current_layout) {
-                    c.kernel_tokens_per_block_alignment = t[19].cast<uint32_t>();
+                if (has_memory) {
+                    c.memory = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
+                }
+                c.tail = t[has_memory ? 18 : 17].cast<std::optional<CacheTailPolicyDesc>>();
+                c.cp   = t[has_memory ? 19 : 18].cast<std::optional<CacheCpPolicyDesc>>();
+                if (t.size() == 21 || alignment_without_memory) {
+                    c.kernel_tokens_per_block_alignment = t[t.size() - 1].cast<uint32_t>();
                 }
                 return c;
             }));

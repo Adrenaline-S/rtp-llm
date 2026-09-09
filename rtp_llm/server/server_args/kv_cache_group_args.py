@@ -515,11 +515,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     kv_cache_group.add_argument(
         "--dsv4_fixed_pool_use_memory",
         env_name="DSV4_FIXED_POOL_USE_MEMORY",
-        deprecated_ignored_warning=(
-            "DSV4_FIXED_POOL_USE_MEMORY/--dsv4_fixed_pool_use_memory is deprecated and ignored: "
-            "the DSV4 fixed pool only supports device memory"
-        ),
+        bind_to=(kv_cache_config, "dsv4_fixed_pool_use_memory"),
         type=str2bool,
         default=False,
-        help="[deprecated] 已忽略；DSV4 固定池仅支持 device memory。",
+        help="DSV4 固定池（INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV）是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
     )

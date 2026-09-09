@@ -859,6 +859,14 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, MergeMtpRejectsIncompatibleDefault
                         {stride_group.kv_block_stride_bytes + 1},
                         {stride_group.kv_scale_stride_bytes});
     expect_no_compatible_alias(target, different_group_stride);
+
+    auto target_groups = target.groups();
+    target_groups.front().policy.explicit_block_num = 2;
+    target_groups.front().policy.charge_to_paged_budget = true;
+    auto target_with_different_policy =
+        CacheConfig(std::move(target_groups), target.layers(), target.layer_num);
+    copyCacheConfigScalars(target, target_with_different_policy);
+    expect_no_compatible_alias(target_with_different_policy, compatible_propose);
 }
 
 TEST_F(CoordinatorCacheManagerHybridPathTest, MergeMtpValidatesExactTagSharedPoolLayout) {

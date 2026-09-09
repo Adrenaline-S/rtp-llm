@@ -330,8 +330,13 @@ bool CoordinatorCacheManager::doInit() {
         const auto& pool_config = group_pool_configs[idx];
         const auto& cache_group = config_.groups()[idx];
         const auto  group_type  = cache_group.policy.group_type;
-        auto        group_pool =
-            std::make_shared<BlockPool>(pool_config, allocation_type_, false, use_cuda_malloc_block_pool_);
+        const auto placement = cache_group.policy.memory_placement;
+        const bool use_pinned_cpu_backing = placement == CacheMemoryPlacement::HOST_PINNED;
+        const auto allocation_type = placement == CacheMemoryPlacement::HOST ? AllocationType::HOST : allocation_type_;
+        auto group_pool = std::make_shared<BlockPool>(pool_config,
+                                                     allocation_type,
+                                                     use_pinned_cpu_backing,
+                                                     use_cuda_malloc_block_pool_ && !use_pinned_cpu_backing);
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s", pool_config.pool_name.c_str());
 
@@ -1948,7 +1953,13 @@ void CoordinatorCacheManager::rollbackIncrMalloc(
 }
 
 MemoryType CoordinatorCacheManager::memoryTypeForGroup(std::string_view tag) const {
-    (void)config_.group(tag);
+    const auto placement = config_.group(tag).policy.memory_placement;
+    if (placement == CacheMemoryPlacement::HOST) {
+        return MemoryType::MEMORY_CPU;
+    }
+    if (placement == CacheMemoryPlacement::HOST_PINNED) {
+        return MemoryType::MEMORY_CPU_PINNED;
+    }
     return allocation_type_ == AllocationType::DEVICE ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 

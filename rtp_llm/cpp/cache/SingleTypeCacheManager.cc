@@ -134,6 +134,10 @@ CacheEvictPolicy SingleTypeCacheManager::evictPolicy() const {
     return policy().evict_policy;
 }
 
+CacheMemoryPlacement SingleTypeCacheManager::memoryPlacement() const {
+    return policy().memory_placement;
+}
+
 uint32_t SingleTypeCacheManager::explicitBlockNum() const {
     return policy().explicit_block_num;
 }
