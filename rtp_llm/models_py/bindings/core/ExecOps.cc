@@ -471,7 +471,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             if (register_store_completion) {
                 store_completion = register_store_completion(publication_lease_keys,
                                                               publication_lease_blocks,
-                                                              cache_config.groupIdForTag(layer_kv.tag));
+                                                              layer_kv.tag);
             }
             auto store_callback = [layer_id = layer_kv.layer_id,
                                    cache_model_id,

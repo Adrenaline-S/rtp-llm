@@ -285,7 +285,7 @@ protected:
 
     ErrorInfo load(BatchKVCacheResource batch) {
         stream_->setKVCache(batch);
-        return server_.loadCacheForAllRank(*context_);
+        return server_.loadCacheForAllRank(*context_).error_info;
     }
 
 protected:
@@ -888,7 +888,7 @@ TEST_F(DecodeRpcLayerTransferTest, LoadCacheBuildsEveryLayerTagBuffer) {
     auto load_context           = makeLoadContext("layer-tags", peer_addrs, cache_keys, blocks, /*cp_size=*/1);
     load_context.server_context = &server_context;
 
-    const auto error = server_.loadCache(load_context);
+    const auto error = server_.loadCache(load_context).error_info;
 
     EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
     EXPECT_EQ(error.ToString(), "invalid peer ip");
@@ -927,7 +927,7 @@ TEST_F(DecodeRpcResourceBoundaryTest, HybridLoadSkipsLegacyDivisibilityCheck) {
     request_context.server_context = &server_context;
 
     ErrorInfo error;
-    EXPECT_NO_THROW(error = server_.loadCache(request_context));
+    EXPECT_NO_THROW(error = server_.loadCache(request_context).error_info);
     EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
 }
 

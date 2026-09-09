@@ -348,7 +348,7 @@ TEST_F(StreamCacheResourceTest, testAlignedFullMemoryHitRetainsFinalBaseBlock) {
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->cacheKeys() = {101, 102, 103};
+    kv_resource->setCacheKeys({101, 102, 103});
     kv_resource->setLastBlockAligned(true);
     kv_resource->setMemoryReuseBlockNum(kv_resource->cacheKeys().size());
     auto read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, nullptr);
@@ -376,7 +376,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_AlignedFullMemoryHitKeepsPromptT
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+                                                                             cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
@@ -385,7 +385,7 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_AlignedFullMemoryHitKeepsPromptT
     ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->cacheKeys() = {201, 202, 203};
+    kv_resource->setCacheKeys({201, 202, 203});
     kv_resource->setLastBlockAligned(true);
     kv_resource->setMemoryReuseBlockNum(kv_resource->cacheKeys().size());
     auto load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, nullptr);
@@ -412,15 +412,14 @@ TEST_F(StreamCacheResourceTest, testCPShardedIncompleteVirtualTailRetainsMatched
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->cacheKeys() = {301};
+    kv_resource->setCacheKeys({301, 302});
     kv_resource->setLastBlockAligned(true);
-    kv_resource->setMemoryReuseBlockNum(1);
+    kv_resource->setMemoryReuseBlockNum(2);
     auto read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, nullptr);
 
     resource.updateReuseLengthsFromContext(read_context);
 
     const int canonical_block_tokens = resource.seqSizePerBlock() * 2;
-    EXPECT_EQ(resource.reuseBlockTokens(), canonical_block_tokens);
     EXPECT_EQ(stream_->initialReuseLength(), canonical_block_tokens);
     EXPECT_EQ(stream_->reuseLength(), canonical_block_tokens);
     EXPECT_EQ(stream_->localReuseLength(), canonical_block_tokens);
@@ -428,7 +427,7 @@ TEST_F(StreamCacheResourceTest, testCPShardedIncompleteVirtualTailRetainsMatched
     EXPECT_EQ(stream_->currentExecuteTokens(), (std::vector<int>{5, 6}));
 }
 
-TEST_F(StreamCacheResourceTest, testCPShardedAlignedFullHitLeavesCanonicalQuantumExecutable) {
+TEST_F(StreamCacheResourceTest, testCPShardedAlignedFullHitLeavesGlobalBlockExecutable) {
     prepareResourceWithInputTokens(
         /*input_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, /*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
@@ -439,22 +438,75 @@ TEST_F(StreamCacheResourceTest, testCPShardedAlignedFullHitLeavesCanonicalQuantu
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
     auto kv_resource = std::make_shared<KVCacheResource>();
-    kv_resource->cacheKeys() = {401, 402, 403};
+    kv_resource->setCacheKeys({401, 402, 403, 404, 405, 406});
     kv_resource->setLastBlockAligned(true);
-    kv_resource->setDeviceReuseBlockNum(1);
-    kv_resource->setMemoryReuseBlockNum(1);
-    kv_resource->setRemoteReuseBlockNum(1);
+    kv_resource->setDeviceReuseBlockNum(2);
+    kv_resource->setMemoryReuseBlockNum(2);
+    kv_resource->setRemoteReuseBlockNum(2);
     auto read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, nullptr);
 
     resource.updateReuseLengthsFromContext(read_context);
 
-    const int canonical_block_tokens = resource.seqSizePerBlock() * 2;
-    EXPECT_EQ(stream_->initialReuseLength(), 2 * canonical_block_tokens);
-    EXPECT_EQ(stream_->reuseLength(), 2 * canonical_block_tokens);
-    EXPECT_EQ(stream_->localReuseLength(), 2 * canonical_block_tokens);
-    EXPECT_EQ(stream_->memoryReuseLength(), canonical_block_tokens);
-    EXPECT_EQ(stream_->remoteReuseLength(), 0);
-    EXPECT_EQ(stream_->currentExecuteTokens(), (std::vector<int>{9, 10, 11, 12}));
+    const int block_tokens = resource.seqSizePerBlock();
+    EXPECT_EQ(stream_->initialReuseLength(), 5 * block_tokens);
+    EXPECT_EQ(stream_->reuseLength(), 5 * block_tokens);
+    EXPECT_EQ(stream_->localReuseLength(), 4 * block_tokens);
+    EXPECT_EQ(stream_->memoryReuseLength(), 2 * block_tokens);
+    EXPECT_EQ(stream_->remoteReuseLength(), block_tokens);
+    EXPECT_EQ(stream_->currentExecuteTokens(), (std::vector<int>{11, 12}));
+}
+
+TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseCountersStayInGlobalBlocks) {
+    prepareResourceWithInputTokens(std::vector<int>(24, 1), /*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    cache_manager_->cp_slot_mapper_ =
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, resource.seqSizePerBlock());
+
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(8);
+    kv_resource->setMemoryReuseBlockNum(2);
+    std::shared_ptr<Meta> meta;
+    auto                  read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+
+    resource.updateReuseLengthsFromContext(read_context);
+
+    const int global_block_tokens = resource.seqSizePerBlock();
+    EXPECT_EQ(stream_->initialReuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->reuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->localReuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->memoryReuseLength(), 2 * global_block_tokens);
+}
+
+TEST_F(StreamCacheResourceTest, testCPShardedAllLogicalGroupsKeepLogicalReuseWidth) {
+    auto config = init_config();
+    auto groups = config.groups();
+    ASSERT_EQ(groups.size(), 1u);
+    groups[0].policy.cp_mapping = CpBlockMappingMode::NONE;
+    CacheConfig logical_config(std::move(groups), config.layers(), config.layer_num);
+    test::copyCacheConfigScalars(config, logical_config);
+    prepareResourceWithCacheConfig(
+        std::move(logical_config), /*input_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8}, /*reuse_cache=*/true, RoleType::PDFUSION);
+    auto& resource = stream_->streamCacheResource();
+
+    cache_manager_->cp_slot_mapper_ =
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, resource.seqSizePerBlock());
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(2);
+    kv_resource->setMemoryReuseBlockNum(1);
+    std::shared_ptr<Meta> meta;
+    auto                  read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+
+    resource.updateReuseLengthsFromContext(read_context);
+
+    EXPECT_EQ(stream_->initialReuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->reuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->localReuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->memoryReuseLength(), resource.seqSizePerBlock());
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {

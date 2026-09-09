@@ -127,6 +127,8 @@ def _require_n_shared_experts(config_json: dict) -> int:
             f"non-negative integer, got {raw_value!r}"
         )
     return raw_value
+
+
 class DeepSeekV4Weight(DeepSeekV2Weight):
     """DeepSeek-V4 weight info.
 

@@ -105,7 +105,9 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     config                    = CacheConfig(std::move(topology_groups), {std::move(layer_tags)}, /*main_layer_num=*/1);
     config.dtype              = DataType::TYPE_INT8;
     config.block_num          = kPhysicalBlocks;
-    config.seq_size_per_block = groups.front().tokens_per_block;
+    config.seq_size_per_block = std::min_element(groups.begin(), groups.end(), [](const auto& lhs, const auto& rhs) {
+                                   return lhs.tokens_per_block < rhs.tokens_per_block;
+                               })->tokens_per_block;
     config.use_opaque_kv_cache_store = true;
     return config;
 }
@@ -385,17 +387,18 @@ Scenario makeMicroBatchScenario() {
 }
 
 Scenario makeContextParallelScenario() {
-    auto config                 = makeCacheConfig({{"default", 2, 16}});
+    auto config                 = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
     auto layout                 = makeLayout(config);
     auto inputs                 = makeInputs(/*input_lengths=*/{6},
                              /*request_ids=*/{301},
                              /*cache_keys=*/{3101, 3102, 3103, 3104, 3105, 3106},
                              /*cache_keys_width=*/6,
-                             /*block_ids=*/{1, 2, 3},
-                             /*group_count=*/1,
-                             /*block_table_width=*/3);
-    inputs.kv_cache_group_tags  = {"default"};
-    inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
+                             /*block_ids=*/{1, 2, 3, 0, 0, 0, 3, 4, 5, 6, 7, 8},
+                             /*group_count=*/2,
+                             /*block_table_width=*/6);
+    inputs.kv_cache_group_tags  = {"full", "linear"};
+    inputs.kv_cache_group_types = pinnedTensor(
+        {static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::LINEAR)}, {2});
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.parallelism.tp_size                            = 2;
     scenario.parallelism.tp_rank                            = 1;
