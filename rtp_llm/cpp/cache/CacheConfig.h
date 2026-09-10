@@ -162,6 +162,7 @@ public:
         return groups_.size() == 1;
     }
     bool hasOneGroupPerLayer() const;
+    bool hasOnlyOpaqueGroups() const;
 
     // Total bytes one logical block of a cache group occupies across all of the
     // group's layers. Derived, so it stays a method.

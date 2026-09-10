@@ -277,12 +277,7 @@ int DecodeRpcServer::markLoadedCacheReuse(const std::shared_ptr<GenerateStream>&
                                           const CacheConfig&                     cache_config) {
     // Preserve DSV4's opaque-pool handoff publication. Ordinary P/D transfer
     // is not a prefix-cache hit, even though every allocator now uses pools.
-    const auto& groups = cache_config.groups();
-    const bool opaque_pools = !groups.empty() && std::all_of(groups.begin(), groups.end(), [](const CacheGroup& group) {
-        return group.spec && (group.spec->type == KVCacheSpecType::OpaqueKV
-                              || group.spec->type == KVCacheSpecType::OpaqueState);
-    });
-    if (!stream || !opaque_pools || !load_result.ok() || load_result.loaded_cache_block_count == 0
+    if (!stream || !cache_config.hasOnlyOpaqueGroups() || !load_result.ok() || load_result.loaded_cache_block_count == 0
         || seq_size_per_block <= 0 || stream->inputLength() <= 1) {
         return 0;
     }

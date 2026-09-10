@@ -40,6 +40,13 @@ uint32_t checkedLayerCount(size_t layer_count) {
 
 }  // namespace
 
+bool CacheConfig::hasOnlyOpaqueGroups() const {
+    return !groups_.empty() && std::all_of(groups_.begin(), groups_.end(), [](const CacheGroup& group) {
+        return group.spec && (group.spec->type == KVCacheSpecType::OpaqueKV
+                              || group.spec->type == KVCacheSpecType::OpaqueState);
+    });
+}
+
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
