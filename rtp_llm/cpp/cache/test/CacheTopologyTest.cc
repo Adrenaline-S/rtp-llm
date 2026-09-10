@@ -11,18 +11,17 @@ namespace rtp_llm {
 namespace {
 
 GroupBase makeGroup(std::string tag, std::vector<int> layer_ids, CacheGroupType type = CacheGroupType::FULL) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->tag                       = tag;
+    spec->seq_size_per_block        = 8;
+    spec->kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = std::move(layer_ids);
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.layer_ids = std::move(layer_ids);
+    group.block_num = 16;
     return group;
 }
 
@@ -33,6 +32,16 @@ TEST(CacheTopologyTest, SupportsSingleGlobalGroupAsNEqualsOne) {
     EXPECT_TRUE(topology->hasOneGroupPerLayer());
     EXPECT_EQ(topology->soleGroupForLayer(0).tag, "full");
     EXPECT_EQ(topology->groupsForLayer(1).front().get().tag, "full");
+}
+
+TEST(CacheTopologyTest, MaximumKernelExpansionDoesNotDependOnGroupOrder) {
+    auto full     = makeGroup("full", {1});
+    auto swa      = makeGroup("swa", {0}, CacheGroupType::SWA);
+    auto topology = CacheTopology::create({swa, full}, {{0, {"swa"}}, {1, {"full"}}});
+    EXPECT_EQ(topology->groupById(0).kernelBlocksPerKvBlock(), 1u);
+    EXPECT_EQ(topology->maxKernelBlocksPerKvBlock(), 4u);
+    auto reversed = CacheTopology::create({full, swa}, {{0, {"swa"}}, {1, {"full"}}});
+    EXPECT_EQ(reversed->maxKernelBlocksPerKvBlock(), 4u);
 }
 
 TEST(CacheTopologyTest, SupportsDistinctOneToOneGroupsAndOneToManyLayers) {

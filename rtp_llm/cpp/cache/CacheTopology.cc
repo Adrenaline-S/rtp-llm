@@ -1,11 +1,44 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 
 #include <algorithm>
+#include <limits>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+size_t GroupBase::seqSizePerBlock() const {
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheTopology tag=%s has null spec", tag.c_str());
+    return spec->seq_size_per_block;
+}
+
+size_t GroupBase::kernelSeqSizePerBlock() const {
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheTopology tag=%s has null spec", tag.c_str());
+    return spec->kernel_seq_size_per_block;
+}
+
+size_t GroupBase::kernelBlocksPerKvBlock() const {
+    const auto physical = seqSizePerBlock();
+    const auto kernel   = kernelSeqSizePerBlock();
+    RTP_LLM_CHECK_WITH_INFO(kernel > 0 && physical % kernel == 0,
+                            "CacheTopology tag=%s seq_size_per_block=%zu is not divisible by kernel size=%zu",
+                            tag.c_str(),
+                            physical,
+                            kernel);
+    return std::max<size_t>(1, physical / kernel);
+}
+
+size_t GroupBase::blockSizeBytes() const {
+    RTP_LLM_CHECK_WITH_INFO(kv_scale_stride_bytes <= std::numeric_limits<size_t>::max() - kv_block_stride_bytes,
+                            "CacheTopology tag=%s stride overflow",
+                            tag.c_str());
+    const auto stride = kv_block_stride_bytes + kv_scale_stride_bytes;
+    RTP_LLM_CHECK_WITH_INFO(layer_ids.empty() || stride <= std::numeric_limits<size_t>::max() / layer_ids.size(),
+                            "CacheTopology tag=%s block size overflow",
+                            tag.c_str());
+    return layer_ids.size() * stride;
+}
 
 std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupBase> groups,
                                                            std::vector<LayerBase> layers) {
@@ -35,15 +68,15 @@ void CacheTopology::validateAndBuildIndex() {
                                 "CacheTopology has duplicate tag=%s",
                                 group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
-            group.seq_size_per_block > 0, "CacheTopology tag=%s has zero seq_size_per_block", group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0,
+            group.seqSizePerBlock() > 0, "CacheTopology tag=%s has zero seq_size_per_block", group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group.kernelSeqSizePerBlock() > 0,
                                 "CacheTopology tag=%s has zero kernel_seq_size_per_block",
                                 group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
+        RTP_LLM_CHECK_WITH_INFO(group.seqSizePerBlock() % group.kernelSeqSizePerBlock() == 0,
                                 "CacheTopology tag=%s seq_size_per_block=%zu is not divisible by kernel size=%zu",
                                 group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
+                                group.seqSizePerBlock(),
+                                group.kernelSeqSizePerBlock());
 
         for (int layer_id : group.layer_ids) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers_.size(),
@@ -153,6 +186,14 @@ bool CacheTopology::hasSingleGlobalGroup() const {
 bool CacheTopology::hasOneGroupPerLayer() const {
     return std::all_of(
         layers_.begin(), layers_.end(), [](const LayerBase& layer) { return layer.group_tags.size() == 1; });
+}
+
+size_t CacheTopology::totalGroupBlockSizeBytes() const {
+    size_t total = 0;
+    for (const auto& group : groups_) {
+        total += group.blockSizeBytes();
+    }
+    return total;
 }
 
 void CacheTopology::buildSnapshots() const {

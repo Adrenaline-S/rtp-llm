@@ -90,6 +90,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/models_py/bindings:op_defs",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -260,6 +261,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/testing:device_test_utils",
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
