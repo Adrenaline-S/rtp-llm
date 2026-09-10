@@ -263,7 +263,7 @@ TEST_F(FIFOSchedulerTest, testRejectSpeculativeTailWithoutReserveSpace) {
 
 TEST_F(FIFOSchedulerTest, testDSparkGammaThreeReservesThreeWindows) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 128, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
