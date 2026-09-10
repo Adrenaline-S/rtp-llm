@@ -563,7 +563,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCallbackFailureReachesPublicationWait) {
                                           nullptr,
                                           [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }));
+                                                    const std::string&) { return writer.registerStoreCompletion(); }));
     writer.finishSubmissions();
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
 }
@@ -599,7 +599,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSynchronousThrowCompletesTokenExactlyOnce
                                         nullptr,
                                         [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }),
+                                                    const std::string&) { return writer.registerStoreCompletion(); }),
                  std::runtime_error);
     writer.finishSubmissions();
     EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
@@ -637,7 +637,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreDuplicateCallbackDoesNotUnderflow) {
                                           nullptr,
                                           [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }));
+                                                    const std::string&) { return writer.registerStoreCompletion(); }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
 }
@@ -673,7 +673,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreZeroSelectedBlocksRegistersNoCompletion) 
                                           nullptr,
                                           [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }));
+                                                    const std::string&) { return writer.registerStoreCompletion(); }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
     EXPECT_TRUE(cache_store->records.empty());
@@ -710,7 +710,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTrackedPublicationWithoutCacheStoreThrows
                                             nullptr,
                                             [&writer](const std::vector<int64_t>&,
                                                     const std::vector<int32_t>&,
-                                                    size_t) { return writer.registerStoreCompletion(); }));
+                                                    const std::string&) { return writer.registerStoreCompletion(); }));
     writer.finishSubmissions();
     EXPECT_NO_THROW(writer.waitStoreCompletions());
 }
@@ -896,7 +896,6 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUnscaledCpSwaKeepsFlatTailSlots) {
                                   defaultCacheGroupPolicy(CacheGroupType::SWA),
                                   /*add_dummy_group=*/true,
                                   /*mla_cache=*/false,
-                                  /*independent_pools=*/false,
                                   /*transfer_kv_bytes=*/row_stride,
                                   /*transfer_scale_bytes=*/0,
                                   /*opaque_store=*/true);
