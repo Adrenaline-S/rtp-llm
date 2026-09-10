@@ -68,6 +68,7 @@ struct KVCacheSpecDesc {
     uint32_t                  state_ring_overlap                   = 0;
     bool                      state_ring_include_gen_num_per_cycle = false;
 
+    // For KERNEL_BLOCK_COMPRESSED these describe each kernel page, before physical-block aggregation.
     size_t   block_stride_bytes_override        = 0;
     size_t   block_stride_bytes_alignment       = 0;
     uint32_t block_stride_alignment_min_entries = 0;
@@ -95,6 +96,9 @@ public:
     static KVCacheSpecPtr   build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
     static CacheGroupType   groupType(const KVCacheSpecDesc& desc);
     static CacheGroupPolicy groupPolicy(const KVCacheSpecDesc& desc);
+    static uint32_t         kernelSeqSizePerBlock(const KVCacheSpecDesc&  desc,
+                                                  const SpecBuildContext& ctx,
+                                                  uint32_t                physical_seq_size_per_block);
 };
 
 }  // namespace rtp_llm

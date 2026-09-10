@@ -20,11 +20,7 @@
 
 namespace rtp_llm {
 
-// Residency (memory_placement) and budget (charge_to_paged_budget) are independent
-// knobs: CacheConfig::finalizeBlockNums only consults charge_to_paged_budget when it
-// accumulates explicitly_sized_pool_reserve_bytes. A pool that lives on host memory
-// therefore MUST opt out of the paged budget, otherwise its bytes are deducted from
-// the device paged pool it never occupies (silently shrinking the KV cache).
+// Residency (memory_placement) and budget (charge_to_paged_budget) are independent.
 inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std::string& tag) {
     RTP_LLM_CHECK_WITH_INFO(
         !(policy.memory_placement != CacheMemoryPlacement::DEVICE && policy.charge_to_paged_budget),
@@ -39,73 +35,35 @@ private:
     std::shared_ptr<const CacheTopology> cache_topology;
 
 public:
-    std::vector<int> layer_to_block_stride_bytes;
-    bool             group_block_layout_initialized           = false;
-    bool             use_independent_block_pools              = false;
-    bool             use_typed_cache_regions                  = false;
-    bool             use_opaque_kv_cache_store                = false;
-    bool             disable_decode_first_malloc_device_reuse = false;
+    bool use_typed_cache_regions                  = false;
+    bool use_opaque_kv_cache_store                = false;
+    bool disable_decode_first_malloc_device_reuse = false;
 
-    rtp_llm::DataType dtype         = rtp_llm::DataType::TYPE_INVALID;
-    uint32_t          layer_num     = 0;  // the number of main model layers
-    uint32_t          layer_all_num = 0;  // the number of all layers including mtp modules
-    bool              use_mla       = false;
-    bool              is_sparse     = false;
+    rtp_llm::DataType dtype                   = rtp_llm::DataType::TYPE_INVALID;
+    uint32_t          layer_num               = 0;  // the number of main model layers
+    uint32_t          layer_all_num           = 0;  // the number of all layers including mtp modules
+    bool              use_mla                 = false;
+    bool              is_sparse               = false;
+    bool              enable_hybrid_attention = false;
 
     // Block configuration
-    uint32_t block_num                 = 0;
-    size_t   seq_size_per_block        = 1;
-    size_t   kernel_seq_size_per_block = 0;
+    uint32_t block_num          = 0;
+    size_t   seq_size_per_block = 1;
 
     size_t seqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).seq_size_per_block;
+        return topology().groupById(gid).seqSizePerBlock();
     }
 
     size_t kernelSeqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).kernel_seq_size_per_block;
+        return topology().groupById(gid).kernelSeqSizePerBlock();
     }
 
     size_t kernelBlocksPerKvBlockForGroup(size_t gid) const {
-        const auto group_seq    = seqSizePerBlockForGroup(gid);
-        const auto group_kernel = kernelSeqSizePerBlockForGroup(gid);
-        if (group_kernel == 0) {
-            return 1;
-        }
-        RTP_LLM_CHECK_WITH_INFO(
-            group_seq % group_kernel == 0,
-            "group seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu), gid=%zu",
-            group_seq,
-            group_kernel,
-            gid);
-        return std::max<size_t>(1, group_seq / group_kernel);
+        return topology().groupById(gid).kernelBlocksPerKvBlock();
     }
-
-    // Legacy scalar view: how many kernel blocks fit inside one global physical block.
-    size_t kernelBlocksPerKvBlock() const {
-        if (kernel_seq_size_per_block == 0) {
-            return 1;
-        }
-        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                seq_size_per_block,
-                                kernel_seq_size_per_block);
-        return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
-    }
-
-    // Block sizing information
-    // ---- Per-block sizes (all layers) ----
-    size_t kv_block_size_bytes = 0;
-    size_t kv_scale_size_bytes = 0;
-    size_t block_size_bytes    = 0;  // (kv + scales together)
-
-    // ---- Per-block strides (one layer) ----
-    size_t kv_block_stride_bytes = 0;
-    size_t kv_scale_stride_bytes = 0;
 
     // Attention-specific configuration
-    int    linear_step     = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    int    group_layer_num = 1;  // Number of layers per group for hybrid attention
-    size_t explicitly_sized_pool_reserve_bytes = 0;
+    int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -227,9 +185,6 @@ public:
     }
 
     std::vector<uint32_t> groupBlockNumsSnapshot() const {
-        if (!group_block_layout_initialized) {
-            return {};
-        }
         std::vector<uint32_t> block_nums;
         block_nums.reserve(topology().groups().size());
         for (const auto& group : topology().groups()) {
@@ -248,9 +203,6 @@ public:
     }
 
     std::vector<size_t> groupKvBlockStrideBytesSnapshot() const {
-        if (!group_block_layout_initialized) {
-            return {};
-        }
         std::vector<size_t> strides;
         strides.reserve(topology().groups().size());
         for (const auto& group : topology().groups()) {
@@ -260,9 +212,6 @@ public:
     }
 
     std::vector<size_t> groupKvScaleStrideBytesSnapshot() const {
-        if (!group_block_layout_initialized) {
-            return {};
-        }
         std::vector<size_t> strides;
         strides.reserve(topology().groups().size());
         for (const auto& group : topology().groups()) {
@@ -294,7 +243,19 @@ public:
     }
 
     size_t blockSizeBytesForGroup(size_t gid) const {
-        return layerIdsForGroup(gid).size() * (kvBlockStrideBytesForGroup(gid) + kvScaleStrideBytesForGroup(gid));
+        return topology().groupById(gid).blockSizeBytes();
+    }
+
+    size_t totalGroupBlockSizeBytes() const {
+        return topology().totalGroupBlockSizeBytes();
+    }
+
+    size_t layerBlockStrideBytes(size_t layer_id) const {
+        size_t total = 0;
+        for (const auto& group : groupsForLayer(static_cast<int>(layer_id))) {
+            total += group.get().kv_block_stride_bytes + group.get().kv_scale_stride_bytes;
+        }
+        return total;
     }
 
     uint32_t localKvHeadNumForGroup(size_t gid) const {

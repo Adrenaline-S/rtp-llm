@@ -61,10 +61,10 @@ public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
-                   bool                      is_prefill_cuda_graph_mode  = false,
-                   bool                      use_spec_decoding           = false,
-                   DSparkModelRole           dspark_model_role           = DSparkModelRole::NONE,
-                   bool                      allow_cuda_graph            = true,
+                   bool                      is_prefill_cuda_graph_mode   = false,
+                   bool                      use_spec_decoding            = false,
+                   DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
+                   bool                      allow_cuda_graph             = true,
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
@@ -296,6 +296,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
+            graph_params.max_kernel_blocks_per_kv_block =
+                params.kv_cache_layer_layout->topology().maxKernelBlocksPerKvBlock();
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);

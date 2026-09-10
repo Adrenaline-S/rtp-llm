@@ -71,8 +71,7 @@ public:
     DiskTempDir() {
         // Prefer the Bazel-provided per-test scratch dir for sandbox isolation.
         const char* base     = std::getenv("TEST_TMPDIR");
-        std::string tmpl_str =
-            std::string(base && *base ? base : "/tmp") + "/rtp_memory_connector_disk_test_XXXXXX";
+        std::string tmpl_str = std::string(base && *base ? base : "/tmp") + "/rtp_memory_connector_disk_test_XXXXXX";
         std::vector<char> tmpl(tmpl_str.begin(), tmpl_str.end());
         tmpl.push_back('\0');
         auto path = ::mkdtemp(tmpl.data());
@@ -168,16 +167,14 @@ const std::vector<std::vector<std::string>>& dsv4TypedLayerTags() {
 
 CacheConfig createDsv4TypedConnectorConfig() {
     CacheConfig config;
-    config.layer_num                   = 2;
-    config.layer_all_num               = 2;
-    config.block_num                   = 16;
-    config.seq_size_per_block          = 128;
-    config.kernel_seq_size_per_block   = 128;
-    config.linear_step                 = 4;
-    config.use_independent_block_pools = true;
-    config.use_typed_cache_regions     = true;
-    config.use_opaque_kv_cache_store   = true;
-    config.is_sparse                   = true;
+    config.layer_num                 = 2;
+    config.layer_all_num             = 2;
+    config.block_num                 = 16;
+    config.seq_size_per_block        = 128;
+    config.linear_step               = 4;
+    config.use_typed_cache_regions   = true;
+    config.use_opaque_kv_cache_store = true;
+    config.is_sparse                 = true;
 
     const auto& pools      = dsv4TypedPools();
     const auto& layer_tags = dsv4TypedLayerTags();
@@ -220,12 +217,12 @@ CacheConfig createDsv4TypedConnectorConfig() {
     }
 
     config.fromGroupedSpecs(specs, layers_by_group, types, tags, policies);
-    config.setGroupBlockLayout(std::vector<uint32_t>(kDsv4PoolNum, config.block_num),
-                               kv_strides,
-                               std::vector<size_t>(kDsv4PoolNum, 0));
+    config.setGroupBlockLayout(
+        std::vector<uint32_t>(kDsv4PoolNum, config.block_num), kv_strides, std::vector<size_t>(kDsv4PoolNum, 0));
     // layer 0: hca_kv(24) + hca_state(20) + swa_kv(28) = 72
     // layer 1: csa_kv(16) + indexer_kv(32) + indexer_state(8) + csa_state(12) + swa_kv(28) = 96
-    config.layer_to_block_stride_bytes = {72, 96};
+    EXPECT_EQ(config.layerBlockStrideBytes(0), 72u);
+    EXPECT_EQ(config.layerBlockStrideBytes(1), 96u);
     return config;
 }
 
@@ -475,7 +472,7 @@ private:
 
         size_t byte_off = 0;
         for (size_t layer = 0; layer < layer_num; ++layer) {
-            const size_t layer_stride = static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
+            const size_t layer_stride = cache_config_.layerBlockStrideBytes(layer);
             const auto   block_id     = layer_to_block[layer];
             if (isNullBlockIdx(block_id)) {
                 byte_off += layer_stride;
@@ -511,7 +508,7 @@ private:
 
         size_t total = 0;
         for (size_t layer = 0; layer < layer_num; ++layer) {
-            total += static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
+            total += cache_config_.layerBlockStrideBytes(layer);
         }
 
         for (size_t layer = 0; layer < layer_num; ++layer) {
@@ -522,7 +519,7 @@ private:
             const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
             const auto bytes    = sumBlockInfosBytes(gpu_bufs);
             ASSERT_GT(bytes, 0u);
-            ASSERT_LE(bytes, static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]));
+            ASSERT_LE(bytes, cache_config_.layerBlockStrideBytes(layer));
             if (fill_gpu) {
                 setBlockInfosContent(gpu_bufs, static_cast<char>('k' + static_cast<int>(layer)));
             }
@@ -547,7 +544,7 @@ private:
         if (fill_cpu) {
             size_t byte_off = 0;
             for (size_t layer = 0; layer < layer_num; ++layer) {
-                const size_t layer_stride = static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
+                const size_t layer_stride = cache_config_.layerBlockStrideBytes(layer);
                 const auto   block_id     = layer_to_block[layer];
                 if (isNullBlockIdx(block_id)) {
                     byte_off += layer_stride;
@@ -693,7 +690,7 @@ private:
         // (e.g. when some layers are NULL for a key) should still be served by the same pool.
         auto pool = connector_->block_pool_;
         if (!pool) {
-            // initBlockPool uses cache_config_.block_size_bytes and kv_cache_config_.memory_cache_size_mb.
+            // initBlockPool uses topology-derived block bytes and kv_cache_config_.memory_cache_size_mb.
             EXPECT_NO_THROW(connector_->initBlockPool());
             pool = connector_->block_pool_;
         }
@@ -789,12 +786,6 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
     auto cfg = cache_config_;
     setGroupBlockBytes(cfg, 0);
-    cfg.layer_to_block_stride_bytes.clear();
-    cfg.kv_block_stride_bytes = 0;
-    cfg.kv_scale_stride_bytes = 0;
-    cfg.kv_block_size_bytes   = 0;
-    cfg.kv_scale_size_bytes   = 0;
-    cfg.block_size_bytes      = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -808,7 +799,6 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenPoolTooSmallForBlockSize
     auto cfg = cache_config_;
     // Make sure pool_size_mb * 1MB / total_stride_bytes == 0 -> createBlockPool() should fail with CHECK.
     setGroupBlockBytes(cfg, 1024 * 1024);
-    cfg.layer_to_block_stride_bytes.assign(cfg.layer_all_num, 1024 * 1024);
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -1057,12 +1047,6 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
     auto cfg = cache_config_;
     setGroupBlockBytes(cfg, 0);
-    cfg.layer_to_block_stride_bytes.clear();
-    cfg.kv_block_stride_bytes = 0;
-    cfg.kv_scale_stride_bytes = 0;
-    cfg.kv_block_size_bytes   = 0;
-    cfg.kv_scale_size_bytes   = 0;
-    cfg.block_size_bytes      = 0;
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -1077,7 +1061,6 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails)
     // Force createBlockPool() to compute block_num=0:
     // block_num = pool_size_mb * 1MB / total_stride_bytes.
     setGroupBlockBytes(cfg, 1024 * 1024);
-    cfg.layer_to_block_stride_bytes.assign(cfg.layer_all_num, 1024 * 1024);
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -1219,8 +1202,8 @@ TEST_F(KVCacheMemoryConnectorTest, mergePrefixExistingSlots_SupportsMixedMemoryA
     auto slots = conn->layerTagSlots();
 
     auto run_case = [&](bool dst_disk, bool src_disk) {
-        SCOPED_TRACE(std::string("dst_disk=") + (dst_disk ? "true" : "false") + " src_disk="
-                     + (src_disk ? "true" : "false"));
+        SCOPED_TRACE(std::string("dst_disk=") + (dst_disk ? "true" : "false")
+                     + " src_disk=" + (src_disk ? "true" : "false"));
         constexpr auto kind        = CacheBlockKind::COMPRESSED_KV;
         auto           memory_pool = conn->memoryPoolFor(kind);
         auto           disk_pool   = conn->diskPoolFor(kind);
@@ -1492,8 +1475,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
             res->cacheKeys(), res->blockDependencies(), layer_blocks, slots, /*start_index=*/0, /*read_num=*/1);
         EXPECT_EQ(plan, nullptr);
 
-        auto evicted = conn->prefix_block_cache_->popOldestEvictable(CacheBlockKind::COMPRESSED_KV,
-                                                                     CacheBackingType::DISK);
+        auto evicted =
+            conn->prefix_block_cache_->popOldestEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::DISK);
         ASSERT_TRUE(evicted.has_value());
         EXPECT_EQ(evicted->cache_key, 81005);
         EXPECT_EQ(evicted->disk_slot, item.disk_slot);
@@ -1802,8 +1785,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots) {
     // One layer carrying two prefix-reusable tags with different byte strides: the copy plan must
-    // emit one slot per (layer, tag), not one slot per layer.  layer_to_block_stride_bytes is left
-    // deliberately bogus (999) so a per-layer fallback would be visible in the asserted strides.
+    // emit one slot per (layer, tag), not one slot per layer.
     auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
@@ -1813,7 +1795,6 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
                          {CacheGroupType::FULL, CacheGroupType::FULL},
                          {"csa_kv", "swa_kv"});
     cfg.setGroupBlockLayout({cfg.block_num, cfg.block_num}, {16, 32}, {0, 0});
-    cfg.layer_to_block_stride_bytes = {999};
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
@@ -3121,30 +3102,24 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     ctx.attn_config        = &attn_config;
     auto mla_spec          = SpecBuilder::build(desc, ctx);
 
-    cache_config_.layer_num             = static_cast<uint32_t>(kLayerNum);
-    cache_config_.layer_all_num         = static_cast<uint32_t>(kLayerNum);
-    cache_config_.block_num             = static_cast<uint32_t>(kBlockNum);
-    cache_config_.seq_size_per_block    = kSeqPerBlock;
-    cache_config_.use_mla               = true;
-    cache_config_.is_sparse             = false;
-    cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP8_E4M3;
-    cache_config_.kv_block_stride_bytes = kKvBytesPerTok * kSeqPerBlock;
-    cache_config_.kv_scale_stride_bytes = kScaleBytesPerTok * kSeqPerBlock;
-    cache_config_.kv_block_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_block_stride_bytes;
-    cache_config_.kv_scale_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_scale_stride_bytes;
-    cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-    const size_t kPerLayerStrideBytes   = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-    cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(kLayerNum),
-                                                     static_cast<int>(kPerLayerStrideBytes));
+    cache_config_.layer_num                 = static_cast<uint32_t>(kLayerNum);
+    cache_config_.layer_all_num             = static_cast<uint32_t>(kLayerNum);
+    cache_config_.block_num                 = static_cast<uint32_t>(kBlockNum);
+    cache_config_.seq_size_per_block        = kSeqPerBlock;
+    cache_config_.use_mla                   = true;
+    cache_config_.is_sparse                 = false;
+    cache_config_.dtype                     = rtp_llm::DataType::TYPE_FP8_E4M3;
+    const size_t     kKvBlockStrideBytes    = kKvBytesPerTok * kSeqPerBlock;
+    const size_t     kScaleBlockStrideBytes = kScaleBytesPerTok * kSeqPerBlock;
+    const size_t     kPerLayerStrideBytes   = kKvBlockStrideBytes + kScaleBlockStrideBytes;
     std::vector<int> layer_ids(kLayerNum);
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
     cache_config_.fromGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    cache_config_.setGroupBlockLayout({static_cast<uint32_t>(kBlockNum)},
-                                      {cache_config_.kv_block_stride_bytes},
-                                      {cache_config_.kv_scale_stride_bytes});
-    ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
+    cache_config_.setGroupBlockLayout(
+        {static_cast<uint32_t>(kBlockNum)}, {kKvBlockStrideBytes}, {kScaleBlockStrideBytes});
+    ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kvBlockStrideBytesForGroup(0));
 
     const size_t merged_one_key = memoryCacheBlockBytes(cache_config_);
     ASSERT_EQ(merged_one_key, static_cast<size_t>(kLayerNum) * kPerLayerStrideBytes);
@@ -3330,7 +3305,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
     // Allocate one memory block for the merged layout (one cache-key across all layers).
     size_t total_bytes = 0;
     for (int layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-        total_bytes += static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[static_cast<size_t>(layer)]);
+        total_bytes += cache_config_.layerBlockStrideBytes(static_cast<size_t>(layer));
     }
     ASSERT_GT(total_bytes, 0u);
 
@@ -3364,7 +3339,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
     }
     size_t byte_off = 0;
     for (size_t layer = 0; layer < layer_num; ++layer) {
-        const size_t layer_stride = static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
+        const size_t layer_stride = cache_config_.layerBlockStrideBytes(layer);
         const auto   block_id     = layer_to_block[layer];
         if (isNullBlockIdx(block_id)) {
             byte_off += layer_stride;
@@ -3400,16 +3375,14 @@ protected:
         config.layer_all_num                          = layer_num;
         config.block_num                              = block_num;
         config.seq_size_per_block                     = seq_size_per_block;
-        config.kernel_seq_size_per_block              = seq_size_per_block;
         config.linear_step                            = linear_step;
-        config.group_layer_num                        = layer_num;
         kv_cache_config_.memory_cache_size_mb         = kTestMemoryCacheSizeMb;
         kv_cache_config_.memory_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
 
-        auto full_spec = makeMhaSpec(
-            "default", static_cast<size_t>(seq_size_per_block), rtp_llm::DataType::TYPE_FP16, 4, 64);
-        auto swa_spec = makeMhaSpec(
-            "swa_kv", static_cast<size_t>(seq_size_per_block), rtp_llm::DataType::TYPE_FP16, 4, 64);
+        auto full_spec =
+            makeMhaSpec("default", static_cast<size_t>(seq_size_per_block), rtp_llm::DataType::TYPE_FP16, 4, 64);
+        auto swa_spec =
+            makeMhaSpec("swa_kv", static_cast<size_t>(seq_size_per_block), rtp_llm::DataType::TYPE_FP16, 4, 64);
 
         // Both groups must stay prefix-reusable so layerTagSlots() emits one slot per (layer, tag).
         // defaultCacheGroupPolicy(SWA) opts out of prefix reuse, which would collapse the layout
@@ -3428,22 +3401,12 @@ protected:
 
         const size_t full_stride = full_spec->block_size_bytes();
         const size_t swa_stride  = swa_spec->block_size_bytes();
-        config.setGroupBlockLayout({static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_num)},
-                                   {full_stride, swa_stride},
-                                   {0, 0});
+        config.setGroupBlockLayout(
+            {static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_num)}, {full_stride, swa_stride}, {0, 0});
 
-        config.dtype                 = rtp_llm::DataType::TYPE_FP16;
-        config.kv_block_stride_bytes = std::max(full_stride, swa_stride);
-        config.kv_scale_stride_bytes = 0;
-        config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * full_stride;
-        config.kv_scale_size_bytes   = 0;
-        // DEV's swa pool byte size is now derived: blockSizeBytesForGroup("swa_kv") ==
+        config.dtype = rtp_llm::DataType::TYPE_FP16;
+        // The SWA pool byte size is derived: blockSizeBytesForGroup("swa_kv") ==
         // layerIdsForGroup(gid).size() * (kv_stride + scale_stride) == layer_num * swa_stride.
-        config.block_size_bytes = config.kv_block_size_bytes;
-        config.layer_to_block_stride_bytes.assign(static_cast<size_t>(layer_num), static_cast<int>(full_stride));
-
-        config.use_independent_block_pools = true;
-
         return config;
     }
 

@@ -23,9 +23,12 @@ static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const Cac
     if (!enable_sm_copy) {
         return;
     }
+    RTP_LLM_CHECK_WITH_INFO(cfg.topology().hasSingleGlobalGroup(),
+                            "split KV copy requires one cache group shared by all layers");
+    const auto& group               = cfg.topology().groups().front();
     out.split_kv_layer_num          = static_cast<int>(cfg.layer_all_num);
-    out.split_kv_cache_stride_bytes = cfg.kv_block_stride_bytes;
-    out.split_kv_scale_stride_bytes = cfg.kv_scale_stride_bytes;
+    out.split_kv_cache_stride_bytes = group.kv_block_stride_bytes;
+    out.split_kv_scale_stride_bytes = group.kv_scale_stride_bytes;
 }
 
 static bool isUsableBlockIdx(BlockIdxType block_idx) {
@@ -271,11 +274,7 @@ void KVCacheMemoryConnector::initBlockPool() {
     if (!use_prefix_tree_memory_cache_ && !use_typed_memory_layout) {
         size_t layer_block_size = 0;
         for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-            if (layer < cache_config_.layer_to_block_stride_bytes.size()) {
-                layer_block_size += static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
-            } else {
-                layer_block_size += cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-            }
+            layer_block_size += cache_config_.layerBlockStrideBytes(layer);
         }
         RTP_LLM_CHECK_WITH_INFO(layer_block_size > 0, "legacy memory block size is invalid");
         block_pool_ = createBlockPool(layer_block_size, memory_cache_size_mb);
@@ -405,11 +404,7 @@ size_t KVCacheMemoryConnector::memoryCacheBlockSizeBytes() const {
     if (!usePrefixTreeMemoryCache() && !usesTypedMemoryPoolLayout(slots)) {
         size_t block_size = 0;
         for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-            if (layer < cache_config_.layer_to_block_stride_bytes.size()) {
-                block_size += static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
-            } else {
-                block_size += cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-            }
+            block_size += cache_config_.layerBlockStrideBytes(layer);
         }
         return block_size;
     }
@@ -565,10 +560,7 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerT
                 return kv_stride + scale_stride;
             }
         }
-        if (layer_id >= 0 && static_cast<size_t>(layer_id) < cache_config_.layer_to_block_stride_bytes.size()) {
-            return static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)]);
-        }
-        return cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
+        return layer_id >= 0 ? cache_config_.layerBlockStrideBytes(static_cast<size_t>(layer_id)) : 0;
     };
 
     const auto layer_group_ids = cache_config_.layerGroupIdsSnapshot();
@@ -616,8 +608,7 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
     if (slots.empty() || !hasTypedLayerTagSlots(slots)) {
         return false;
     }
-    if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store
-        || !cache_config_.use_independent_block_pools) {
+    if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store) {
         return false;
     }
     const auto group_num       = static_cast<size_t>(cache_config_.groupNums());
@@ -1704,13 +1695,8 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
             ++disk_item_num;
         }
     }
-    auto code = wait_done_thread_pool_->pushTask([this,
-                                                  context,
-                                                  task_copy_plan,
-                                                  enqueue_time_us,
-                                                  direction,
-                                                  copy_item_num,
-                                                  disk_item_num]() mutable {
+    auto code = wait_done_thread_pool_->pushTask(
+        [this, context, task_copy_plan, enqueue_time_us, direction, copy_item_num, disk_item_num]() mutable {
             const auto task_start_us = currentTimeUs();
             const auto send_start_us = currentTimeUs();
             try {
@@ -2523,9 +2509,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const NormalizedCopyItem&        item,
         size_t byte_off = 0;
         for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
             const auto gpu_block    = item.gpu_blocks[layer];
-            const auto layer_stride = layer < cache_config_.layer_to_block_stride_bytes.size() ?
-                                          static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]) :
-                                          cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
+            const auto layer_stride = cache_config_.layerBlockStrideBytes(layer);
             if (isNullBlockIdx(gpu_block)) {
                 byte_off += layer_stride;
                 continue;
@@ -2624,9 +2608,7 @@ bool KVCacheMemoryConnector::prepareLayerCopyBuffers(BlockIdxType               
     size_t byte_off = 0;
     for (size_t layer = 0; layer < layer_num; ++layer) {
         const auto gpu_block    = gpu_blocks.at(layer);
-        const auto layer_stride = layer < cache_config_.layer_to_block_stride_bytes.size() ?
-                                      static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]) :
-                                      cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
+        const auto layer_stride = cache_config_.layerBlockStrideBytes(layer);
 
         if (isNullBlockIdx(gpu_block)) {
             byte_off += layer_stride;
@@ -3666,8 +3648,7 @@ void KVCacheMemoryConnector::reportCopyTaskMetrics(bool          success,
     collector.disk_item_num      = disk_item_num;
     collector.from_gpu           = direction == CopyDirection::D2H;
 
-    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyTaskMetricsCollector>(nullptr,
-                                                                                                   &collector);
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyTaskMetricsCollector>(nullptr, &collector);
 }
 
 void KVCacheMemoryConnector::reportDiskMatchMetrics(bool    success,
