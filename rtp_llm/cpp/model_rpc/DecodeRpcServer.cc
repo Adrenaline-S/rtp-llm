@@ -274,8 +274,15 @@ std::vector<size_t> DecodeRpcServer::completionQueueExpectedResponseCounts(size_
 int DecodeRpcServer::markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
                                           const LoadCacheResult&                 load_result,
                                           int                                    seq_size_per_block,
-                                          bool                                   use_independent_block_pools) {
-    if (!stream || !use_independent_block_pools || !load_result.ok() || load_result.loaded_cache_block_count == 0
+                                          const CacheConfig&                     cache_config) {
+    // Preserve DSV4's opaque-pool handoff publication. Ordinary P/D transfer
+    // is not a prefix-cache hit, even though every allocator now uses pools.
+    const auto& groups = cache_config.groups();
+    const bool opaque_pools = !groups.empty() && std::all_of(groups.begin(), groups.end(), [](const CacheGroup& group) {
+        return group.spec && (group.spec->type == KVCacheSpecType::OpaqueKV
+                              || group.spec->type == KVCacheSpecType::OpaqueState);
+    });
+    if (!stream || !opaque_pools || !load_result.ok() || load_result.loaded_cache_block_count == 0
         || seq_size_per_block <= 0 || stream->inputLength() <= 1) {
         return 0;
     }
@@ -429,10 +436,9 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     decode_context.time_info.updateLoadEndTime();
     const auto& error_info      = load_result.error_info;
     auto&       generate_stream = decode_context.getStream();
-    const bool  use_independent_block_pools =
-        generate_stream->resourceContext().cache_manager->cacheConfig().groupNums() > 0;
+    const auto& cache_config = generate_stream->resourceContext().cache_manager->cacheConfig();
     const int loaded_reuse_len = markLoadedCacheReuse(
-        generate_stream, load_result, generate_stream->seqSizePerBlock(), use_independent_block_pools);
+        generate_stream, load_result, generate_stream->seqSizePerBlock(), cache_config);
     if (loaded_reuse_len > 0) {
         RTP_LLM_LOG_DEBUG("request [%s] marked completed P/D handoff reuse_len=%d blocks=%zu",
                           decode_context.request_key.c_str(),

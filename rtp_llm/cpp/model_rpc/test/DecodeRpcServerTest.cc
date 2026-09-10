@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -399,32 +400,63 @@ TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
 
 TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
     auto stream = makeGenerateStream(/*seq_length=*/2560);
+    auto group = makeRpcGroup("csa_kv", 256, 256);
+    auto spec = std::make_shared<CompressedKVCacheSpec>();
+    spec->seq_size_per_block = 256;
+    spec->kernel_seq_size_per_block = 256;
+    group.spec = std::move(spec);
+    CacheConfig config({group}, {{group.tag}}, 1);
 
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
                                                     {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
                                                     /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/true),
+                                                    config),
               2304);
     EXPECT_EQ(stream->initialReuseLength(), 2304);
     EXPECT_EQ(stream->reuseLength(), 2304);
     EXPECT_EQ(stream->localReuseLength(), 2304);
 }
 
-TEST(DecodeRpcServerTest, FailedOrSharedPoolHandoffDoesNotPublishReuse) {
+TEST(DecodeRpcServerTest, FailedOrOrdinaryHandoffDoesNotPublishReuse) {
     auto stream = makeGenerateStream(/*seq_length=*/513);
+    auto group = makeRpcGroup("csa_kv", 256, 256);
+    auto spec = std::make_shared<CompressedKVCacheSpec>();
+    spec->seq_size_per_block = 256;
+    spec->kernel_seq_size_per_block = 256;
+    group.spec = std::move(spec);
+    CacheConfig opaque_config({group}, {{group.tag}}, 1);
+    CacheConfig ordinary_config({makeRpcGroup("default")}, {{"default"}}, 1);
 
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
                   stream,
                   {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
                   /*seq_size_per_block=*/256,
-                  /*use_independent_block_pools=*/true),
+                  opaque_config),
               0);
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
                                                     {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2},
                                                     /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/false),
+                                                    ordinary_config),
               0);
     EXPECT_EQ(stream->initialReuseLength(), 0);
+    EXPECT_EQ(stream->reuseLength(), 0);
+    EXPECT_EQ(stream->localReuseLength(), 0);
+}
+
+TEST(DecodeRpcServerTest, OrdinaryHandoffPreservesExistingRemoteReuse) {
+    auto stream = makeGenerateStream(/*seq_length=*/149);
+    stream->setInitialReuseLength(128);
+    stream->setReuseLength(128);
+    stream->setRemoteReuseLength(128);
+    CacheConfig config({makeRpcGroup("default")}, {{"default"}}, 1);
+
+    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
+                  stream, {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/18}, 8, config),
+              0);
+    EXPECT_EQ(stream->initialReuseLength(), 128);
+    EXPECT_EQ(stream->reuseLength(), 128);
+    EXPECT_EQ(stream->localReuseLength(), 0);
+    EXPECT_EQ(stream->remoteReuseLength(), 128);
 }
 
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
