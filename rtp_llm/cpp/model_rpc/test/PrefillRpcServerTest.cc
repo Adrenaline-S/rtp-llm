@@ -10,6 +10,8 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 
 namespace rtp_llm {
 
@@ -565,12 +567,27 @@ TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
     EXPECT_EQ(second_aux_info->multimodal_lengths().at(1), 64);
 }
 
+static CacheConfig makeHandoffCacheConfig(bool opaque) {
+    KVCacheSpecPtr spec = opaque ? std::static_pointer_cast<KVCacheSpec>(std::make_shared<CompressedKVCacheSpec>()) :
+                                  std::static_pointer_cast<KVCacheSpec>(std::make_shared<MHAKVCacheSpec>());
+    spec->seq_size_per_block = 8;
+    spec->kernel_seq_size_per_block = 8;
+    CacheGroup group;
+    group.tag = "default";
+    group.spec = std::move(spec);
+    group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    CacheConfig config({group}, {{group.tag}}, 1);
+    config.use_opaque_kv_cache_store = opaque;
+    return config;
+}
+
 TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsCompletedDecodeHandoffForColdPrefill) {
+    const auto config = makeHandoffCacheConfig(/*opaque=*/true);
     AuxInfoPB aux_info;
     aux_info.set_total_reuse_len(1280);
     aux_info.set_local_reuse_len(1280);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, &config);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 1280);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
@@ -579,11 +596,12 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsCompletedDecodeHandoffFor
 }
 
 TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLongerPrefillPrefixWithoutAddingPhases) {
+    const auto config = makeHandoffCacheConfig(/*opaque=*/true);
     AuxInfoPB aux_info;
     aux_info.set_total_reuse_len(1280);
     aux_info.set_local_reuse_len(1280);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 1536, 1536, 0, 1536, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 1536, 1536, 0, 1536, &config);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 1536);
     EXPECT_EQ(aux_info.memory_reuse_len(), 1536);
@@ -592,27 +610,34 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLongerPrefillPrefixWithoutA
 }
 
 TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillAttributionOnEqualPrefix) {
+    const auto config = makeHandoffCacheConfig(/*opaque=*/true);
     AuxInfoPB aux_info;
     aux_info.set_total_reuse_len(512);
     aux_info.set_local_reuse_len(512);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 512, 512, 0, 512, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 512, 512, 0, 512, &config);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 512);
     EXPECT_EQ(aux_info.memory_reuse_len(), 512);
     EXPECT_EQ(aux_info.decode_memory_reuse_len(), 0);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsSharedPoolTopLevelPrefillOnly) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsOrdinaryCacheTopLevelPrefillOnly) {
+    const auto config = makeHandoffCacheConfig(/*opaque=*/false);
     AuxInfoPB aux_info;
     aux_info.set_total_reuse_len(1280);
     aux_info.set_local_reuse_len(1280);
+    aux_info.set_memory_reuse_len(1280);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/false);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, &config);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 0);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
     EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.local_reuse_len(), 0);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 0);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 1280);
 }
 
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {

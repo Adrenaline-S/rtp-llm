@@ -622,7 +622,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
     auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
     const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
-    const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().groupNums() > 0;
+    const auto* cache_config = cache_manager ? &cache_manager->cacheConfig() : nullptr;
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
@@ -654,7 +654,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                                 prefill_local_reuse_len,
                                 prefill_remote_reuse_len,
                                 prefill_memory_reuse_len,
-                                use_independent_block_pools);
+                                cache_config);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
@@ -675,7 +675,7 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                            int        prefill_local_reuse_len,
                                            int        prefill_remote_reuse_len,
                                            int        prefill_memory_reuse_len,
-                                           bool       use_independent_block_pools) {
+                                           const CacheConfig* cache_config) {
     const int decode_total_reuse_len  = aux_info.total_reuse_len();
     const int decode_local_reuse_len  = aux_info.local_reuse_len();
     const int decode_remote_reuse_len = aux_info.remote_reuse_len();
@@ -691,7 +691,10 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
     aux_info.set_decode_remote_reuse_len(decode_remote_reuse_len);
     aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
 
-    if (use_independent_block_pools && decode_total_reuse_len > prefill_total_reuse_len) {
+    // Ordinary models retain prefill-only top-level attribution. DSV4's
+    // opaque-pool handoff retains its existing longer-prefix reporting.
+    if (cache_config && cache_config->use_opaque_kv_cache_store
+        && decode_total_reuse_len > prefill_total_reuse_len) {
         aux_info.set_total_reuse_len(decode_total_reuse_len);
         aux_info.set_local_reuse_len(decode_local_reuse_len);
         aux_info.set_remote_reuse_len(decode_remote_reuse_len);

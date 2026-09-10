@@ -406,6 +406,7 @@ TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
     spec->kernel_seq_size_per_block = 256;
     group.spec = std::move(spec);
     CacheConfig config({group}, {{group.tag}}, 1);
+    config.use_opaque_kv_cache_store = true;
 
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
                                                     {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
@@ -425,6 +426,7 @@ TEST(DecodeRpcServerTest, FailedOrOrdinaryHandoffDoesNotPublishReuse) {
     spec->kernel_seq_size_per_block = 256;
     group.spec = std::move(spec);
     CacheConfig opaque_config({group}, {{group.tag}}, 1);
+    opaque_config.use_opaque_kv_cache_store = true;
     CacheConfig ordinary_config({makeRpcGroup("default")}, {{"default"}}, 1);
 
     EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
