@@ -720,10 +720,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         kv_cache_layer_layout = cache_manager->allLayerCacheBase();
     }
 
-    // Warmup runs MtpExecutor before the CacheManager is wired up, so every
-    // cache_manager-> call here must be guarded. PyWrappedModel's own
-    // kernel_tokens_per_block check trips loudly downstream when the geometry
-    // is missing, so no soft fallback is needed here.
+    // Cache-backed target and draft geometry comes from their own resolved configs.
+    // Warmup has no CacheManager and retains the model configuration fallback.
     GroupedCacheLayerLayout target_cache_layer_layout;
     GroupedCacheLayerLayout draft_cache_layer_layout;
     if (cache_manager) {
@@ -746,8 +744,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
+         cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
+                         params.model_config_.attn_config.tokens_per_block,
+         cache_manager ? 0 : params.model_config_.attn_config.kernel_tokens_per_block,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
@@ -801,8 +800,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mla_ops_type,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
-                                mtp_params->model_config_.attn_config.tokens_per_block,
-                                mtp_params->model_config_.attn_config.kernel_tokens_per_block,
+                                cache_manager ? cache_manager->getMTPModuleCacheConfig(0).seq_size_per_block :
+                                                mtp_params->model_config_.attn_config.tokens_per_block,
+                                cache_manager ? 0 : mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});

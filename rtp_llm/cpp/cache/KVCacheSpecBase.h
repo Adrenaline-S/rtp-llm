@@ -93,8 +93,8 @@ using LayerKVCacheSpecs = std::vector<std::vector<KVCacheSpecPtr>>;
 
 struct KVCacheSpec {
     std::string tag;
-    uint32_t    seq_size_per_block        = 1;
-    uint32_t    kernel_seq_size_per_block = 1;
+    uint32_t    seq_size_per_block        = 1;  // tokens/physical block of this group
+    uint32_t    kernel_seq_size_per_block = 1;  // tokens/kernel page of this group
 
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
 

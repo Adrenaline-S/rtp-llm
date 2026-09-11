@@ -53,14 +53,10 @@ public:
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (kernel_seq_size_per_block_ <= 0) {
-            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
-        }
-        if (max_kernel_blocks_per_kv_block_ == 0) {
-            RTP_LLM_CHECK_WITH_INFO(seq_size_per_block_ > 0 && seq_size_per_block_ % kernel_seq_size_per_block_ == 0,
-                                    "CUDA graph physical/kernel page sizes must be positive and divisible");
-            max_kernel_blocks_per_kv_block_ = seq_size_per_block_ / kernel_seq_size_per_block_;
-        }
+        auto resolved_geometry = graph_params;
+        resolved_geometry.resolveCacheGeometry();
+        max_kernel_blocks_per_kv_block_ = resolved_geometry.max_kernel_blocks_per_kv_block;
+        kv_cache_group_tags_            = resolved_geometry.kv_cache_group_tags;
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);

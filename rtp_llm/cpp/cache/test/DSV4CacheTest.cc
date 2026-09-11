@@ -781,6 +781,8 @@ TEST(CacheConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBlockSi
 TEST(CacheConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk) {
     ParallelismConfig pc;
     auto              mc = makeProModelConfig();
+    mc.attn_config.tokens_per_block        = 16384;
+    mc.attn_config.kernel_tokens_per_block = 128;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block        = 16384;
     kv_cache_config.kernel_seq_size_per_block = 128;
@@ -1383,6 +1385,8 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKerne
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
     auto create_config = [&](int seq_size_per_block, int kernel_seq_size_per_block) {
+        mc.attn_config.tokens_per_block        = seq_size_per_block;
+        mc.attn_config.kernel_tokens_per_block = kernel_seq_size_per_block;
         KVCacheConfig kv_cache_config;
         kv_cache_config.seq_size_per_block        = seq_size_per_block;
         kv_cache_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
@@ -1414,6 +1418,8 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigRejectsInvalidKernelShape) {
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
     auto create_config = [&](int seq_size_per_block, int kernel_seq_size_per_block) {
+        mc.attn_config.tokens_per_block        = seq_size_per_block;
+        mc.attn_config.kernel_tokens_per_block = kernel_seq_size_per_block;
         KVCacheConfig kv_cache_config;
         kv_cache_config.seq_size_per_block        = seq_size_per_block;
         kv_cache_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
@@ -1533,6 +1539,44 @@ TEST(CacheConfigTest, ModelSpecCloneKeepsExistingConfigStable) {
 
     EXPECT_EQ(config_tp1.localKvHeadNumForGroup(0), 4);
     EXPECT_NE(config_tp1.specForGroup(0).get(), config_tp2.specForGroup(0).get());
+}
+
+TEST(CacheConfigCreatorTest, ResolvedModelGeometryPrecedesRawCacheOptions) {
+    auto model                                = makeProModelConfig();
+    model.attn_config.tokens_per_block        = 512;  // tokens/base cache-key block
+    model.attn_config.kernel_tokens_per_block = 128;  // tokens/kernel page
+    KVCacheConfig options;
+    options.seq_size_per_block        = 64;
+    options.kernel_seq_size_per_block = 32;
+    const auto config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, options, false, 0);
+    EXPECT_EQ(config.seq_size_per_block, 512u);
+    for (const auto& group : config.topology().groups()) {
+        EXPECT_EQ(group.seqSizePerBlock(), 512u);
+        EXPECT_EQ(group.kernelSeqSizePerBlock(), group.policy.group_type == CacheGroupType::FULL ? 128u : 512u);
+    }
+    options.seq_size_per_block = -1;
+    EXPECT_ANY_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, options, false, 0));
+    options.seq_size_per_block        = 64;
+    options.kernel_seq_size_per_block = -1;
+    EXPECT_ANY_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, options, false, 0));
+}
+
+TEST(CacheConfigCreatorTest, UnresolvedModelGeometryUsesRawCacheOptions) {
+    ModelConfig model;
+    model.num_layers                          = 1;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 16;
+    model.attn_config.tokens_per_block        = 0;
+    model.attn_config.kernel_tokens_per_block = 0;
+    setDefaultKvCacheSpec(model);
+    KVCacheConfig options;
+    options.seq_size_per_block        = 64;
+    options.kernel_seq_size_per_block = 16;
+    const auto config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, options, false, 0);
+    EXPECT_EQ(config.seq_size_per_block, 64u);
+    EXPECT_EQ(config.seqSizePerBlockForGroup(0), 64u);
+    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup(0), 16u);
 }
 
 TEST(CacheConfigTest, RuntimeKernelBlockOverrideUpdatesTopology) {
@@ -1981,6 +2025,10 @@ TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackFollowsExpandedFullPoolWhenStep
 TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto score_model_config                         = makeFlashModelConfig();
     auto propose_model_config                       = makeFlashMtpModelConfig();
+    score_model_config.attn_config.tokens_per_block          = 16384;
+    score_model_config.attn_config.kernel_tokens_per_block   = 128;
+    propose_model_config.attn_config.tokens_per_block        = 16384;
+    propose_model_config.attn_config.kernel_tokens_per_block = 128;
     score_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
     propose_model_config.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
 

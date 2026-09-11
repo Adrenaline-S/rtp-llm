@@ -48,7 +48,7 @@ public:
 
     // Block configuration
     uint32_t block_num          = 0;
-    size_t   seq_size_per_block = 1;
+    size_t   seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
     size_t seqSizePerBlockForGroup(size_t gid) const {
         return topology().groupById(gid).seqSizePerBlock();

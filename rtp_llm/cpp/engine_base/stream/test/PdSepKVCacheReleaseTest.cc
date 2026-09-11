@@ -308,7 +308,9 @@ protected:
             ratios.push_back((i % 2 == 0) ? 4 : 128);
         }
         ratios.push_back(0);  // MTP tail marker.
-        mc.attn_config.layer_compress_ratios = ratios;
+        mc.attn_config.layer_compress_ratios   = ratios;
+        mc.attn_config.tokens_per_block        = seq_size_per_block;
+        mc.attn_config.kernel_tokens_per_block = kernel_seq_size_per_blk;
         // The 7 DSV4 pools are now declared as per-layer specs keyed by tag
         // (csa_kv / hca_kv / indexer_kv / indexer_state / csa_state / hca_state / swa_kv).
         test::setDsv4KvCacheSpecs(mc, ratios);

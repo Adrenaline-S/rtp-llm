@@ -81,16 +81,22 @@ void addBlockBudget(KVCacheBlockBudget& total, const KVCacheBlockBudget& additio
 }
 
 std::pair<uint32_t, uint32_t> resolveSeqSizes(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config) {
-    constexpr int kDefaultKvCacheSeqSize = 64;
-    const bool    has_seq_override =
-        kv_cache_config.seq_size_per_block > 0 && kv_cache_config.seq_size_per_block != kDefaultKvCacheSeqSize;
-    const auto physical_tokens_per_block = has_seq_override ?
-                                               static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
-                                               static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    const auto kernel_tokens_per_block   = kv_cache_config.kernel_seq_size_per_block > 0 ?
-                                               static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
-                                               physical_tokens_per_block;
-    RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "cache seq_size_per_block must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block >= 0 && kv_cache_config.kernel_seq_size_per_block >= 0,
+                            "cache block spans must be non-negative before resolution");
+    const auto& attention = model_config.attn_config;
+    RTP_LLM_CHECK_WITH_INFO(attention.tokens_per_block <= std::numeric_limits<uint32_t>::max()
+                                && attention.kernel_tokens_per_block <= std::numeric_limits<uint32_t>::max(),
+                            "model cache block spans exceed uint32 range");
+    // Model construction has already applied CLI values and model-specific defaults.
+    // Raw KVCacheConfig is a fallback for callers without resolved model geometry.
+    // This is the base cache-key span (tokens/key block), before per-group projection.
+    const auto physical_tokens_per_block = static_cast<uint32_t>(
+        attention.tokens_per_block > 0 ? attention.tokens_per_block : kv_cache_config.seq_size_per_block);
+    const auto kernel_tokens_per_block = static_cast<uint32_t>(
+        attention.kernel_tokens_per_block > 0         ? attention.kernel_tokens_per_block :
+        kv_cache_config.kernel_seq_size_per_block > 0 ? kv_cache_config.kernel_seq_size_per_block :
+                                                        physical_tokens_per_block);
+    RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "cache-key span in tokens must be > 0");
     RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0, "cache kernel_seq_size_per_block must be > 0");
     RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block >= kernel_tokens_per_block
                                 && physical_tokens_per_block % kernel_tokens_per_block == 0,

@@ -83,7 +83,7 @@ struct KVCacheSpecDesc {
 
 struct SpecBuildContext {
     DataType                     dtype                   = DataType::TYPE_INVALID;
-    uint32_t                     seq_size_per_block      = 0;
+    uint32_t                     seq_size_per_block      = 0;  // tokens/base cache-key block before group projection
     uint32_t                     kernel_tokens_per_block = 0;
     const AttentionConfigs*      attn_config             = nullptr;
     const LinearAttentionConfig* linear_attention_config = nullptr;

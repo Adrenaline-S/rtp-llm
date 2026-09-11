@@ -24,9 +24,14 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
     model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;
     if (model_input_gatherer_config_.kv_cache_group_nums > 0) {
-        model_input_gatherer_config_.block_stride_bytes         = cache_config.kvBlockStrideBytesForGroup(0);
-        model_input_gatherer_config_.scale_stride_bytes         = cache_config.kvScaleStrideBytesForGroup(0);
-        model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.kernelSeqSizePerBlockForGroup(0);
+        // Scalar layout metadata is meaningful only for a single group.
+        // Multi-group consumers read their tagged specs and block tables.
+        model_input_gatherer_config_.kernel_seq_size_per_block = 0;
+        if (cache_config.groupNums() == 1) {
+            model_input_gatherer_config_.block_stride_bytes        = cache_config.kvBlockStrideBytesForGroup(0);
+            model_input_gatherer_config_.scale_stride_bytes        = cache_config.kvScaleStrideBytesForGroup(0);
+            model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.kernelSeqSizePerBlockForGroup(0);
+        }
         model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.topology().maxKernelBlocksPerKvBlock();
         model_input_gatherer_config_.kv_cache_group_types       = cache_config.groupTypesSnapshot();
         model_input_gatherer_config_.kv_cache_group_tags        = cache_config.groupTagsSnapshot();
