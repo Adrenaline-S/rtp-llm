@@ -224,15 +224,14 @@ class RemoteConnectorInternalTest: public ::testing::Test {
 public:
     void SetUp() override {
         rtp_llm::initLogger();
-        auto mha_spec                  = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
-        auto linear_spec_1             = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
-        auto linear_spec_2             = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
-        cache_config_.block_num        = 8;
-        cache_config_.layer_num        = layer_num_;
-        cache_config_.layer_all_num    = layer_num_;
-        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
-        cache_config_.block_size_bytes = byte_size_per_block_;
-        cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
+        auto mha_spec               = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
+        auto linear_spec_1          = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
+        auto linear_spec_2          = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
+        cache_config_.block_num     = 8;
+        cache_config_.layer_num     = layer_num_;
+        cache_config_.layer_all_num = layer_num_;
+        byte_size_per_block_        = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
+        cache_config_.dtype         = rtp_llm::DataType::TYPE_FP16;
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
         cache_config_.fromGroupedSpecs({mha_spec, linear_spec_1, linear_spec_2},
@@ -345,12 +344,11 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
     constexpr size_t group_count        = linear_group_count + 1;
 
     CacheConfig config;
-    config.block_num        = 8;
-    config.layer_num        = group_count;
-    config.layer_all_num    = group_count;
-    config.dtype            = rtp_llm::DataType::TYPE_FP16;
-    auto full_spec          = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
-    config.block_size_bytes = full_spec->block_size_bytes();
+    config.block_num     = 8;
+    config.layer_num     = group_count;
+    config.layer_all_num = group_count;
+    config.dtype         = rtp_llm::DataType::TYPE_FP16;
+    auto full_spec       = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
 
     std::vector<KVCacheSpecPtr>   specs{full_spec};
     std::vector<std::vector<int>> layer_ids{{0}};

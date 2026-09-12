@@ -16,8 +16,8 @@ namespace rtp_llm {
 class TestDecodeRpcService final: public RpcService::Service {
 public:
     explicit TestDecodeRpcService(bool fail_first_allocate):
-        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(
-                                    grpc::Status(grpc::StatusCode::INTERNAL, "allocate failed once")) :
+        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(grpc::Status(
+                                                          grpc::StatusCode::INTERNAL, "allocate failed once")) :
                                                       std::nullopt) {}
 
     explicit TestDecodeRpcService(grpc::Status first_allocate_failure):
@@ -214,8 +214,7 @@ protected:
         ModelConfig model_config;
         model_config.max_seq_len = 2048;
         model_config.vocab_size  = 1024;
-        return std::make_shared<NormalGenerateStream>(
-            input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
     }
 
     std::unique_ptr<PrefillGenerateContext> makeContext(GenerateInputPB* request, int64_t timeout_ms = 0) {
@@ -545,8 +544,7 @@ TEST_F(PrefillRpcServerTest, retrySleepSaturatesOverflowingInterval) {
     request.set_request_id(12);
     auto context = makeContext(&request);
 
-    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()),
-              std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()), std::numeric_limits<int64_t>::max());
 }
 
 TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
@@ -570,7 +568,7 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsCompletedDecodeHandoffFor
     aux_info.set_total_reuse_len(1280);
     aux_info.set_local_reuse_len(1280);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 1280);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
@@ -583,7 +581,7 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLongerPrefillPrefixWithoutA
     aux_info.set_total_reuse_len(1280);
     aux_info.set_local_reuse_len(1280);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 1536, 1536, 0, 1536, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 1536, 1536, 0, 1536);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 1536);
     EXPECT_EQ(aux_info.memory_reuse_len(), 1536);
@@ -596,21 +594,21 @@ TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillAttributionOnEqual
     aux_info.set_total_reuse_len(512);
     aux_info.set_local_reuse_len(512);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 512, 512, 0, 512, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 512, 512, 0, 512);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 512);
     EXPECT_EQ(aux_info.memory_reuse_len(), 512);
     EXPECT_EQ(aux_info.decode_memory_reuse_len(), 0);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsSharedPoolTopLevelPrefillOnly) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsLongerDecodePrefix) {
     AuxInfoPB aux_info;
     aux_info.set_total_reuse_len(1280);
     aux_info.set_local_reuse_len(1280);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/false);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0);
 
-    EXPECT_EQ(aux_info.total_reuse_len(), 0);
+    EXPECT_EQ(aux_info.total_reuse_len(), 1280);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
     EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
 }

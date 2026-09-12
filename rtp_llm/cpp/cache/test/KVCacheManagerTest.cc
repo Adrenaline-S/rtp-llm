@@ -12,10 +12,10 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/testing/KVCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
@@ -103,7 +103,7 @@ static void assertScaleEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_
     ASSERT_NE(addr_info.kv_scale_addr, nullptr);
     ASSERT_EQ(expected_k.size(), expected_v.size());
 
-    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+    const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kvScaleStrideBytesForGroup(0);
     ASSERT_GT(kv_scale_stride_bytes, 0u);
     const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
     void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr_info.kv_scale_addr) + kv_scale_block_bytes);
@@ -327,14 +327,15 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
-TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
+TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearGroupWithIndependentPool) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
-    EXPECT_THROW(cache_manager->init(), std::runtime_error);
+    ASSERT_TRUE(cache_manager->init());
     ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->getBlockPool(), nullptr);
+    ASSERT_EQ(cache_manager->allocator_->group_block_pools_.size(), 1u);
+    EXPECT_NE(cache_manager->allocator_->group_block_pools_[0], nullptr);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
@@ -345,6 +346,38 @@ TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
     ASSERT_TRUE(cache_manager->init());
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/0).kv_addr, nullptr);
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/3).kv_addr, nullptr);
+}
+
+TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysicalPools) {
+    ModelConfig model_config;
+    model_config.num_layers                                      = 4;
+    model_config.max_seq_len                                     = 64;
+    model_config.data_type                                       = DataType::TYPE_FP16;
+    model_config.attn_config.head_num                            = 2;
+    model_config.attn_config.kv_head_num                         = 2;
+    model_config.attn_config.size_per_head                       = 16;
+    model_config.attn_config.tokens_per_block                    = 4;
+    model_config.hybrid_attention_config.enable_hybrid_attention = true;
+    model_config.hybrid_attention_config.hybrid_attention_types  = {
+        HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    model_config.linear_attention_config.linear_conv_kernel_dim = 2;
+    model_config.linear_attention_config.linear_key_head_dim    = 8;
+    model_config.linear_attention_config.linear_value_head_dim  = 8;
+    model_config.linear_attention_config.linear_num_key_heads   = 2;
+    model_config.linear_attention_config.linear_num_value_heads = 2;
+    setHybridAttentionKvCacheSpecs(model_config);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 6;
+    auto cache_config =
+        CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+
+    ASSERT_TRUE(cache_manager->init());
+    auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(cache_manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    ASSERT_EQ(allocator->group_block_pools_.size(), 2u);
+    EXPECT_NE(allocator->group_block_pools_[0], allocator->group_block_pools_[1]);
 }
 
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
@@ -364,13 +397,13 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
                                                               pd_sep_config);
         ASSERT_TRUE(cache_manager->init());
 
-        auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
+        auto allocator = std::dynamic_pointer_cast<KVCacheAllocator>(cache_manager->allocator_);
         ASSERT_NE(allocator, nullptr);
-        ASSERT_EQ(allocator->groupBlockPools().size(), static_cast<size_t>(config.groupNums()));
+        ASSERT_EQ(allocator->group_block_pools_.size(), static_cast<size_t>(config.groupNums()));
 
-        for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+        for (size_t gid = 0; gid < allocator->group_block_pools_.size(); ++gid) {
             const auto& tag = config.tagForGroup(gid);
-            EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), MemoryType::MEMORY_GPU)
+            EXPECT_EQ(allocator->group_block_pools_[gid]->where(), MemoryType::MEMORY_GPU)
                 << "role=" << static_cast<int>(role_type) << " gid=" << gid << " tag=" << tag;
         }
     };
@@ -396,6 +429,44 @@ TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     cache_manager.reset();
 }
 
+TEST_F(KVCacheManagerTest, WriteKVBlockUsesTargetLayerSpec) {
+    auto config     = makeSimpleMhaCacheConfig(2, 4, 2, DataType::TYPE_INT8);
+    auto large_spec = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 8, 2, "large");
+    auto small_spec = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "small");
+    config.fromGroupedSpecs(
+        {large_spec, small_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"large", "small"});
+    config.setGroupBlockLayout({4, 4},
+                               {large_spec->block_size_bytes(), small_spec->block_size_bytes()},
+                               {large_spec->scale_block_size_bytes(), small_spec->scale_block_size_bytes()});
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    auto k = torch::full({static_cast<int64_t>(small_spec->k_block_size_bytes())}, 7, torch::kInt8);
+    auto v = torch::full({static_cast<int64_t>(small_spec->v_block_size_bytes())}, 9, torch::kInt8);
+    ASSERT_TRUE(writeKVBlockForTest(*manager, 1, 1, k, v));
+    std::vector<int8_t> expected(small_spec->block_size_bytes(), 9);
+    std::fill(expected.begin(), expected.begin() + small_spec->k_block_size_bytes(), 7);
+    assertBlockBytesEq(manager, 1, 1, expected);
+    EXPECT_FALSE(writeKVBlockForTest(*manager, 1, 0, k, v));
+    EXPECT_ANY_THROW(writeKVBlockForTest(*manager, 1, 2, k, v));
+}
+
+TEST_F(KVCacheManagerTest, WriteKVBlockRejectsMultiGroupLayer) {
+    auto config = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+    auto first  = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "first");
+    auto second = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "second");
+    config.fromGroupedSpecs(
+        {first, second}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"first", "second"});
+    config.setGroupBlockLayout({4, 4},
+                               {first->block_size_bytes(), second->block_size_bytes()},
+                               {first->scale_block_size_bytes(), second->scale_block_size_bytes()});
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+    auto k = torch::zeros({static_cast<int64_t>(first->k_block_size_bytes())}, torch::kInt8);
+    auto v = torch::zeros({static_cast<int64_t>(first->v_block_size_bytes())}, torch::kInt8);
+    EXPECT_ANY_THROW(writeKVBlockForTest(*manager, 1, 0, k, v));
+}
+
 TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     // Use non-warmup config so we have usable blocks (block 0 is reserved in BlockPool).
     auto cache_config = makeSimpleMhaCacheConfig(
@@ -417,7 +488,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
     auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
 
-    ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_src, k_t, v_t));
+    ASSERT_TRUE(writeKVBlockForTest(*cache_manager, block_src, k_t, v_t));
 
     std::vector<int8_t> expected_block(k_bytes + v_bytes, 0);
     std::fill(expected_block.begin(), expected_block.begin() + k_bytes, 7);
@@ -437,7 +508,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     std::vector<int8_t> v2_vec(v_bytes, 2);
     auto                k2_t = torch::from_blob(k2_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
     auto                v2_t = torch::from_blob(v2_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
-    ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_dst, /*layer_id=*/0, k2_t, v2_t));
+    ASSERT_TRUE(writeKVBlockForTest(*cache_manager, block_dst, /*layer_id=*/0, k2_t, v2_t));
 
     std::vector<int8_t> expected_layer0(k_bytes + v_bytes, 0);
     std::fill(expected_layer0.begin(), expected_layer0.begin() + k_bytes, 1);
@@ -468,7 +539,7 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
         auto host_k_t = torch::tensor(src_k, torch::kFloat32);
         auto host_v_t = torch::tensor(src_v, torch::kFloat32);
 
-        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kv_scale_stride_bytes;
+        const size_t kv_scale_stride_bytes = cache_manager->cacheConfig().kvScaleStrideBytesForGroup(0);
         ASSERT_GT(kv_scale_stride_bytes, 0u);
         const size_t kv_scale_block_bytes = kv_scale_stride_bytes / 2;
         void*        v_scale_addr = static_cast<void*>(static_cast<char*>(addr.kv_scale_addr) + kv_scale_block_bytes);
@@ -514,7 +585,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
         std::vector<int8_t> v_vec(v_bytes, static_cast<int8_t>(block_id + 10));
         auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
         auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
-        ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_id, k_t, v_t));
+        ASSERT_TRUE(writeKVBlockForTest(*cache_manager, block_id, k_t, v_t));
     }
 
     std::vector<BlockIdPair> mapping;
@@ -1162,12 +1233,12 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator = std::dynamic_pointer_cast<KVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     size_t      expected_total_tokens     = std::numeric_limits<size_t>::max();
     size_t      expected_available_tokens = std::numeric_limits<size_t>::max();
-    const auto& pools                     = hybrid_allocator->groupBlockPools();
+    const auto& pools                     = hybrid_allocator->group_block_pools_;
     ASSERT_GT(pools.size(), 1u);
 
     for (size_t gid = 0; gid < pools.size(); ++gid) {
@@ -1190,7 +1261,7 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator = std::dynamic_pointer_cast<KVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
@@ -1200,7 +1271,7 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     hybrid_allocator->setCPSlotMapper(cp_slot_mapper);
 
     size_t      expected_logical_capacity = std::numeric_limits<size_t>::max();
-    const auto& pools                     = hybrid_allocator->groupBlockPools();
+    const auto& pools                     = hybrid_allocator->group_block_pools_;
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         if (gid < static_cast<size_t>(cache_config.groupNums())
             && cache_config.typeForGroup(gid) != CacheGroupType::FULL) {

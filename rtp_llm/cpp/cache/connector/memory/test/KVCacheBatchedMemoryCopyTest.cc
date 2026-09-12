@@ -13,7 +13,6 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -83,16 +82,14 @@ TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
 
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
-    config.layer_num                   = use_flash ? 43 : 61;
-    config.layer_all_num               = config.layer_num;
-    config.block_num                   = 512;
-    config.seq_size_per_block          = 256;
-    config.kernel_seq_size_per_block   = 256;
-    config.use_independent_block_pools = true;
-    config.use_typed_cache_regions     = true;
-    config.use_opaque_kv_cache_store   = true;
-    config.is_sparse                   = true;
+    config.dtype                     = rtp_llm::DataType::TYPE_UINT8;
+    config.layer_num                 = use_flash ? 43 : 61;
+    config.layer_all_num             = config.layer_num;
+    config.block_num                 = 512;
+    config.seq_size_per_block        = 256;
+    config.use_typed_cache_regions   = true;
+    config.use_opaque_kv_cache_store = true;
+    config.is_sparse                 = true;
 
     constexpr size_t               kDsv4PoolNum = 7;
     const std::vector<std::string> group_tags   = {
@@ -122,7 +119,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     const std::vector<size_t>     group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
     const std::vector<uint32_t>   group_block_nums(kDsv4PoolNum, config.block_num);
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
-    config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
 
     auto make_spec = [&](size_t gid) -> KVCacheSpecPtr {
         return makeResolvedOpaqueSpec(group_types[gid] != CacheGroupType::FULL,
@@ -228,20 +224,18 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     kv_config.seq_size_per_block        = 128;
     kv_config.kernel_seq_size_per_block = 128;
     kv_config.dsv4_fixed_pool_blocks    = 512;
-    auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+    auto config                         = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
     config.block_num                    = 512;
     return config;
 }
 
 CacheConfig makeTinyTypedHybridPoolConfig() {
     CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num                   = 2;
-    config.layer_all_num               = 2;
-    config.block_num                   = 16;
-    config.seq_size_per_block          = 4;
-    config.kernel_seq_size_per_block   = 4;
-    config.use_independent_block_pools = true;
+    config.dtype              = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num          = 2;
+    config.layer_all_num      = 2;
+    config.block_num          = 16;
+    config.seq_size_per_block = 4;
 
     config.fromGroupedSpecs({makeMhaSpec("csa_kv", config.seq_size_per_block, config.dtype, 1, 4),
                              makeMhaSpec("swa_kv", config.seq_size_per_block, config.dtype, 1, 8)},
@@ -254,15 +248,13 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
 
 CacheConfig makeKvOnlyTypedOpaqueConfig() {
     CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
-    config.layer_num                   = 2;
-    config.layer_all_num               = 2;
-    config.block_num                   = 16;
-    config.seq_size_per_block          = 256;
-    config.kernel_seq_size_per_block   = 256;
-    config.use_independent_block_pools = true;
-    config.use_typed_cache_regions     = true;
-    config.use_opaque_kv_cache_store   = true;
+    config.dtype                     = rtp_llm::DataType::TYPE_UINT8;
+    config.layer_num                 = 2;
+    config.layer_all_num             = 2;
+    config.block_num                 = 16;
+    config.seq_size_per_block        = 256;
+    config.use_typed_cache_regions   = true;
+    config.use_opaque_kv_cache_store = true;
 
     const auto seq_size = static_cast<uint32_t>(config.seq_size_per_block);
     config.fromGroupedSpecs({makeResolvedOpaqueSpec(/*state_cache=*/false, "csa_kv", config.dtype, 64, seq_size),
@@ -540,7 +532,7 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
         compact_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_TRUE(compact_connector->supportsTypedPrefixCacheLayout(compact_connector->layerTagSlots()));
 
-    // Real DSv4 Flash/Pro configs built by HybridPoolConfigCreator are eligible.
+    // Real DSv4 Flash/Pro configs built by CacheConfigCreator are eligible.
     auto flash_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     auto flash_connector = std::make_shared<KVCacheMemoryConnector>(
         flash_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
