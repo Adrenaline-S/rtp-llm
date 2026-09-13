@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <memory>
@@ -23,12 +24,15 @@ struct GroupBase {
     CacheGroupPolicy                   policy;
     std::vector<int>                   layer_ids;
 
-    uint32_t block_num                 = 0;
-    uint32_t local_kv_head_num         = 1;
-    size_t   seq_size_per_block        = 0;
-    size_t   kernel_seq_size_per_block = 0;
-    size_t   kv_block_stride_bytes     = 0;
-    size_t   kv_scale_stride_bytes     = 0;
+    uint32_t block_num             = 0;
+    uint32_t local_kv_head_num     = 1;
+    size_t   kv_block_stride_bytes = 0;
+    size_t   kv_scale_stride_bytes = 0;
+
+    size_t seqSizePerBlock() const;
+    size_t kernelSeqSizePerBlock() const;
+    size_t kernelBlocksPerKvBlock() const;
+    size_t blockSizeBytes() const;
 };
 
 // Order is deterministic but carries no business meaning.
@@ -61,6 +65,16 @@ public:
     size_t groupIdForTag(std::string_view tag) const;
     bool   hasSingleGlobalGroup() const;
     bool   hasOneGroupPerLayer() const;
+
+    size_t totalGroupBlockSizeBytes() const;
+
+    size_t maxKernelBlocksPerKvBlock() const {
+        size_t result = 1;
+        for (const auto& group : groups_) {
+            result = std::max(result, group.kernelBlocksPerKvBlock());
+        }
+        return result;
+    }
 
     // Lazily materialized compatibility projections. The same immutable
     // object is returned for the lifetime of this topology.

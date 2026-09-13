@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
@@ -116,7 +116,7 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_);
+            auto allocator = std::make_shared<KVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
@@ -137,18 +137,14 @@ private:
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
 
-        auto mha_spec                       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
-        cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP16;
-        cache_config_.kv_block_stride_bytes = mha_spec->block_size_bytes();  // one-layer KV bytes for one logical block
-        cache_config_.kv_scale_stride_bytes = 0;
-        cache_config_.kv_block_size_bytes   = static_cast<size_t>(layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_size_bytes   = 0;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes;  // (kv + scale)
+        auto mha_spec       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
+        cache_config_.dtype = rtp_llm::DataType::TYPE_FP16;
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
         cache_config_.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        cache_config_.setGroupBlockLayout({static_cast<uint32_t>(block_num)}, {mha_spec->block_size_bytes()}, {0});
     }
 };
 
