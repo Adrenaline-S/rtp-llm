@@ -220,7 +220,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
                      config_.layer_num,
                      config_.block_num,
-                     config_.block_size_bytes,
+                     config_.totalGroupBlockSizeBytes(),
                      config_.seq_size_per_block);
 }
 

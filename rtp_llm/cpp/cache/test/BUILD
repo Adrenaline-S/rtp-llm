@@ -90,6 +90,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/models_py/bindings:op_defs",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

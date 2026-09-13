@@ -153,6 +153,7 @@ static std::shared_ptr<KVCacheSpec> makeTestSpec(const std::string& tag, size_t 
                                             std::static_pointer_cast<KVCacheSpec>(std::make_shared<MHAKVCacheSpec>());
     spec->tag                         = tag;
     spec->seq_size_per_block          = static_cast<uint32_t>(tokens_per_block);
+    spec->kernel_seq_size_per_block   = static_cast<uint32_t>(tokens_per_block);
     return spec;
 }
 
@@ -173,9 +174,6 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     config.layer_all_num             = config.layer_num;
     config.block_num                 = static_cast<uint32_t>(block_num);
     config.seq_size_per_block        = tokens_per_block;
-    config.kernel_seq_size_per_block = tokens_per_block;
-    config.kv_block_stride_bytes = physical_kv_stride;
-    config.kv_scale_stride_bytes = physical_scale_stride;
     config.use_opaque_kv_cache_store = opaque_store;
 
     GroupBase target_group;
@@ -183,8 +181,6 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     target_group.spec                  = makeTestSpec(tag, tokens_per_block, mla_cache);
     target_group.policy                = policy;
     target_group.block_num             = static_cast<uint32_t>(block_num);
-    target_group.seq_size_per_block = tokens_per_block;
-    target_group.kernel_seq_size_per_block = tokens_per_block;
     target_group.kv_block_stride_bytes = transfer_kv_bytes == 0 ? physical_kv_stride : transfer_kv_bytes;
     target_group.kv_scale_stride_bytes = transfer_scale_bytes == 0 ? physical_scale_stride : transfer_scale_bytes;
 

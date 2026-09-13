@@ -207,7 +207,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
-    const size_t seq_size_per_block              = group.seq_size_per_block;
+    const size_t seq_size_per_block              = group.seqSizePerBlock();
     const size_t kv_block_stride_bytes           = group.kv_block_stride_bytes;
     const size_t kv_scale_stride_bytes           = group.kv_scale_stride_bytes;
     const size_t kv_block_transfer_bytes         = group.kv_block_stride_bytes;

@@ -179,10 +179,9 @@ private:
     }
 
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-        const size_t all_group_num    = full_group_ids_.size() + other_group_ids_.size();
-        cache_config_.layer_num       = all_group_num * layer_num;
-        cache_config_.layer_all_num   = all_group_num * layer_num;
-        cache_config_.group_layer_num = layer_num;
+        const size_t all_group_num  = full_group_ids_.size() + other_group_ids_.size();
+        cache_config_.layer_num     = all_group_num * layer_num;
+        cache_config_.layer_all_num = all_group_num * layer_num;
 
         auto full_spec   = makeTestMhaSpec("full", static_cast<uint32_t>(seq_size_per_block));
         auto linear_spec = makeTestLinearSpec("linear", static_cast<uint32_t>(seq_size_per_block));
@@ -217,17 +216,6 @@ private:
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
         ASSERT_GE(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
-        cache_config_.kv_block_stride_bytes = full_kv_block_stride_bytes;
-        cache_config_.kv_block_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-        cache_config_.kv_scale_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_scale_stride_bytes;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-        const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-        cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
-                                                         static_cast<int>(per_layer_stride_bytes));
-
         std::vector<uint32_t> group_block_nums(all_group_num, static_cast<uint32_t>(block_num));
         std::vector<size_t>   group_kv_strides;
         std::vector<size_t>   group_scale_strides;
