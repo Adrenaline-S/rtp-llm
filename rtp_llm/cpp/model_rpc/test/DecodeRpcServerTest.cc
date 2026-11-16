@@ -196,6 +196,9 @@ TEST(DecodeRpcServerTest, PipelineHandoffCarriesStageLocalGeometry) {
     for (int stage_id = 0; stage_id < 2; ++stage_id) {
         auto* stage = layout.add_stages();
         stage->set_main_layer_begin(stage_id * 2);
+        if (stage_id == 0) {
+            stage->add_block_table_tags("full");
+        }
         stage->set_main_layer_count(2);
         stage->add_worker_indices(stage_id * 2);
         stage->add_worker_indices(stage_id * 2 + 1);

@@ -166,6 +166,11 @@ PipelineTransferLayout pipeline(const std::vector<int>& cuts, const ShardLayout&
     int                    layer_begin = 0;
     for (int count : cuts) {
         auto& stage            = result.stages.emplace_back();
+        if (layer_begin == 0) {
+            for (const auto& entry : shards.groups) {
+                stage.block_table_tags.push_back(entry.first);
+            }
+        }
         stage.main_layer_begin = layer_begin;
         stage.main_layer_count = count;
         stage.main_shards      = shards;
@@ -223,6 +228,7 @@ TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
     auto& mixed_dst                       = dst.stages[1];
     for (auto* side : {&src, &dst}) {
         auto& root                       = side->stages.front();
+        root.block_table_tags.push_back("mixed");
         root.main_shards.groups["mixed"] = root.main_shards.groups.at(kFullTag);
         root.layer_tags.front().push_back("mixed");
     }

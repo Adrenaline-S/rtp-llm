@@ -312,7 +312,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         }
         dynamic_decode_gate_enabled_ = gate_result.value();
     }
-    initCacheManager(warm_up_result);
+    initCacheManager(warm_up_result, params.allocation_only_draft_config);
     RTP_LLM_LOG_INFO("create cache manager done");
 
     initExecutor(params);
@@ -1039,15 +1039,24 @@ absl::StatusOr<bool> NormalEngine::runAttentionAccuracyCheck(const EngineInitPar
 #endif
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
+void NormalEngine::initCacheManager(std::optional<WarmUpResult>       warm_up_result,
+                                    const std::optional<ModelConfig>& allocation_only_draft_config) {
     normalizeSystemPromptCacheConfig();
     const bool use_device_malloc_block_pool =
         shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config, kv_cache_config);
-    const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
-                                                  &propose_params_->getEngineInitParams().model_config_ :
-                                                  nullptr;
-    auto               config               = CacheConfigCreator::createConfig(
-        model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+    const ModelConfig* draft_model_config = allocation_only_draft_config ? &*allocation_only_draft_config : nullptr;
+    if (propose_params_ && propose_params_->draftModel()) {
+        RTP_LLM_CHECK(draft_model_config == nullptr);
+        draft_model_config = &propose_params_->getEngineInitParams().model_config_;
+    }
+    auto config            = CacheConfigCreator::createConfig(model_config_,
+                                                   parallelism_config,
+                                                   kv_cache_config,
+                                                   sp_config,
+                                                   draft_model_config,
+                                                   isMTPEagle(),
+                                                   isEagle(),
+                                                   allocation_only_draft_config.has_value());
     auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
     const auto local_block_num     = CacheConfigCreator::computeLocalBlockNum(config,

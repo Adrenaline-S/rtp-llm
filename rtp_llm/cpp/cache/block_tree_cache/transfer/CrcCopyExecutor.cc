@@ -54,10 +54,10 @@ CrcCopyExecutor::CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
         if (device_pools.empty())
             throw std::invalid_argument("CRC requires GPU-resident device pools");
         const int device = deviceFor(*group);
-        if (device < 0 || std::any_of(device_pools.begin(), device_pools.end(), [device](const auto& pool) {
-                return pool->deviceIndex() != device;
-            }))
-            throw std::invalid_argument("CRC GroupSet requires backings on a single GPU device");
+        for (size_t i = 0; i < device_pools.size(); ++i) {
+            if (!group->allocationOnly(group->groupTags()[i]) && (device < 0 || device_pools[i]->deviceIndex() != device))
+                throw std::invalid_argument("CRC GroupSet requires backings on a single GPU device");
+        }
         if ((group->hostPool() && group->hostPool()->strideBytes() < group->storageBytes())
             || (group->diskPool() && group->diskPool()->strideBytes() < group->storageBytes()))
             throw std::invalid_argument("CRC pool stride cannot hold payload and footer");

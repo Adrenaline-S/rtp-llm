@@ -86,6 +86,11 @@ const HostBlockPoolConfig& HostBlockPool::config() const {
 
 bool HostBlockPool::init() {
     const auto& cfg = config();
+    if (cfg.allocation_only) {
+        RTP_LLM_CHECK(cfg.payload_bytes == 0 && cfg.stride_bytes == 0);
+        markInitialized();
+        return true;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         cfg.payload_bytes > 0, "host block pool [%s] payload_bytes must be > 0", cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(cfg.stride_bytes >= cfg.payload_bytes,
@@ -124,7 +129,7 @@ bool HostBlockPool::init() {
 
 HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK(validBlock(block));
+    RTP_LLM_CHECK(validBlock(block) && backing_.has_value());
     const auto& cfg  = config();
     void*       addr = backing_->data() + static_cast<size_t>(block) * cfg.stride_bytes;
     return HostBlockBuffer{block, addr, cfg.payload_bytes, cfg.stride_bytes};

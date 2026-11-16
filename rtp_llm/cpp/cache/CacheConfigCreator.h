@@ -47,7 +47,8 @@ public:
                                     const std::optional<SpeculativeExecutionConfig>& sp_config          = std::nullopt,
                                     const ModelConfig*                               draft_model_config = nullptr,
                                     bool                                             is_mtp             = false,
-                                    bool                                             is_eagle           = false);
+                                    bool                                             is_eagle           = false,
+                                    bool                                             draft_is_allocation_only = false);
 
     static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
                                          const ModelConfig&                               model_config,
@@ -85,8 +86,7 @@ private:
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,
                                          const KVCacheConfig&     kv_cache_config,
-                                         int                      gen_num_per_cycle,
-                                         uint32_t                 global_layer_begin);
+                                         int                      gen_num_per_cycle);
 };
 
 }  // namespace rtp_llm

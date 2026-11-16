@@ -749,6 +749,8 @@ message MemoryOperationRequestPB {
         // Legacy numeric identity. T8 decoders intentionally reject numeric-only payloads.
         uint64 deprecated_group_set_id = 4;
         repeated string group_tags = 5;
+        // Draft rows allocated on stage 0 and physically present only on their owning PP stage.
+        repeated string allocation_only_group_tags = 6;
     }
     enum CopyDirection {
         H2D = 0;
@@ -884,6 +886,8 @@ message P2PPipelineLayoutPB {
         repeated int32 worker_indices = 4;
         P2PShardLayoutPB main_shards = 5;
         P2PShardLayoutPB draft_shards = 6;
+        // Stage 0 allocator rows, including logical rows backed by another stage.
+        repeated string block_table_tags = 7;
     }
     repeated Stage stages = 1;
     uint32 worker_count = 2;

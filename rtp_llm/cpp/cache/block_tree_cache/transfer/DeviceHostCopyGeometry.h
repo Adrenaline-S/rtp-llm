@@ -15,9 +15,12 @@ inline bool isPlainDeviceTransferGroup(const GroupSet& group) {
         return false;
     }
     const int device = pools.front()->deviceIndex();
-    return device >= 0 && std::all_of(pools.begin(), pools.end(), [device](const auto& pool) {
-        return pool && pool->deviceIndex() == device;
-    });
+    if (device < 0)
+        return false;
+    for (size_t i = 0; i < pools.size(); ++i)
+        if (!pools[i] || (!group.allocationOnly(group.groupTags()[i]) && pools[i]->deviceIndex() != device))
+            return false;
+    return true;
 }
 
 // Describes one contiguous slice of a backing without owning its device memory.
@@ -49,8 +52,10 @@ inline std::vector<DeviceHostCopyTileGeometry> getDeviceHostCopyTiles(const Grou
         if (!pools[member]) {
             throw std::invalid_argument("device-host backing has a null pool");
         }
+        if (group.allocationOnly(tags[member]))
+            continue;
         const auto& base      = group.group(tags[member]);
-        const auto  layer_ids = group.topologyPtr()->layerIdsForGroup(tags[member]);
+        const auto  layer_ids = group.localLayerIdsForMember(tags[member]);
         if (layer_ids.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
             throw std::overflow_error("device-host backing layer count overflow");
         }

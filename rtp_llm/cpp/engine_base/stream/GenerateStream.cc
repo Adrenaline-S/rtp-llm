@@ -384,7 +384,7 @@ int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens, const std::stri
 
 void GenerateStream::drainLinearHistoryForAdmission() {
     const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
-    if (!manager || !manager->cacheConfig().enable_linear_cache_reclaim) {
+    if (!manager || !manager->cacheConfig().anyLinearCacheReclaim()) {
         return;
     }
     {
@@ -1264,7 +1264,7 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     // boundary. MTP already follows this rule below using its cache snapshot.
     if (state.epoch == 0) {
         const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
-        if (!manager || !manager->cacheConfig().enable_linear_cache_reclaim) {
+        if (!manager || !manager->cacheConfig().anyLinearCacheReclaim()) {
             return getNormalAsyncDeviceState().next_real_seq_len <= 0;
         }
         {

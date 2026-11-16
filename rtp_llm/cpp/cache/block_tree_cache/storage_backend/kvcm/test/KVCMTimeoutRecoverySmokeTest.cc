@@ -303,7 +303,7 @@ struct NativeWorker {
         manager = std::make_shared<KVCacheManager>(environment.cache_config, false, nullptr, config, parallel);
         auto full =
             std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
-        full->initialize(0, environment.cache_config.topologyPtr(), {"default"});
+        full->initialize(0, std::make_shared<CacheConfig>(environment.cache_config), {"default"});
         manager->block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
         manager->block_tree_cache_->storage_backend_ = backend;
         // Backend payload and manager recovery queries use the same rank group.

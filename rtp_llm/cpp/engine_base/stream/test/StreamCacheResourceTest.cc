@@ -480,8 +480,8 @@ protected:
     void prepareLinearHistoryResource(bool enable_reclaim = true) {
         auto config = test::makeSimpleHybridMhaCacheConfig(
             /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/2, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
-        config.enable_linear_cache_reclaim = enable_reclaim;
+        config.main_config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+        config.main_config.enable_linear_cache_reclaim = enable_reclaim;
         prepareResourceWithCacheConfig(
             config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
         // PERF_TEST emits zero tokens, which is also the model's default EOS.
@@ -724,8 +724,8 @@ TEST_F(StreamCacheResourceTest, LinearHistoryIneligibleGuardsFoldToDecodeTail) {
 
 TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastIncludesFutureDecodeForFreshContext) {
     auto config                        = test::makeSimpleLinearCacheConfig(1, 64, 2, DataType::TYPE_FP16);
-    config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
-    config.enable_linear_cache_reclaim = true;
+    config.main_config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+    config.main_config.enable_linear_cache_reclaim = true;
     prepareResourceWithCacheConfig(config, {1, 2}, true, RoleType::PDFUSION, {}, 1, 64);
     stream_->generateConfig()->reuse_cache = true;
     auto& resource                         = stream_->streamCacheResource();
@@ -820,8 +820,8 @@ TEST_F(StreamCacheResourceTest, PDLinearTailHandoffKeepsInitialAdmissionEqualToA
     for (bool enable_reclaim : {false, true}) {
         SCOPED_TRACE(enable_reclaim);
         auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
-        config.enable_linear_cache_reclaim = enable_reclaim;
+        config.main_config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+        config.main_config.enable_linear_cache_reclaim = enable_reclaim;
         prepareResourceWithCacheConfig(
             config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
         auto& resource                                 = stream_->streamCacheResource();
@@ -853,8 +853,8 @@ TEST_F(StreamCacheResourceTest, LinearCacheSwitchCombinationsPreserveRoleOwnersh
                 SCOPED_TRACE(testing::Message() << "role=" << roleTypeToString(role) << " reclaim=" << enable_reclaim
                                                 << " tail=" << enable_tail_only);
                 auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
-                config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-                config.enable_linear_cache_reclaim = enable_reclaim;
+                config.main_config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+                config.main_config.enable_linear_cache_reclaim = enable_reclaim;
                 prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, role, {}, 1, 64);
                 auto& resource                                 = stream_->streamCacheResource();
                 resource.resource_context_.enable_device_cache = true;
@@ -1019,7 +1019,7 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
         }
         auto& batch = resource.kvCacheMutable();
         // Only the resource order changes; the manager keeps its original topology.
-        batch.initGroups(config.topologyPtr());
+        batch.initGroups(config);
         for (const auto& group : config.topology().groups()) {
             batch.mutableBlockIds(0, group.tag).assign({2, 5});
         }
@@ -1037,7 +1037,7 @@ TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReus
         SCOPED_TRACE(tail_blocks);
         // Full-checkpoint materialization window (pre-#1574 linear_step=1).
         auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-        config.reuse_cache_tail_blocks = tail_blocks;
+        config.main_config.reuse_cache_tail_blocks = tail_blocks;
         KVCacheConfig tiered_config;
         tiered_config.enable_device_cache  = true;
         tiered_config.enable_memory_cache  = true;
@@ -1517,7 +1517,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
                                                              /*tokens_per_block=*/2,
                                                              rtp_llm::DataType::TYPE_FP16,
                                                              /*group_layer_num=*/2);
-    cache_config.disable_decode_first_malloc_device_reuse = true;
+    cache_config.main_config.disable_decode_first_malloc_device_reuse = true;
     prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);

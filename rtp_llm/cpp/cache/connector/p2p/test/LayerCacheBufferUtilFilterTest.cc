@@ -283,7 +283,7 @@ class CheckedBlockConverter: public LayerBlockConverter {
 public:
     mutable char           storage[16]    = {};
     bool                   missing_second = false;
-    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int block_id, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int block_id, int, int, size_t) const override {
         if (missing_second && block_id == 2) {
             return {};
         }
@@ -292,6 +292,8 @@ public:
         info.size_bytes = sizeof(storage);
         return {info};
     }
+    size_t moduleOfTag(const std::string&) const override { return 0; }
+    bool tagOwnsLayer(const std::string& tag, int layer_id) const override { return tag == "full" && layer_id == 0; }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
     }

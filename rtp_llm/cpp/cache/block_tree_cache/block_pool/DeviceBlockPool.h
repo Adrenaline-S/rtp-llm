@@ -26,6 +26,7 @@ class MemoryUtil;
 struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     size_t                          total_size_bytes{0};
     std::vector<MemoryLayoutConfig> memory_layouts;
+    bool                            allocation_only{false};  // PP block IDs without local KV backing
     bool                            use_pinned_cpu_backing{false};
     bool                            use_device_malloc_backing{false};
 };

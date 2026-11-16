@@ -681,7 +681,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     auto full     = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
     auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(0, topology, topology->groupTags());
+    full->initialize(0, block_transfer_engine_test::makeTestCacheConfig(*topology), topology->groupTags());
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     std::vector<GroupSetPtr> groups = {full};
@@ -906,7 +906,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedEvictio
         auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
         auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
             defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes)});
-        full->initialize(0, topology, topology->groupTags());
+        full->initialize(0, block_transfer_engine_test::makeTestCacheConfig(*topology), topology->groupTags());
 
         BlockTreeCacheConfig config;
         config.enable_device_cache  = true;
@@ -982,7 +982,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedLoadCon
         auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
         auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
             defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes)});
-        full->initialize(0, topology, topology->groupTags());
+        full->initialize(0, block_transfer_engine_test::makeTestCacheConfig(*topology), topology->groupTags());
         std::vector<GroupSetPtr> groups = {full};
         BlockTreeCacheConfig     config;
         config.enable_device_cache = true;

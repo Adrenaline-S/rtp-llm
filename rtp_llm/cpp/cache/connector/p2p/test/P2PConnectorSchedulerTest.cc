@@ -351,6 +351,7 @@ TEST_F(P2PConnectorSchedulerTest, SingleStagePlanUsesFullPeerLayoutWithLocalCpDi
         auto* stage = layout.add_stages();
         stage->set_main_layer_begin(0);
         stage->set_main_layer_count(1);
+        stage->add_block_table_tags("group0");
         for (int rank = 0; rank < pc.tp_size; ++rank) {
             stage->add_worker_indices(rank);
         }
@@ -1011,6 +1012,10 @@ TEST_F(P2PConnectorSchedulerTest, AsymmetricPipelineProjectsSharedBlocksAndExact
         for (int count : cuts) {
             auto* stage = layout.add_stages();
             stage->set_main_layer_begin(begin);
+            if (begin == 0) {
+                stage->add_block_table_tags("group0");
+                stage->add_block_table_tags("group1");
+            }
             stage->set_main_layer_count(count);
             stage->add_worker_indices(layout.stages_size() - 1);
             const std::vector<std::vector<int>> groups(layer_groups.begin() + begin,
@@ -1130,6 +1135,181 @@ TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) 
     EXPECT_EQ(layer.cache_keys(1), 108);
     EXPECT_EQ(layer.block_ids(0), 11);
     EXPECT_EQ(layer.block_ids(1), 12);
+}
+
+TEST_F(P2PConnectorSchedulerTest, DecodeRouteUsesDraftModuleBlocksFromTagOwnership) {
+    auto cache_config =
+        test::makeSimpleMhaCacheConfig(/*layer_num=*/1, /*block_num=*/16, /*tokens_per_block=*/1, DataType::TYPE_FP16);
+    auto draft = test::declareModuleScopedTags(
+        test::makeSimpleMhaCacheConfig(
+            /*layer_num=*/1, /*block_num=*/16, /*tokens_per_block=*/1, DataType::TYPE_FP16)
+            .main_config);
+    cache_config.mtp_sub_configs.push_back(std::move(draft));
+    ASSERT_EQ(cache_config.moduleCount(), 2u);
+    const auto main_tag  = cache_config.groupTags(0).front();
+    const auto draft_tag = cache_config.groupTags(1).front();
+    ASSERT_NE(main_tag, draft_tag);
+
+    RuntimeConfig     runtime_config;
+    CacheStoreConfig  cache_store_config;
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::DECODE;
+    auto p2p_config         = P2PConnectorConfig::create(runtime_config,
+                                                cache_store_config,
+                                                parallelism_config,
+                                                pd_sep_config,
+                                                cache_config.layer_num(0),
+                                                /*llm_kv_block_size_bytes=*/0,
+                                                cache_config);
+    auto cfg                       = p2p_config.scheduler_config;
+    cfg.parallelism_config.tp_size = 1;
+    P2PSchedulerDecodeRead scheduler(cfg, nullptr, nullptr);
+
+    KVCacheResource resource;
+    resource.initGroups(cache_config);
+    resource.cacheKeys() = {100};
+    resource.mutableBlockIds(main_tag).assign({10});
+    resource.mutableBlockIds(draft_tag).assign({20});
+
+    TransferPlan plan;
+    for (const auto& tag : {main_tag, draft_tag}) {
+        TransferRoute route;
+        route.route_id  = static_cast<int>(plan.routes.size());
+        route.cache_tag = tag;
+        plan.routes.push_back(std::move(route));
+    }
+    auto result = scheduler.buildDecodeRankRoutes(plan, resource, {0, -1}, 1);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    const auto& ranks = result.value();
+    ASSERT_EQ(ranks.size(), 1u);
+    ASSERT_EQ(ranks[0].size(), 2u);
+
+    std::map<std::string, int> block_by_tag;
+    for (const auto& route : ranks[0]) {
+        ASSERT_EQ(route.layer_blocks_size(), 1);
+        const auto& layer = route.layer_blocks(0);
+        ASSERT_EQ(layer.cache_keys_size(), 1);
+        ASSERT_EQ(layer.block_ids_size(), 1);
+        block_by_tag.emplace(layer.cache_tag(), layer.block_ids(0));
+    }
+    EXPECT_EQ(block_by_tag, (std::map<std::string, int>{{main_tag, 10}, {draft_tag, 20}}));
+}
+
+TEST(P2PDraftRouteTest, LastStageDraftReadsIndependentRootRowAcrossDifferentStageCuts) {
+    const auto main = test::makeSimpleMhaCacheConfig(2, 16, 1, DataType::TYPE_FP16);
+    const auto draft = test::declareModuleScopedTags(
+        test::makeSimpleMhaCacheConfig(1, 16, 1, DataType::TYPE_FP16).main_config);
+    const auto& main_tag  = main.groupTags().front();
+    const auto& draft_tag = draft.groupTags().front();
+
+    const auto layout_for = [&](int first_count, RoleType role, bool allocate_draft) {
+        P2PPipelineLayoutPB pb;
+        pb.set_worker_count(2);
+        for (int i = 0; i < 2; ++i) {
+            auto* stage = pb.add_stages();
+            const int count = i == 0 ? first_count : 4 - first_count;
+            stage->set_main_layer_count(count);
+            stage->set_main_layer_begin(i == 0 ? 0 : first_count);
+            stage->add_worker_indices(i);
+            encodeP2PShardLayout(ShardLayoutFactory::fromTopology(main.topology(), ParallelismConfig{}, role, 1),
+                                 stage->mutable_main_shards());
+            for (int layer = 0; layer < count; ++layer) {
+                stage->add_layers()->add_tags(main_tag);
+            }
+            if (i == 0) {
+                stage->add_block_table_tags(main_tag);
+                if (allocate_draft) {
+                    stage->add_block_table_tags(draft_tag);
+                }
+            } else {
+                stage->add_layers()->add_tags(draft_tag);
+                encodeP2PShardLayout(ShardLayoutFactory::fromTopology(draft.topology(), ParallelismConfig{}, role, 1),
+                                     stage->mutable_draft_shards());
+            }
+        }
+        return pb.SerializeAsString();
+    };
+
+    const auto prefill_layout = layout_for(1, RoleType::PREFILL, true);
+    const auto decode_layout  = layout_for(2, RoleType::DECODE, true);
+    const auto missing_row = planP2PPipelineTransfer(prefill_layout, layout_for(2, RoleType::DECODE, false), "draft");
+    ASSERT_FALSE(missing_row.ok());
+    EXPECT_NE(missing_row.error.ToString().find(draft_tag), std::string::npos);
+
+    auto root = main;
+    root.mtp_sub_configs.push_back(draft);
+    root.mtp_sub_configs.back().allocation_only = true;
+    const auto config_for = [](const CacheConfig& cfg, RoleType role) {
+        PDSepConfig pd;
+        pd.role_type = role;
+        return P2PConnectorConfig::create(RuntimeConfig{}, CacheStoreConfig{}, ParallelismConfig{}, pd,
+                                          cfg.layer_num(0), 0, cfg);
+    };
+    const auto root_config = config_for(root, RoleType::DECODE);
+    EXPECT_EQ(root_config.worker_config.topology->groupTags(), main.groupTags());
+    KVCacheResource resource;
+    resource.initGroups(root);
+    resource.cacheKeys() = {101};
+    resource.mutableBlockIds(main_tag).assign({11});
+    resource.mutableBlockIds(draft_tag).assign({27});
+
+    const auto plan = planP2PPipelineTransfer(prefill_layout, decode_layout, "draft");
+    ASSERT_TRUE(plan.ok()) << plan.error.ToString();
+    const auto draft_routes = plan.plan.forTag(draft_tag);
+    ASSERT_EQ(draft_routes.size(), 1u);
+    ASSERT_EQ(draft_routes.front()->layers.size(), 1u);
+    const auto& mapping = draft_routes.front()->layers.front();
+    EXPECT_EQ(mapping.global_id, 4);
+    EXPECT_EQ(mapping.src_local_id, 3);
+    EXPECT_EQ(mapping.dst_local_id, 2);
+
+    P2PSchedulerDecodeRead scheduler(root_config.scheduler_config, nullptr, nullptr);
+    const auto projected = scheduler.buildDecodeRankRoutes(plan.plan, resource, {0, -1}, 2);
+    ASSERT_TRUE(projected.ok()) << projected.status().ToString();
+    size_t draft_buffers = 0;
+    for (size_t rank = 0; rank < projected.value().size(); ++rank) {
+        for (const auto& route : projected.value()[rank]) {
+            for (const auto& layer : route.layer_blocks()) {
+                ASSERT_EQ(layer.block_ids_size(), 1);
+                if (route.cache_tag() == draft_tag) {
+                    ++draft_buffers;
+                    EXPECT_EQ(rank, 1u);
+                    EXPECT_EQ(layer.layer_id(), 2u);
+                    EXPECT_EQ(layer.block_ids(0), 27);
+                } else {
+                    EXPECT_EQ(layer.block_ids(0), 11);
+                }
+            }
+        }
+    }
+    EXPECT_EQ(draft_buffers, 1u);
+
+    auto prefill = test::makeSimpleMhaCacheConfig(3, 16, 1, DataType::TYPE_FP16);
+    prefill.mtp_sub_configs.push_back(draft);
+    KVCacheResource source_resource;
+    source_resource.initGroups(prefill);
+    source_resource.cacheKeys() = {101};
+    source_resource.mutableBlockIds(main_tag).assign({15});
+    source_resource.mutableBlockIds(draft_tag).assign({31});
+    auto published = LayerCacheBufferUtil::convertLayerTag(
+        source_resource, draft.group(draft_tag), 0, 0, -1, 0, 1, 1, /*module_id=*/1);
+    ASSERT_TRUE(published.ok()) << published.status().ToString();
+    ASSERT_NE(published.value(), nullptr);
+    EXPECT_EQ(published.value()->moduleId(), 1u);
+    EXPECT_EQ(published.value()->getBlockId(101), 31);
+
+    auto decode = main;
+    decode.mtp_sub_configs.push_back(draft);
+    auto sender = config_for(prefill, RoleType::PREFILL).worker_config;
+    auto receiver = config_for(decode, RoleType::DECODE).worker_config;
+    sender.global_layer_begin = 1;
+    receiver.global_layer_begin = 2;
+    EXPECT_EQ(sender.wireLayerId(draft_tag, 0), 4u);
+    EXPECT_EQ(receiver.wireLayerId(draft_tag, 0), 4u);
+    EXPECT_EQ(sender.wireLayerId(main_tag, 0), 1u);
+    EXPECT_EQ(receiver.wireLayerId(main_tag, 0), 2u);
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadCpAcceptsDifferentAdvertisedSourceCpSize) {

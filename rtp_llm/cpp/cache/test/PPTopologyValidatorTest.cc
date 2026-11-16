@@ -128,6 +128,33 @@ TEST(PPTopologyValidatorTest, ReorderedTagsAndSubsetKeepStage0Order) {
     EXPECT_EQ(result.agreed.block_num_overrides.at("linear"), 30u);
 }
 
+TEST(PPTopologyValidatorTest, DraftAllocatorCountsComeFromPhysicalLastStage) {
+    auto first = makeFullSnapshot(40);
+    auto middle = makeFullSnapshot(35);
+    auto last = makeFullSnapshot(30);
+    first.groups.push_back(makeGroupSnapshot("mtp", CacheGroupType::SWA, 0));
+    first.groups.back().is_draft = true;
+    first.groups.back().allocation_only = true;
+    last.groups.push_back(makeGroupSnapshot("mtp", CacheGroupType::SWA, 11));
+    last.groups.back().is_draft = true;
+    first.block_tree.group_sets.push_back({"mtp", 0});
+    last.block_tree.group_sets.push_back({"mtp", 2048});
+    first.block_tree.host_budget_bytes = middle.block_tree.host_budget_bytes =
+        last.block_tree.host_budget_bytes = 32 * 4096;
+
+    const auto received = StageCacheSnapshot::deserialize(first.serialize());
+    ASSERT_TRUE(received.groups.back().allocation_only);
+    const auto agreed = validatePPTopology({received, middle, last});
+    ASSERT_TRUE(agreed.ok) << agreed.error;
+    EXPECT_EQ(agreed.agreed.block_num_overrides.at("full"), 30u);
+    EXPECT_EQ(agreed.agreed.block_num_overrides.at("mtp"), 11u);
+    EXPECT_GT(agreed.agreed.block_tree.host.at(CacheGroupType::SWA), 1u);
+
+    last.groups.pop_back();
+    last.block_tree.group_sets.pop_back();
+    EXPECT_FALSE(validatePPTopology({received, middle, last}).ok);
+}
+
 TEST(PPTopologyValidatorTest, NonStage0OwnedTagFails) {
     StageCacheSnapshot other = makeFullSnapshot(80);
     other.groups[0].tag      = "swa";
@@ -135,7 +162,7 @@ TEST(PPTopologyValidatorTest, NonStage0OwnedTagFails) {
     ASSERT_FALSE(result.ok);
     EXPECT_NE(result.error.find("[swa]"), std::string::npos);
     EXPECT_NE(result.error.find("absent from stage 0"), std::string::npos);
-    EXPECT_NE(result.error.find("must own every cache group"), std::string::npos);
+    EXPECT_NE(result.error.find("must allocate blocks for every cache group"), std::string::npos);
 }
 
 TEST(PPTopologyValidatorTest, LinearWithoutFullPasses) {
@@ -204,9 +231,9 @@ TEST(PPTopologyValidatorTest, PrefixReuseMismatchFails) {
 
 TEST(PPTopologyValidatorTest, CaptureLocalStageBuildsSnapshot) {
     CacheConfig cache_config;
-    auto        spec                = std::make_shared<MHAKVCacheSpec>("default", 4, 2, 1);
-    cache_config.layer_num          = 2;
-    cache_config.seq_size_per_block = 4;
+    auto        spec                   = std::make_shared<MHAKVCacheSpec>("default", 4, 2, 1);
+    cache_config.main_config.layer_num = 2;
+    cache_config.seq_size_per_block    = 4;
     cache_config.fromGroupedSpecs({spec}, {{0, 1}}, {CacheGroupType::FULL}, {"default"});
     cache_config.finalizeBlockNums(42, RuntimeConfig{});
 

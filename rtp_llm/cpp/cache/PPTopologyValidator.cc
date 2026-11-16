@@ -100,7 +100,8 @@ validateAndMergeCanonicalGroup(CanonicalGroupEntry& entry, const StageCacheGroup
         return "stage " + std::to_string(stage_index) + " group [" + group.tag + "] policy [" + group.policy_fingerprint
                + "] != canonical [" + entry.policy_fingerprint + "]";
     }
-    entry.logical_block_num = std::min(entry.logical_block_num, group.block_num);
+    entry.logical_block_num = entry.logical_block_num == 0 ? group.block_num :
+        std::min(entry.logical_block_num, group.block_num);
     return {};
 }
 
@@ -147,9 +148,15 @@ std::string validateTierSizing(const StageCacheSnapshot& stage, const BlockTreeC
         const auto member = std::find_if(stage.groups.begin(), stage.groups.end(), [&](const auto& group) {
             return group.tag == group_set.first_tag;
         });
-        if (member == stage.groups.end() || !member->block_tree_group_member || group_set.pool_stride == 0
+        if (member == stage.groups.end() || !member->block_tree_group_member
             || remaining_types.erase(member->type) != 1) {
             return "invalid or duplicate BlockTreeCache group-set sizing";
+        }
+        const bool has_physical_member = std::any_of(stage.groups.begin(), stage.groups.end(), [&](const auto& group) {
+            return group.block_tree_group_member && group.type == member->type && !group.allocation_only;
+        });
+        if (has_physical_member != (group_set.pool_stride > 0)) {
+            return "BlockTreeCache group-set sizing does not match physical ownership";
         }
     }
     return remaining_types.empty() ? "" : "missing BlockTreeCache group-set sizing";
@@ -174,11 +181,17 @@ BlockTreeCacheBlockNums computeStageTierBlockNums(const StageCacheSnapshot&     
     std::vector<size_t>         device_blocks;
     std::vector<size_t>         strides;
     for (const auto& group_set : sizing.group_sets) {
+        if (group_set.pool_stride == 0) {
+            continue;  // Its capacity is set by the stage with physical backing.
+        }
         const auto group = std::find_if(
             groups.begin(), groups.end(), [&](const auto& entry) { return entry.tag == group_set.first_tag; });
         types.push_back(group->type);
         device_blocks.push_back(group->logical_block_num);
         strides.push_back(group_set.pool_stride);
+    }
+    if (types.empty()) {
+        return {};
     }
     std::vector<size_t> host;
     if (sizing.host_budget_bytes > 0) {
@@ -216,8 +229,9 @@ BlockTreeCacheBlockNums computeStageTierBlockNums(const StageCacheSnapshot&     
 StageCacheSnapshot StageCacheSnapshot::captureLocalStage(const CacheConfig&          config,
                                                          const BlockTreeCacheSizing& block_tree_sizing) {
     StageCacheSnapshot snapshot;
-    snapshot.groups.reserve(config.topology().groups().size());
-    for (const auto& group : config.topology().groups()) {
+    snapshot.groups.reserve(config.allGroupNums());
+    for (const auto& identity : config.allGroupIdentities()) {
+        const auto& group = config.group(identity.tag, identity.module_id);
         StageCacheGroupSnapshot captured;
         captured.tag                       = group.tag;
         captured.type                      = group.policy.group_type;
@@ -228,6 +242,8 @@ StageCacheSnapshot StageCacheSnapshot::captureLocalStage(const CacheConfig&     
         captured.block_num                 = group.block_num;
         captured.explicit_block_num        = group.policy.explicit_block_num;
         captured.policy_fingerprint        = group.policy.policyFingerprint();
+        captured.is_draft = identity.module_id != 0;
+        captured.allocation_only = config.isAllocationOnly(identity.module_id);
         snapshot.groups.push_back(std::move(captured));
     }
     snapshot.block_tree = block_tree_sizing;
@@ -239,6 +255,9 @@ namespace {
 constexpr char kFieldSep = '|';
 constexpr char kTagSep   = '\x1f';
 constexpr char kNumSep   = ',';
+constexpr uint8_t kBlockTreeMember = 1;
+constexpr uint8_t kDraftGroup = 2;
+constexpr uint8_t kAllocationOnlyGroup = 4;
 
 std::vector<std::string> splitFields(const std::string& s, char sep) {
     std::vector<std::string> parts;
@@ -307,7 +326,10 @@ std::string StageCacheSnapshot::serialize() const {
     oss << joinGroupStrings(
         groups, [](const auto& group) -> const std::string& { return group.tag; }, "tag")
         << kFieldSep << joinGroupNums(groups, [](const auto& group) { return group.type; }) << kFieldSep
-        << joinGroupNums(groups, [](const auto& group) { return group.block_tree_group_member; }) << kFieldSep
+        << joinGroupNums(groups, [](const auto& group) {
+               return (group.block_tree_group_member ? kBlockTreeMember : 0)
+                   | (group.is_draft ? kDraftGroup : 0) | (group.allocation_only ? kAllocationOnlyGroup : 0);
+           }) << kFieldSep
         << joinGroupNums(groups, [](const auto& group) { return group.seq_size_per_block; }) << kFieldSep
         << joinGroupNums(groups, [](const auto& group) { return group.kernel_seq_size_per_block; }) << kFieldSep
         << joinGroupNums(groups, [](const auto& group) { return group.cache_key_token_stride; }) << kFieldSep
@@ -337,7 +359,7 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
         group_tags.clear();
     }
     const auto group_types                 = parseNums<CacheGroupType>(fields[1], group_tags.size());
-    const auto block_tree_group_membership = parseNums<uint8_t>(fields[2], group_tags.size());
+    const auto group_flags = parseNums<uint32_t>(fields[2], group_tags.size());
     const auto seq_size_per_block          = parseNums<size_t>(fields[3], group_tags.size());
     const auto kernel_seq_size_per_block   = parseNums<size_t>(fields[4], group_tags.size());
     const auto cache_key_token_strides     = parseNums<size_t>(fields[5], group_tags.size());
@@ -351,10 +373,12 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
                             "PP snapshot policy fingerprint field has %zu entries, expected %zu",
                             policy_fingerprints.size(),
                             group_tags.size());
-    RTP_LLM_CHECK_WITH_INFO(std::all_of(block_tree_group_membership.begin(),
-                                        block_tree_group_membership.end(),
-                                        [](uint8_t value) { return value == 0 || value == 1; }),
-                            "PP snapshot block-tree membership field must contain only 0 or 1");
+    RTP_LLM_CHECK_WITH_INFO(std::all_of(group_flags.begin(),
+                                        group_flags.end(),
+                                        [](uint32_t value) {
+                                            return value <= (kBlockTreeMember | kDraftGroup | kAllocationOnlyGroup);
+                                        }),
+                            "PP snapshot contains unknown group flags");
 
     StageCacheSnapshot snapshot;
     snapshot.groups.reserve(group_tags.size());
@@ -362,7 +386,9 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
         StageCacheGroupSnapshot group;
         group.tag                       = std::move(group_tags[i]);
         group.type                      = group_types[i];
-        group.block_tree_group_member   = block_tree_group_membership[i] != 0;
+        group.block_tree_group_member   = (group_flags[i] & kBlockTreeMember) != 0;
+        group.is_draft                  = (group_flags[i] & kDraftGroup) != 0;
+        group.allocation_only           = (group_flags[i] & kAllocationOnlyGroup) != 0;
         group.seq_size_per_block        = seq_size_per_block[i];
         group.kernel_seq_size_per_block = kernel_seq_size_per_block[i];
         group.cache_key_token_stride    = cache_key_token_strides[i];
@@ -396,6 +422,8 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
 
     std::unordered_map<std::string, size_t> canonical_index;
     GroupSetMemberCountsByType              canonical_group_set_member_counts;
+    std::unordered_set<std::string>         draft_allocator_tags;
+    std::unordered_set<std::string>         physical_draft_tags;
     for (size_t s = 0; s < stages.size(); ++s) {
         const auto& stage = stages[s];
         if (s == 0 && stage.groups.empty()) {
@@ -409,11 +437,24 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                 return fail("stage " + std::to_string(s) + " has an empty or duplicate cache group tag [" + group.tag
                             + "]");
             }
-            if (group.block_num == 0) {
+            if (stages.size() > 1 && group.is_draft) {
+                if (s == 0 && group.allocation_only && group.block_num == 0) {
+                    draft_allocator_tags.insert(group.tag);
+                } else if (s + 1 == stages.size() && !group.allocation_only) {
+                    physical_draft_tags.insert(group.tag);
+                } else {
+                    return fail("draft cache group [" + group.tag + "] has invalid PP ownership");
+                }
+            } else if (group.allocation_only) {
+                return fail("allocation-only cache group [" + group.tag + "] must be a PP draft group");
+            }
+            if (group.block_num == 0 && !group.allocation_only) {
                 return fail("stage " + std::to_string(s) + " group [" + group.tag
                             + "] has 0 KV blocks; the group could not allocate a single block");
             }
-            if (group.block_tree_group_member) {
+            // Draft rows are projected onto Stage 0 and the last stage only.
+            // Keep the existing all-or-none constraint for main group sets.
+            if (group.block_tree_group_member && !group.is_draft) {
                 ++local_group_set_member_counts[group.type];
             }
 
@@ -425,11 +466,12 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
 
             const auto it = canonical_index.find(group.tag);
             if (it == canonical_index.end()) {
-                /** Stage 0 issues every block id, so later stages can only own its tags. */
                 return fail("stage " + std::to_string(s) + " owns cache group [" + group.tag
                             + "] that is absent from stage 0 [" + joinTags(stages[0].groups)
-                            + "]; the leading PP stage must own every cache group (bookkeeping-only "
-                              "allocation is not supported)");
+                            + "]; the leading PP stage must allocate blocks for every cache group");
+            }
+            if (group.is_draft != (draft_allocator_tags.count(group.tag) != 0)) {
+                return fail("cache group [" + group.tag + "] aliases a different PP module");
             }
             auto& entry = result.canonical_groups[it->second];
             if (const auto error = validateAndMergeCanonicalGroup(entry, group, s); !error.empty()) {
@@ -449,6 +491,9 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         }
     }
 
+    if (draft_allocator_tags != physical_draft_tags) {
+        return fail("Stage 0 draft allocation rows differ from the last stage's physical draft rows");
+    }
     deriveConstructionInputs(result);
     for (size_t s = 0; s < stages.size(); ++s) {
         try {
@@ -508,7 +553,6 @@ NegotiatedCapacity PPCacheCapacityNegotiator::negotiate(const CacheConfig&      
      * owner stages to the same per-tag minima without mutating the input.
      */
     CacheConfig sized = topology;
-    sized.mtp_sub_configs.clear();
     sized.finalizeBlockNums(local_block_num, runtime_config);
     auto                snapshot = StageCacheSnapshot::captureLocalStage(sized, block_tree_sizing);
     PPSnapshotCollector collector(std::move(snapshot), pp_size_);

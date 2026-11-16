@@ -88,7 +88,7 @@ std::vector<GroupSetPtr> protectedGroupSets() {
     auto groups = makeGroupSets();
     for (const auto& group : groups) {
         group->initialize(group->groupSetId(),
-                          group->topologyPtr(),
+                          group->cacheConfig(),
                           group->groupTags(),
                           block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
     }
@@ -386,6 +386,44 @@ TEST(BlockTransferRequestConverterTest, DecodeSkipsGroupSetAbsentFromThisRankOnl
     EXPECT_TRUE(descriptors.empty());
 }
 
+TEST(BlockTransferRequestConverterTest, ProjectsAllocationOnlyDraftAcrossThreePipelineStages) {
+    const auto last = groupSets().at(1);
+    auto config = std::make_shared<CacheConfig>();
+    config->seq_size_per_block = last->group("group1").seqSizePerBlock();
+    config->main_config.seq_size_per_block = config->seq_size_per_block;
+    config->main_config.layer_num = 1;
+    config->setTopology({last->group("group1")}, {{0, {"group1"}}});
+    auto middle = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{last->devicePools()[0]}, last->hostPool(), last->diskPool());
+    middle->initialize(0, std::make_shared<CacheConfig>(*config), {"group1"});
+    auto draft = config->main_config;
+    draft.setTopology({last->group("group2")}, {{0, {"group2"}}});
+    draft.allocation_only = true;
+    config->mtp_sub_configs.push_back(std::move(draft));
+    auto first = std::make_shared<FullGroupSet>(last->devicePools(), last->hostPool(), last->diskPool());
+    first->initialize(0, config, {"group1", "group2"});
+    EXPECT_EQ(first->payloadBytes(), middle->payloadBytes());
+    EXPECT_GT(last->payloadBytes(), first->payloadBytes());
+
+    MemoryOperationRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        request, makeTransferTask({TransferDescriptor::hostToDevice(0, 21, {11, 12})}), {first}));
+    ASSERT_EQ(request.copy_items(0).allocation_only_group_tags_size(), 1);
+    EXPECT_EQ(request.copy_items(0).allocation_only_group_tags(0), "group2");
+    for (const auto& stage : std::vector<GroupSetPtr>{first, middle, last}) {
+        std::vector<TransferDescriptor> decoded;
+        ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, {stage}, true));
+        ASSERT_EQ(decoded.size(), 1u);
+        EXPECT_EQ(decoded.front().blocksAt(Tier::DEVICE),
+                  stage == middle ? BlockIndicesType{11} : (BlockIndicesType{11, 12}));
+    }
+    request.mutable_copy_items(0)->clear_allocation_only_group_tags();
+    std::vector<TransferDescriptor> decoded;
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, decoded, {middle}, true));
+    request.mutable_copy_items(0)->add_allocation_only_group_tags("foreign");
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, decoded, {middle}, true));
+}
+
 TEST(BlockTransferRequestConverterTest, DecodeRejectsPartialGroupSetMembership) {
     MemoryOperationRequestPB request;
     appendDeviceToHostItem(request, "group1");
@@ -400,10 +438,18 @@ TEST(BlockTransferRequestConverterTest, DecodeContinuesPastPartialOverlapToUniqu
     MemoryOperationRequestPB request;
     appendDeviceToHostItem(request, "group1");
     const auto& source  = groupSets()[1];
-    auto        partial = makeTestGroupSet(
-        0, source->topologyPtr(), source->groupTags(), source->devicePools(), source->hostPool(), source->diskPool());
-    auto exact = makeTestGroupSet(
-        1, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
+    auto        partial = makeTestGroupSet(0,
+                                    source->cacheConfig()->topologyPtr(),
+                                    source->groupTags(),
+                                    source->devicePools(),
+                                    source->hostPool(),
+                                    source->diskPool());
+    auto        exact   = makeTestGroupSet(1,
+                                  source->cacheConfig()->topologyPtr(),
+                                           {"group1"},
+                                           {source->devicePools()[0]},
+                                  source->hostPool(),
+                                  source->diskPool());
 
     std::vector<TransferDescriptor> descriptors;
     ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(
@@ -416,10 +462,18 @@ TEST(BlockTransferRequestConverterTest, DecodeRejectsMultipleExactGroupSetMatche
     MemoryOperationRequestPB request;
     appendDeviceToHostItem(request, "group1");
     const auto& source = groupSets()[1];
-    auto        first  = makeTestGroupSet(
-        0, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
-    auto second = makeTestGroupSet(
-        1, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
+    auto        first  = makeTestGroupSet(0,
+                                  source->cacheConfig()->topologyPtr(),
+                                          {"group1"},
+                                          {source->devicePools()[0]},
+                                  source->hostPool(),
+                                  source->diskPool());
+    auto        second = makeTestGroupSet(1,
+                                   source->cacheConfig()->topologyPtr(),
+                                          {"group1"},
+                                          {source->devicePools()[0]},
+                                   source->hostPool(),
+                                   source->diskPool());
 
     std::vector<TransferDescriptor> descriptors;
     EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(
@@ -542,7 +596,7 @@ TEST(BlockTransferRequestConverterTest, ResolvesReorderedLocalGroupSetAndPoolSlo
 
     const auto&                     source   = groupSets()[2];
     auto                            receiver = makeTestGroupSet(0,
-                                     source->topologyPtr(),
+                                     source->cacheConfig()->topologyPtr(),
                                                                 {"group4", "group3"},
                                                                 {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
@@ -650,13 +704,13 @@ TEST(BlockTransferRequestConverterTest, CrcRoutesReorderedGroupSetsAndMembersByT
     auto        sender_groups = protectedGroupSets();
     const auto& source        = sender_groups[2];
     auto        receiver      = makeTestGroupSet(0,
-                                     source->topologyPtr(),
+                                     source->cacheConfig()->topologyPtr(),
                                                  {"group4", "group3"},
                                                  {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
                                      source->diskPool());
     receiver->initialize(0,
-                         receiver->topologyPtr(),
+                         receiver->cacheConfig(),
                          receiver->groupTags(),
                          block_transfer_engine_test::makeTestBackingLayout(receiver->payloadBytes(), true));
     const std::vector<TransferDescriptor> inputs{
@@ -724,7 +778,7 @@ TEST(BlockTransferRequestConverterTest, CrcRejectsMalformedSecondItemWithoutPubl
 TEST(BlockTransferRequestConverterTest, MixedGroupLayoutsRoundTripWithLocalCrcConfiguration) {
     auto        groups   = protectedGroupSets();
     const auto& ordinary = groups[2];
-    ordinary->initialize(2, ordinary->topologyPtr(), ordinary->groupTags());
+    ordinary->initialize(2, ordinary->cacheConfig(), ordinary->groupTags());
     const auto               first  = TransferDescriptor::hostToDevice(0, 21, {11});
     const auto               second = TransferDescriptor::hostToDevice(2, 22, {12, 13});
     MemoryOperationRequestPB request;

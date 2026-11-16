@@ -32,7 +32,7 @@ TEST(KVCMMockFullLinearTest, PaceReadAndWriteForwardAllGroupsAndIovsInOneCall) {
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeBackend(environment, ParallelismConfig{}, client);
-            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag, resolver));
+            ASSERT_TRUE(backend->init(std::make_shared<CacheConfig>(environment.cache_config), environment.pools_by_tag, resolver));
             // Interleave tags and repeat groups. The split case also leaves the
             // aggregate client's own pool absent from the request.
             const std::vector<std::string> tags =
@@ -100,7 +100,7 @@ TEST(KVCMMockFullLinearTest, PaceTransferPreservesFailureTimeoutAndWriteResponse
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeBackend(environment, ParallelismConfig{}, client);
-            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+            ASSERT_TRUE(backend->init(std::make_shared<CacheConfig>(environment.cache_config),
                                       environment.pools_by_tag,
                                       [&](int layer, const std::string& tag, int block) {
                                           return environmentBuffers(environment, layer, tag, block);
@@ -149,7 +149,7 @@ TEST(KVCMMockFullLinearTest, MooncakeKeepsTagRoutingAndPublishesUrisOnlyAfterAll
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeBackend(environment, ParallelismConfig{}, client);
-            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+            ASSERT_TRUE(backend->init(std::make_shared<CacheConfig>(environment.cache_config),
                                       environment.pools_by_tag,
                                       [&](int layer, const std::string& tag, int block) {
                                           return environmentBuffers(environment, layer, tag, block);
@@ -223,8 +223,8 @@ TEST(KVCMMockFullLinearTest, RegistersFullLinearWriteShapeBeforeSwaBecomesComple
             group.policy.sliding_window_size = 16;
         }
     }
-    auto topology = CacheTopology::create(std::move(groups), environment.cache_config.topology().layers());
-    kvcm::FullLinearLayerGroupPolicy policy(*topology,
+    environment.cache_config.setTopology(std::move(groups), environment.cache_config.topology().layers());
+    kvcm::FullLinearLayerGroupPolicy policy(std::make_shared<CacheConfig>(environment.cache_config),
                                             [](int, const std::string&, int) { return std::vector<BlockInfo>{}; },
                                             {"full0"},
                                             {"linear0", "linear1"});
@@ -331,8 +331,8 @@ void expectTaggedTransfers(MockClientWrapper&                 client,
 
 TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAndPayloads) {
     BackendEnvironment environment;
-    environment.cache_config.dtype              = DataType::TYPE_FP16;
-    environment.cache_config.layer_num          = 4;
+    environment.cache_config.main_config.dtype              = DataType::TYPE_FP16;
+    environment.cache_config.main_config.layer_num          = 4;
     environment.cache_config.seq_size_per_block = 8;
     auto disabled_full                          = defaultCacheGroupPolicy(CacheGroupType::FULL);
     disabled_full.enable_prefix_reuse           = false;

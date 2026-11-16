@@ -319,6 +319,13 @@ std::shared_ptr<const DeviceBlockPoolConfig>
 DeviceBlockPool::normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::DEVICE);
+    if (config->allocation_only) {
+        RTP_LLM_CHECK_WITH_INFO(config->physical_block_count > 1 && config->memory_layouts.empty()
+                                    && config->total_size_bytes == 0 && !config->use_pinned_cpu_backing
+                                    && !config->use_device_malloc_backing,
+                                "invalid allocation-only device block pool [%s]", config->pool_name.c_str());
+        return config;
+    }
     RTP_LLM_CHECK_WITH_INFO(!config->memory_layouts.empty(),
                             "device block pool [%s] memory_layouts must not be empty",
                             config->pool_name.c_str());
@@ -649,9 +656,11 @@ bool DeviceBlockPool::init() {
     RTP_LLM_CHECK(!initialized());
     const auto& cfg = config();
 
-    initializeCacheBuffer();
-    initializeLayerMappings();
-    initializeLayoutStrategies();
+    if (!cfg.allocation_only) {
+        initializeCacheBuffer();
+        initializeLayerMappings();
+        initializeLayoutStrategies();
+    }
 
     markInitialized();
 
@@ -666,6 +675,9 @@ bool DeviceBlockPool::init() {
 }
 
 void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    if (config().allocation_only) {
+        return;
+    }
     if (cache_store) {
         cache_store_ = std::move(cache_store);
     }
@@ -804,6 +816,9 @@ DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int part
 }
 
 MemoryType DeviceBlockPool::where() const {
+    if (config().allocation_only) {
+        return MemoryType::MEMORY_CPU;
+    }
     if (cache_aligned_buffer_.is_cuda()) {
         return MemoryType::MEMORY_GPU;
     }

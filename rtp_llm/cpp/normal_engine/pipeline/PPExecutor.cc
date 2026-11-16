@@ -68,7 +68,7 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
 
 std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor&            copy_mapping,
                                                         const std::vector<std::string>& group_tags,
-                                                        const CacheTopology&            local_topology) {
+                                                        const std::vector<std::string>& local_group_tags) {
     RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
                                 && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
                                 && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
@@ -79,8 +79,7 @@ std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor&    
                                 "cache update mapping tags must be non-empty and unique: tag=%s",
                                 tag.c_str());
     }
-    const std::unordered_set<std::string> local_tags(local_topology.groupTags().begin(),
-                                                     local_topology.groupTags().end());
+    const std::unordered_set<std::string> local_tags(local_group_tags.begin(), local_group_tags.end());
     std::vector<TaggedBlockIdPair>        mappings;
     mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
     const auto* rows = copy_mapping.data_ptr<int32_t>();
@@ -616,9 +615,10 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
     releaseAllModelBuffers();
     if (cache_manager_) {
         if (model_input.kv_cache_update_mapping.defined()) {
-            cache_manager_->blockBatchCopyByGroup(decodeCacheUpdateMapping(model_input.kv_cache_update_mapping,
-                                                                           model_input.kv_cache_group_tags,
-                                                                           cache_manager_->cacheConfig().topology()));
+            cache_manager_->blockBatchCopyByGroup(
+                decodeCacheUpdateMapping(model_input.kv_cache_update_mapping,
+                                         model_input.kv_cache_group_tags,
+                                         cache_manager_->cacheConfig().allGroupTags()));
         }
     }
 
@@ -1276,7 +1276,7 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
                 cache_manager_->blockBatchCopyByGroup(
                     decodeCacheUpdateMapping(model_input.kv_cache_update_mapping,
                                              model_input.kv_cache_group_tags,
-                                             cache_manager_->cacheConfig().topology()));
+                                             cache_manager_->cacheConfig().allGroupTags()));
             }
         }
 

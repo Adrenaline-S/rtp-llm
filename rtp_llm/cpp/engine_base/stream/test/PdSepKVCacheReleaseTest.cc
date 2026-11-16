@@ -179,7 +179,7 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                                    CacheGroupType::FULL,
                                                    /*layer_num=*/1,
                                                    /*block_num=*/static_cast<int>(kBlockNum));
-    config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
+    config.main_config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
     rtp_llm::test::setGroupBlockLayout(config, {tag}, {kBlockNum}, {kv_stride}, {kv_scale_stride});
     return config;
 }
@@ -343,7 +343,7 @@ TEST_F(PdSepKVCacheReleaseTest, RejectsMissingOrMalformedGroupIdentityBeforeConn
     };
     expect_invalid_route();
 
-    resource.initGroups(config.topologyPtr());
+    resource.initGroups(config);
     auto holder = std::make_shared<BlockIds>();
     holder->assign({1});
     const auto                       tag = config.groupTags().front();
@@ -594,7 +594,7 @@ void PdSepKVCacheReleaseTest::verifyCpTcpRegionTransfer(bool dsv4, uint32_t kern
         ASSERT_TRUE(manager->init());
         source_converters.push_back(std::make_shared<LayerBlockConverterImpl>(manager->coordinator_manager_));
         source_managers.push_back(std::move(manager));
-        source_resources[rank].initGroups(prefill_config.topologyPtr());
+        source_resources[rank].initGroups(prefill_config);
         source_resources[rank].setCacheKeys(keys);
         for (const auto& tag : tags) {
             source_resources[rank].mutableBlockIds(tag).assign(physical_ids);
@@ -604,7 +604,7 @@ void PdSepKVCacheReleaseTest::verifyCpTcpRegionTransfer(bool dsv4, uint32_t kern
     ASSERT_TRUE(target_manager->init());
     auto            target_converter = std::make_shared<LayerBlockConverterImpl>(target_manager->coordinator_manager_);
     KVCacheResource target_resource;
-    target_resource.initGroups(decode_config.topologyPtr());
+    target_resource.initGroups(decode_config);
     target_resource.setCacheKeys(keys);
     for (const auto& tag : tags) {
         target_resource.mutableBlockIds(tag).assign(physical_ids);
@@ -804,7 +804,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
         const auto&  blocks = resource.kvCache().blocks(0, tag);
         const auto&  policy = config.group(tag).policy;
         const size_t tail   = policy.enable_prefix_reuse ?
-                                  std::min(blocks.size(), static_cast<size_t>(config.reuse_cache_tail_blocks)) :
+                                  std::min(blocks.size(), static_cast<size_t>(config.reuse_cache_tail_blocks())) :
                                   std::min(blocks.size(), static_cast<size_t>(policy.active_tail_blocks));
         for (size_t pos = 0; pos < blocks.size(); ++pos) {
             const bool expected = policy.active_tail_blocks == 0 || pos >= blocks.size() - tail;
@@ -912,33 +912,38 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     constexpr int64_t request_id    = 9101;
     constexpr size_t  main_model_id = 101;
     constexpr size_t  mtp_model_id  = 102;
-    const auto        makeConfig    = [](uint32_t base_blocks, uint32_t full_weight, uint32_t linear_weight) {
+    const auto        makeConfig    = [](uint32_t base_blocks,
+                               uint32_t full_weight,
+                               uint32_t linear_weight,
+                               uint32_t draft_weight) {
         CacheConfig config;
-        config.dtype                       = DataType::TYPE_FP8_E4M3;
-        config.layer_num                   = main_layers;
-        config.seq_size_per_block          = spb;
-        config.enable_linear_cache_reclaim = true;
+        config.main_config.dtype     = DataType::TYPE_FP8_E4M3;
+        config.main_config.layer_num = main_layers;
+        config.seq_size_per_block = config.main_config.seq_size_per_block = spb;
+        config.main_config.enable_linear_cache_reclaim                    = true;
         config.fromGroupedSpecs({test::makeLinearSpec("linear", spb, DataType::TYPE_BF16, 1, 4),
                                  test::makeMhaSpec("full", spb, DataType::TYPE_FP8_E4M3, 1, 4)},
                                           {{0, 2}, {1, 3}},
                                           {CacheGroupType::LINEAR, CacheGroupType::FULL},
                                           {"linear", "full"});
-        auto draft = test::makeSimpleMhaCacheConfig(mtp_layers, 1, spb, DataType::TYPE_FP8_E4M3, 1, 4);
-        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, main_layers));
-        config.pool_block_weights = {{"full", full_weight}, {"linear", linear_weight}};
+        auto draft = test::makeSingleGroupCacheConfig(
+            test::makeMhaSpec("mtp_full", spb, DataType::TYPE_FP8_E4M3, 1, 4), CacheGroupType::FULL, mtp_layers, 1);
+        draft.main_config.seq_size_per_block = spb;
+        config.mtp_sub_configs.push_back(std::move(draft.main_config));
+        config.pool_block_weights = {{"full", full_weight}, {"linear", linear_weight}, {"mtp_full", draft_weight}};
         config.finalizeBlockNums(base_blocks, RuntimeConfig{});
         return config;
     };
-    auto prefill_config  = makeConfig(16, 2, 2);
-    auto decode_config   = makeConfig(28, 4, 1);
+    auto prefill_config  = makeConfig(16, 2, 2, 1);
+    auto decode_config   = makeConfig(28, 4, 1, 2);
     auto prefill_manager = std::make_shared<KVCacheManager>(prefill_config);
     auto decode_manager  = std::make_shared<KVCacheManager>(decode_config);
     ASSERT_TRUE(prefill_manager->init());
     ASSERT_TRUE(decode_manager->init());
-    // The public sizing interface must affect actual backing, including the
-    // shared Full pool's MTP layers; block IDs are local to each endpoint.
-    ASSERT_EQ(prefill_manager->totalBlocksNum(), 62u);
-    ASSERT_EQ(decode_manager->totalBlocksNum(), 138u);
+    // Each of the three physical pools reserves block zero. Endpoint-local
+    // capacities follow the independently weighted main, linear and draft pools.
+    ASSERT_EQ(prefill_manager->totalBlocksNum(), 77u);
+    ASSERT_EQ(decode_manager->totalBlocksNum(), 193u);
     const auto makeTokens = [spb](int seq_len, int reserve) {
         auto input             = std::make_shared<GenerateInput>();
         input->input_ids       = torch::arange(seq_len, torch::kInt32);
@@ -952,7 +957,7 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     const auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig());
         return resource;
     };
     auto       prefill_tokens   = makeTokens(prompt_blocks * spb, 0);
@@ -968,7 +973,7 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     MallocInfo decode_info{decode_resource, decode_tokens, request_id, true, true, false};
     decode_info.pd_decode_linear_tail_only = true;
     ASSERT_TRUE(decode_manager->malloc(decode_info).success);
-    for (const auto& tag : decode_config.groupTags()) {
+    for (const auto& tag : decode_config.allGroupTags()) {
         const auto& src = prefill_resource->blocks(0, tag);
         const auto& dst = decode_resource->blocks(0, tag);
         // Since #1574 the prefill-shaped LINEAR malloc appends no speculative
@@ -1005,14 +1010,17 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     };
     const auto pattern = [](int layer, int pos) { return static_cast<uint8_t>(17 + layer * 23 + pos * 2); };
     for (int layer = 0; layer < main_layers + mtp_layers; ++layer) {
-        const auto& tag = prefill_config.soleGroupForLayer(layer).tag;
+        const size_t module_id   = layer >= main_layers ? 1 : 0;
+        const int    local_layer = module_id == 0 ? layer : layer - main_layers;
+        const auto&  tag         = prefill_config.soleGroupForLayer(local_layer, module_id).tag;
         for (int pos = 0; pos < prompt_blocks; ++pos) {
-            fill(prefill_manager->convertIndexToBuffer(layer, tag, prefill_resource->blocks(0, tag)[pos]),
+            fill(prefill_manager->convertIndexToBuffer(
+                     local_layer, tag, prefill_resource->blocks(0, tag)[pos], module_id),
                  pattern(layer, pos));
         }
         for (const auto block : decode_resource->blocks(0, tag)) {
             if (!isNullBlockIdx(block)) {
-                fill(decode_manager->convertIndexToBuffer(layer, tag, block), 0xED);
+                fill(decode_manager->convertIndexToBuffer(local_layer, tag, block, module_id), 0xED);
             }
         }
     }
@@ -1024,10 +1032,10 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     for (int layer = 0; layer < main_layers + mtp_layers; ++layer) {
         const bool  draft       = layer >= main_layers;
         const int   local_layer = draft ? layer - main_layers : layer;
-        const auto& cfg         = draft ? prefill_manager->getMTPModuleCacheConfig(0) : prefill_config;
+        const auto& cfg         = prefill_config.moduleConfig(draft ? 1 : 0);
         const auto  layout      = draft ? prefill_manager->getMTPModuleGroupedCacheLayerLayout(0) :
                                           prefill_manager->getMainModelGroupedCacheLayerLayout();
-        const auto& tag         = prefill_config.soleGroupForLayer(layer).tag;
+        const auto& tag         = cfg.soleGroupForLayer(local_layer).tag;
         const auto& buffers     = layout.at(tag, local_layer);
         auto        inputs =
             makeDsv4WriteInputs(request_id, prompt_blocks * spb, 0, blockIdsTensor(prefill_resource, tag), keys);
@@ -1037,10 +1045,11 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
         layer_cache.seq_size_per_block = spb;
         layer_cache.layer_id           = local_layer;
         layer_cache.tag                = tag;
-        if (tag == "full") {
+        if (tag == "full" || tag == "mtp_full") {
             ASSERT_TRUE(layer_cache.kv_scale_base.defined());
         }
-        runtimeWriteCacheStore(inputs, layer_cache, cfg, store, draft ? mtp_model_id : main_model_id, 0, 1, nullptr);
+        runtimeWriteCacheStore(
+            inputs, layer_cache, cfg, spb, store, draft ? mtp_model_id : main_model_id, 0, 1, nullptr);
     }
     // Current PD uses P2P transport rather than the retired Decode loadCache RPC.
     // Keep unequal pool capacities, physical IDs, sparse linear tails, MTP and scales.
@@ -1057,7 +1066,9 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     ASSERT_NE(sender, nullptr);
     ASSERT_NE(receiver, nullptr);
     for (int layer = 0; layer < main_layers + mtp_layers; ++layer) {
-        const auto&           group     = prefill_config.soleGroupForLayer(layer);
+        const size_t          module_id   = layer >= main_layers ? 1 : 0;
+        const int             local_layer = module_id == 0 ? layer : layer - main_layers;
+        const auto&           group       = prefill_config.soleGroupForLayer(local_layer, module_id);
         const auto&           tag       = group.tag;
         const auto            positions = blockPositionsForCacheTransfer(prompt_blocks,
                                                               0,
@@ -1082,8 +1093,8 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
             ASSERT_FALSE(isNullBlockIdx(dst));
             auto src_info    = std::make_shared<transfer::KeyBlockInfo>();
             auto dst_info    = std::make_shared<transfer::KeyBlockInfo>();
-            src_info->blocks = prefill_manager->convertIndexToBuffer(layer, tag, src);
-            dst_info->blocks = decode_manager->convertIndexToBuffer(layer, tag, dst);
+            src_info->blocks = prefill_manager->convertIndexToBuffer(local_layer, tag, src, module_id);
+            dst_info->blocks = decode_manager->convertIndexToBuffer(local_layer, tag, dst, module_id);
             ASSERT_EQ(src_info->blocks.size(), dst_info->blocks.size());
             send.block_info.emplace(keys[pos], src_info);
             receive.block_info.emplace(keys[pos], dst_info);
@@ -1100,15 +1111,17 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     }
     runtimeSyncAndCheck();
     for (int layer = 0; layer < main_layers + mtp_layers; ++layer) {
-        const auto& tag    = decode_config.soleGroupForLayer(layer).tag;
+        const size_t module_id   = layer >= main_layers ? 1 : 0;
+        const int    local_layer = module_id == 0 ? layer : layer - main_layers;
+        const auto&  tag         = decode_config.soleGroupForLayer(local_layer, module_id).tag;
         const auto& blocks = decode_resource->blocks(0, tag);
         for (int pos = 0; pos < static_cast<int>(blocks.size()); ++pos) {
             if (isNullBlockIdx(blocks[pos])) {
                 continue;
             }
             SCOPED_TRACE(testing::Message() << "layer=" << layer << " tag=" << tag << " pos=" << pos);
-            auto parts = decode_manager->convertIndexToBuffer(layer, tag, blocks[pos]);
-            if (tag == "full") {
+            auto parts = decode_manager->convertIndexToBuffer(local_layer, tag, blocks[pos], module_id);
+            if (tag == "full" || tag == "mtp_full") {
                 ASSERT_EQ(parts.size(), 2u);  // KV payload and FP8 scales must both transfer.
             }
             expectBytes(parts, pos < prompt_blocks ? pattern(layer, pos) : 0xED);
@@ -1118,7 +1131,7 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     // blocks that were never transferred, so a new handoff can be admitted.
     decode_manager->free({decode_resource, decode_tokens, request_id});
     decode_manager->free({held_resource, held_tokens, request_id - 1});
-    EXPECT_EQ(decode_manager->availableBlocksNum(), 138u);
+    EXPECT_EQ(decode_manager->availableBlocksNum(), 193u);
     auto replacement                    = makeResource(decode_manager);
     decode_info.batch_kv_cache_resource = replacement;
     ASSERT_TRUE(decode_manager->malloc(decode_info).success);
@@ -1156,7 +1169,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     // Allocate KV blocks.
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(1);
-    resource->initGroups(manager->cacheConfig().topologyPtr());
+    resource->initGroups(manager->cacheConfig());
 
     auto input              = std::make_shared<GenerateInput>();
     input->input_ids        = torch::arange(input_length, torch::kInt32);
@@ -1230,7 +1243,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
         runtimeWriteCacheStore(inputs,
                                layer_cache,
-                               cache_config,
+                               cache_config.main_config,
+                               cache_config.seq_size_per_block,
                                cache_store,
                                /*cache_model_id=*/0,
                                /*cp_rank=*/0,
@@ -1278,7 +1292,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs,
                            layer_cache,
-                           config,
+                           config.main_config,
+                           config.seq_size_per_block,
                            cache_store,
                            /*cache_model_id=*/0,
                            /*cp_rank=*/0,
@@ -1389,7 +1404,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStorePreservesCpSwaOpaqueByteSlice
                 auto cache_store               = std::make_shared<MemoryBackedCacheStore>();
                 runtimeWriteCacheStore(inputs,
                                        layer_cache,
-                                       prefill_config,
+                                       prefill_config.main_config,
+                                       prefill_config.seq_size_per_block,
                                        cache_store,
                                        model_id,
                                        cp_rank,
@@ -1456,7 +1472,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs,
                            layer_cache,
-                           config,
+                           config.main_config,
+                           config.seq_size_per_block,
                            cache_store,
                            /*cache_model_id=*/0,
                            /*cp_rank=*/0,
@@ -1511,7 +1528,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs,
                            layer_cache,
-                           config,
+                           config.main_config,
+                           config.seq_size_per_block,
                            cache_store,
                            /*cache_model_id=*/0,
                            /*cp_rank=*/0,

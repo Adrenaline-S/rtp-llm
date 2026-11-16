@@ -23,6 +23,8 @@ struct StageCacheGroupSnapshot {
     uint32_t       block_num                 = 0;
     uint32_t       explicit_block_num        = 0;  // 0 = follows the paged budget
     std::string    policy_fingerprint;
+    bool           is_draft = false;
+    bool           allocation_only = false;
 };
 
 /** Per-stage cache geometry exchanged at startup. */
@@ -61,7 +63,7 @@ struct PPValidationResult {
  * Validates cache geometry across PP stages and builds the agreed group
  * table. Groups pair by tag;
  * every stage's groups must be a subset of stage 0's because the leading
- * stage issues all block ids. Same-tag owners must agree on policy and token
+ * stage issues all block ids, including allocation-only draft IDs backed by the last stage. Same-tag owners must agree on policy and token
  * geometry; capacity is the owner-stage minimum. A reusable group set must
  * be fully present or absent on each stage; partial overlap is rejected until
  * per-rank request projection is implemented.

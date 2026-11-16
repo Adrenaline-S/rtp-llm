@@ -263,10 +263,11 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    if (resource_context_.cache_manager) {
+        batch_kv_cache_resource_->initGroups(resource_context_.cache_manager->cacheConfig());
+    } else {
+        batch_kv_cache_resource_->initGroups(warmupCacheTopology());
+    }
     resource_released_ = false;
     pending_linear_history_committed_tokens_ = 0;
 }
@@ -276,7 +277,8 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
         return false;
     }
     const auto& context = resource_context_;
-    const auto& group   = context.cache_manager->cacheConfig().group(tag);
+    const auto& config  = context.cache_manager->cacheConfig();
+    const auto& group   = config.groupByTagGlobal(tag);
     const auto  tail    = static_cast<size_t>(stream_->seqLength() - 1) / group.seqSizePerBlock();
     const auto& ids     = batch_kv_cache_resource_->cacheResource(batch).blockIds(tag);
     if (group.policy.shared_chunk_state) {
@@ -490,7 +492,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     const bool disable_first_malloc_reuse =
-        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
+        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse();
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
@@ -685,7 +687,7 @@ bool StreamCacheResource::deferAllocatorLoadRelease() {
     }
     auto replacement = std::make_shared<BatchKVCacheResource>();
     replacement->resetBatchSize(batch_kv_cache_resource_->batchSize());
-    replacement->initGroups(resource_context_.cache_manager->cacheConfig().topologyPtr());
+    replacement->initGroups(resource_context_.cache_manager->cacheConfig());
     context->deferRelease(batch_kv_cache_resource_);
     batch_kv_cache_resource_ = std::move(replacement);
     allocator_load_context_.reset();
@@ -775,7 +777,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
 }
 
 void StreamCacheResource::reclaimLinearHistory(int committed_tokens) {
-    if (!resource_context_.cache_manager || !resource_context_.cache_manager->cacheConfig().enable_linear_cache_reclaim
+    if (!resource_context_.cache_manager || !resource_context_.cache_manager->cacheConfig().anyLinearCacheReclaim()
         || committed_tokens <= 0) {
         return;
     }
@@ -783,7 +785,7 @@ void StreamCacheResource::reclaimLinearHistory(int committed_tokens) {
 }
 
 bool StreamCacheResource::canReclaimLinearHistory(int target_batch_size) const {
-    if (!resource_context_.cache_manager || !resource_context_.cache_manager->cacheConfig().enable_linear_cache_reclaim
+    if (!resource_context_.cache_manager || !resource_context_.cache_manager->cacheConfig().anyLinearCacheReclaim()
         || fake_inited_ || resource_released_ || !need_release_resource_ || allocator_load_context_
         || stream_->hasErrorWithoutLock() || stream_->hasNumBeams() || batch_kv_cache_resource_->batchSize() != 1
         || target_batch_size != 1 || stream_->maxBatchSize() != 1 || !block_update_mapping_.empty()
@@ -1007,10 +1009,11 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    if (resource_context_.cache_manager) {
+        batch_kv_cache_resource_->initGroups(resource_context_.cache_manager->cacheConfig());
+    } else {
+        batch_kv_cache_resource_->initGroups(warmupCacheTopology());
+    }
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);

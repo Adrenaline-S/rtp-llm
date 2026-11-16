@@ -24,6 +24,7 @@ enum class GroupSetResolution {
 
 GroupSetResolution resolveGroupSet(const MemoryOperationRequestPB::CopyItem& item,
                                    const std::vector<GroupSetPtr>&           group_sets,
+                                   bool                                      allow_absent,
                                    const GroupSet*&                          match) {
     match = nullptr;
     if (item.group_tags_size() == 0) {
@@ -34,6 +35,11 @@ GroupSetResolution resolveGroupSet(const MemoryOperationRequestPB::CopyItem& ite
         if (tag.empty() || !requested_tags.emplace(tag).second) {
             return GroupSetResolution::INVALID;
         }
+    }
+    std::unordered_set<std::string> allocation_only;
+    for (const auto& tag : item.allocation_only_group_tags()) {
+        if (!allow_absent || !requested_tags.count(tag) || !allocation_only.emplace(tag).second)
+            return GroupSetResolution::INVALID;
     }
     bool            has_overlap = false;
     const GroupSet* exact_match = nullptr;
@@ -49,7 +55,12 @@ GroupSetResolution resolveGroupSet(const MemoryOperationRequestPB::CopyItem& ite
             continue;
         }
         has_overlap = true;
-        if (overlap != requested_tags.size() || overlap != candidate->groupTags().size()) {
+        if (overlap != candidate->groupTags().size() ||
+            std::any_of(requested_tags.begin(), requested_tags.end(), [&](const auto& tag) {
+                return !allocation_only.count(tag)
+                       && std::find(candidate->groupTags().begin(), candidate->groupTags().end(), tag)
+                              == candidate->groupTags().end();
+            })) {
             continue;
         }
         if (exact_match != nullptr) {
@@ -98,7 +109,10 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
             return false;
         }
     }
-    if (blocks_by_tag.size() != group_tags.size() || device_pools.size() != group_tags.size()) {
+    if (blocks_by_tag.size() != static_cast<size_t>(item.group_tags_size()) || device_pools.size() != group_tags.size()
+        || std::any_of(item.group_tags().begin(), item.group_tags().end(), [&](const auto& tag) {
+               return !blocks_by_tag.count(tag);
+           })) {
         return false;
     }
     blocks.reserve(group_tags.size());
@@ -151,6 +165,8 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         auto* item = request.add_copy_items();
         for (const auto& tag : group_tags) {
             item->add_group_tags(tag);
+            if (group_set.allocationOnly(tag))
+                item->add_allocation_only_group_tags(tag);
         }
 
         if (descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST) {
@@ -213,7 +229,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
     for (int item_index = 0; item_index < request.copy_items_size(); ++item_index) {
         const CopyItem&          item          = request.copy_items(item_index);
         const GroupSet*          group_set_ptr = nullptr;
-        const GroupSetResolution resolution    = resolveGroupSet(item, group_sets, group_set_ptr);
+        const GroupSetResolution resolution    = resolveGroupSet(item, group_sets, allow_absent_group_sets, group_set_ptr);
         if (resolution == GroupSetResolution::INVALID) {
             RTP_LLM_LOG_WARNING("invalid or partially overlapping BlockTree GroupSet membership");
             return false;
@@ -269,6 +285,10 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
             default:
                 return false;
         }
+        // Stage 0 still owns every ref and the broadcast completion, including
+        // records stored wholly on the final PP stage.
+        if (group_set.payloadBytes() == 0)
+            continue;
         decoded.push_back(std::move(descriptor));
         if (wire_item_indices) {
             decoded_item_indices.push_back(static_cast<size_t>(item_index));

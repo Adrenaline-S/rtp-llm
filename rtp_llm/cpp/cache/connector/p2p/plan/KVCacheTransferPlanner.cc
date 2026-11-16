@@ -661,6 +661,15 @@ ErrorInfo validatePipeline(const PipelineTransferLayout& side, int& main_layers,
     }
     digest.mix(side.worker_count);
     digest.mix(side.stages.size());
+    const auto& root_rows = side.stages.front().block_table_tags;
+    const std::set<std::string> allocated_tags(root_rows.begin(), root_rows.end());
+    if (allocated_tags.empty() || allocated_tags.count("") || allocated_tags.size() != root_rows.size()) {
+        return planError("PP Stage 0 must advertise unique nonempty block table tags");
+    }
+    digest.mix(allocated_tags.size());
+    for (const auto& tag : allocated_tags) {
+        digest.mixString(tag);
+    }
     std::set<int> used_workers;
     for (size_t s = 0; s < side.stages.size(); ++s) {
         const auto& stage = side.stages[s];
@@ -731,7 +740,7 @@ ErrorInfo validatePipeline(const PipelineTransferLayout& side, int& main_layers,
                 if (tag.empty() || !shards.hasGroup(tag)) {
                     return planError("missing layout for PP stage " + std::to_string(s) + " tag=" + tag);
                 }
-                if (!side.stages.front().main_shards.hasGroup(tag)) {
+                if (!allocated_tags.count(tag)) {
                     return planError("PP cache tag has no Stage 0 block table: " + tag);
                 }
                 digest.mixString(tag);
@@ -820,6 +829,8 @@ PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& pref
                     route.dst_rank = dst.worker_indices[route.dst_rank];
                     route.src_slice_payload_bytes = src_shards.group(tag).k_block_payload_bytes;
                     route.dst_slice_payload_bytes = dst_shards.group(tag).k_block_payload_bytes;
+                    route.dst_group_policy        = dst_shards.group(tag).policy;
+                    route.dst_physical_cp_size    = dst_shards.physicalCpSize(tag);
                     for (int layer : layers) {
                         route.layers.push_back({layer, layer - src.main_layer_begin, layer - dst.main_layer_begin});
                     }

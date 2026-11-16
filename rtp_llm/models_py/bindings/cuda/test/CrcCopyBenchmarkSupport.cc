@@ -59,7 +59,7 @@ Layout deriveLayout(const CacheConfig& config, bool full) {
     for (const auto& group : config.topology().groups()) {
         if (!group.policy.enable_prefix_reuse || group.policy.group_type != type)
             continue;
-        const auto  pool        = DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
+        const auto  pool        = DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, group);
         const auto& layer_ids   = config.layerIdsForGroup(group.tag);
         size_t      local_layer = 0;
         for (const auto& memory : pool.memory_layouts) {

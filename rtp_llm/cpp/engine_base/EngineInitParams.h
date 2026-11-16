@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <optional>
 #include <tuple>
 
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -92,6 +93,7 @@ struct EngineInitParams {
 
     size_t                       model_id;
     ModelConfig                  model_config_;
+    std::optional<ModelConfig>   allocation_only_draft_config;
     ParallelismConfig            parallelism_config;
     NcclCommConfig               nccl_comm_config;  // NCCL ip/ports
     py::object                   server_config;     // Python ServerConfig; RPC ports read from it

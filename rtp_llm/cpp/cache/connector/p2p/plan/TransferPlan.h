@@ -99,6 +99,9 @@ struct TransferRoute {
     std::vector<LayerMapping> layers                     = {};
     size_t                    src_slice_payload_bytes    = 0;
     size_t                    dst_slice_payload_bytes    = 0;
+    // PP route projection uses the destination stage's block geometry at the scheduling rank.
+    CacheGroupPolicy          dst_group_policy;
+    int                       dst_physical_cp_size = 1;
 };
 
 struct TransferPlan {

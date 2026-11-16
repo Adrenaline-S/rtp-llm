@@ -440,8 +440,11 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
         worker_route.partition = local.partition;
         worker_route.slice     = local.slice;
         worker_route.slice_payload_bytes = route_pb.slice_payload_bytes();
-        for (auto layer_id : route_pb.prefill_layer_ids()) {
-            if (!config_.worker_config.topology || layer_id >= config_.worker_config.topology->layers().size()
+        const auto module_begin = config_.worker_config.module_layers.stageOffset(local.cache_tag);
+        for (const auto stage_layer : route_pb.prefill_layer_ids()) {
+            const auto layer_id = stage_layer - module_begin;
+            if (stage_layer < module_begin || !config_.worker_config.topology
+                || layer_id >= config_.worker_config.topology->layers().size()
                 || !worker_route.prefill_layer_ids.insert(layer_id).second) {
                 const ErrorInfo error(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                       "HANDLE_READ route contains an invalid or duplicate Prefill layer");
