@@ -393,7 +393,7 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.disk_cache_sync_timeout_ms     = 5000;
     config.disk_cache_staging_block_count = 8;
     config.enable_crc                     = true;
-    config.main_config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     if (config.enable_disk_cache) {
         config.memory_cache_max_descriptors_per_transfer_batch = 4;
     }
