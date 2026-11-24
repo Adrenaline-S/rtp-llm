@@ -1302,7 +1302,7 @@ TEST_F(MtpBatchStreamProcessorTest, testTorchSpecDSparkAnchorProposalAndVerifyWi
         sp_config.sp_dspark_mask_token_id      = 255;
         sp_config.sp_dspark_sample_from_anchor = true;
         MtpBatchStreamProcessor processor(
-            model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+            model_config, pd_sep_config, logging_config, cache_config, 0, sp_config, false);
 
         TensorHolder holder;
         auto anchors = torch::tensor({101, 202}, torch::kInt32).to(torch::kCUDA);
@@ -1358,7 +1358,7 @@ TEST_F(MtpBatchStreamProcessorTest, DFlashSevenProposalsExcludeAnchorAndPreserve
     sp_config.gen_num_per_cycle            = 7;
     sp_config.sp_dspark_mask_token_id      = 255;
     sp_config.sp_dspark_sample_from_anchor = false;
-    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, 0, sp_config, false);
 
     GptModelInputs input;
     TensorHolder   holder;
@@ -2629,7 +2629,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSparseSnapshotOverlayDoesNotResurrectHos
     const auto fresh_kernel              = model_input.kv_cache_kernel_block_id.select(1, 1).clone();
 
     TestableMtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, 0, sp_config, false);
     TensorHolder holder;
     processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), model_input, holder);
     // The asynchronous overlay owns its source tensors even after a later
