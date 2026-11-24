@@ -1703,7 +1703,7 @@ TEST_F(NormalBatchStreamProcessorTest, testEngramDeviceStatePlanRejectsUnsafeWin
     model_config.vocab_size                          = 128;
     model_config.attn_config.v41_kv_source_layer_ids = {0};
     NormalBatchStreamProcessor processor(
-        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, false);
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, 0, false);
     const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     const auto window   = hostIntBuffer({42, 3, 2, 1}).reshape({1, 4}).to(cuda_i32);
 
@@ -1759,7 +1759,7 @@ TEST_F(NormalBatchStreamProcessorTest, testEngramGatherKeepsSelectedDeviceSnapsh
     model_config.vocab_size                          = 128;
     model_config.attn_config.v41_kv_source_layer_ids = {0};
     NormalBatchStreamProcessor processor(
-        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, false);
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, 0, false);
     const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
 
     auto make_stream = [&](int token, int next_seq_len, std::vector<int32_t> window) {
@@ -1877,7 +1877,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLo
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
     CacheConfig                  cache_config;
     NormalBatchStreamProcessor   processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, 0, false);
 
     EXPECT_EQ(processor.prepareDeviceStateInputs(streams).size(), 1);
     stream->sampling_state_.logits_processors.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
@@ -1917,7 +1917,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
     CacheConfig                  cache_config;
     NormalBatchStreamProcessor   processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, 0, false);
     stream->incPendingAsyncBookkeeping();
     EXPECT_EQ(processor.prepareDeviceStateInputs(streams).size(), 1);
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
@@ -1950,7 +1950,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathRejectsPendingKvCa
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
     CacheConfig                  cache_config;
     NormalBatchStreamProcessor   processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, 0, false);
     ASSERT_EQ(processor.prepareDeviceStateInputs(streams).size(), 1);
 
     auto pending_state                    = stream->getNormalAsyncDeviceState();
@@ -1989,7 +1989,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStatePlanRejectsIneligibleBatch
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     NormalBatchStreamProcessor  processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, 0, false);
     const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
 
     auto make_valid_stream = [&] {
@@ -2099,7 +2099,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathFallsBackWhenPosit
         ProfilingDebugLoggingConfig profiling_debug_logging_config;
         CacheConfig                 cache_config;
         NormalBatchStreamProcessor  processor(
-            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, 0, false);
         EXPECT_TRUE(processor.prepareDeviceStateInputs(streams).empty());
         StreamGroups stream_groups(streams);
         TensorHolder holder;
@@ -2162,7 +2162,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMropeDeviceSnapshotKeepsDecodeRowsCoh
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
     CacheConfig                  cache_config;
     NormalBatchStreamProcessor   processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, 0, false);
     auto normal_states = processor.prepareDeviceStateInputs(streams);
     ASSERT_EQ(normal_states.size(), 2);
 
@@ -2264,7 +2264,7 @@ public:
                            const ProfilingDebugLoggingConfig&   profiling_debug_logging_config,
                            const CacheConfig&                   cache_config,
                            std::shared_ptr<ProcessOverlapProbe> probe):
-        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false),
+        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, 0, false),
         probe_(std::move(probe)) {}
 
     absl::StatusOr<SamplerInputs> gatherSamplerInput(const StreamGroups& stream_groups,
