@@ -73,7 +73,7 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
     BackingLayout layout;
     for (const auto& tag : members) {
         const auto module = config.moduleOfTag(tag);
-        if (config.isAllocationOnly(module))
+        if (config.layerIdsForGroup(tag, module).empty())
             continue;
         const auto bytes = config.blockSizeBytesForGroup(tag, module);
         RTP_LLM_CHECK_WITH_INFO(bytes > 0 && bytes <= std::numeric_limits<size_t>::max() - layout.payload_bytes,
@@ -113,8 +113,6 @@ planBlockTreeCrcWorkspaces(const CacheConfig& config, const KVCacheConfig& optio
         size_t tiles = 0;
         for (const auto& tag : tags) {
             const auto module = config.moduleOfTag(tag);
-            if (config.isAllocationOnly(module))
-                continue;
             for (const auto layer : config.layerIdsForGroup(tag, module)) {
                 const auto& physical = config.physicalGroupForLayer(layer, tag, module);
                 tiles += (physical.kvBlockStrideBytes() > 0) + (physical.kvScaleStrideBytes() > 0);

@@ -170,11 +170,12 @@ struct P2PConnectorConfig {
         std::map<int, LayerBase> merged_layers;
         groups.reserve(static_cast<size_t>(cache_config.allGroupNums()));
         for (size_t module_id = 0; module_id < cache_config.moduleCount(); ++module_id) {
-            if (cache_config.isAllocationOnly(module_id)) {
-                continue;
-            }
             const auto& module_topology = cache_config.topology(module_id);
-            groups.insert(groups.end(), module_topology.groups().begin(), module_topology.groups().end());
+            for (const auto& group : module_topology.groups()) {
+                if (!module_topology.layerIdsForGroup(group.tag).empty()) {
+                    groups.push_back(group);
+                }
+            }
             for (const auto& layer : module_topology.layers()) {
                 auto& merged    = merged_layers[layer.layer_id];
                 merged.layer_id = layer.layer_id;
@@ -245,14 +246,13 @@ struct P2PConnectorConfig {
         config.scheduler_config.block_table_tags = cache_config.allGroupTags();
         uint32_t stage_offset = 0;
         for (size_t module_id = 0; module_id < cache_config.moduleCount(); ++module_id) {
-            if (cache_config.isAllocationOnly(module_id)) {
-                continue;
-            }
             for (const auto& tag : cache_config.groupTags(module_id)) {
-                RTP_LLM_CHECK_WITH_INFO(config.scheduler_config.module_by_tag.emplace(tag, module_id).second,
+                RTP_LLM_CHECK_WITH_INFO(config.worker_config.module_layers.stage_offsets.emplace(tag, stage_offset).second,
                                         "P2P transfer topology duplicate cache tag=%s",
                                         tag.c_str());
-                config.worker_config.module_layers.stage_offsets.emplace(tag, stage_offset);
+                if (!cache_config.layerIdsForGroup(tag, module_id).empty()) {
+                    config.scheduler_config.module_by_tag.emplace(tag, module_id);
+                }
             }
             stage_offset += cache_config.layer_num(module_id);
         }

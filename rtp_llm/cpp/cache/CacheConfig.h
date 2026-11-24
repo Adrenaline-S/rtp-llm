@@ -57,6 +57,7 @@ struct CacheConfig {
     size_t seq_size_per_block              = 1;
     // PP stages can own a single tag from a multi-tag model. Keep its wire format.
     bool model_has_multiple_cache_groups = false;
+    // First main-model layer on this PP stage in the global layer space used by P2P and cache-store keys.
     uint32_t global_layer_begin = 0;
     // Deployment weights are keyed by physical pool tag.
     std::map<std::string, uint32_t> pool_block_weights;
@@ -73,16 +74,6 @@ public:
         RTP_LLM_CHECK_WITH_INFO(
             module_id <= mtp_sub_configs.size(), "cache module id %zu out of range [0, %zu]", module_id, moduleCount());
         return module_id == 0 ? main_config : mtp_sub_configs[module_id - 1];
-    }
-
-    uint32_t cacheKeyLayerId(int local_layer_id, size_t module = 0) const {
-        RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0 && static_cast<uint32_t>(local_layer_id) < layer_num(module),
-                                "invalid cache layer %d for module %zu", local_layer_id, module);
-        return (module == 0 ? global_layer_begin : 0) + static_cast<uint32_t>(local_layer_id);
-    }
-
-    bool isAllocationOnly(size_t module_id) const {
-        return moduleConfig(module_id).allocation_only;
     }
 
     bool anyLinearCacheReclaim() const {

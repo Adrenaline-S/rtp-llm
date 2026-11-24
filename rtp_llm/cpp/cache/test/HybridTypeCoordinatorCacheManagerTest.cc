@@ -2470,7 +2470,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PipelineDraftExhaustionRollsBackMa
     auto config = makeSimpleMhaCacheConfig(1, 5, 4, DataType::TYPE_FP16);
     auto draft = makeSingleGroupCacheConfig(
         makeMhaSpec("mtp_full", 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL, 1, 3).main_config;
-    draft.allocation_only = true;
+    draft.setTopology(draft.groups(), {});
     config.mtp_sub_configs.push_back(std::move(draft));
     auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator->init());

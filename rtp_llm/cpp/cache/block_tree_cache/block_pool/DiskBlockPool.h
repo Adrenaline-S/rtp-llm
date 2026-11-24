@@ -26,7 +26,6 @@ enum class BlockIOStatus {
 };
 
 struct DiskBlockPoolConfig: public BlockPoolConfigBase {
-    bool                                     allocation_only{false};
     std::string                              work_dir;
     int64_t                                  local_rank{0};
     int64_t                                  world_rank{0};

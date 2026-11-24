@@ -76,9 +76,6 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     // budget is the sum over every module's own group byte layout.
     for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
         const auto& module_config = config.moduleConfig(module_id);
-        if (module_config.allocation_only) {
-            continue;
-        }
         for (const auto& group : module_config.groups()) {
             const size_t group_bytes = module_config.blockSizeBytesForGroup(group.tag);
             const auto&  policy      = group.policy;
@@ -399,9 +396,8 @@ LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCach
 }
 
 ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       model_config,
-                                                       const ParallelismConfig& parallelism_config,
-                                                       bool                     is_draft_model) {
-    if (parallelism_config.pp_size <= 1 || is_draft_model) {
+                                                       const ParallelismConfig& parallelism_config) {
+    if (parallelism_config.pp_size <= 1) {
         return model_config;
     }
 
@@ -517,8 +513,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const std::optional<SpeculativeExecutionConfig>& sp_config,
                                              const ModelConfig*                               draft_model_config,
                                              bool /*is_mtp*/,
-                                             bool /*is_eagle*/,
-                                             bool draft_is_allocation_only) {
+                                             bool /*is_eagle*/) {
     RTP_LLM_CHECK_WITH_INFO(draft_model_config == nullptr || sp_config.has_value(),
                             "draft cache configuration requires speculative execution configuration");
     // Main state-ring geometry must agree across PP stages, including stages
@@ -538,17 +533,18 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
     if (draft_model_config != nullptr) {
         const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
-        RTP_LLM_CHECK_WITH_INFO(
-            draft_is_allocation_only ? (layout.isFirstStage() && !layout.isLastStage()) : layout.isLastStage(),
-            "draft cache requires the last PP stage for storage or the first PP stage for allocation");
-        auto draft_model  = stageScopedModelConfig(*draft_model_config, parallelism_config, true);
-        auto draft_config = createBasicConfig(draft_model, parallelism_config, kv_cache_config, gen_num_per_cycle);
+        auto draft_config =
+            createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+        auto& draft_module = draft_config.main_config;
+        if (!layout.isLastStage()) {
+            // Retain the group definitions for block ID allocation on stages without draft KV storage.
+            draft_module.setTopology(draft_module.groups(), {});
+        }
         // The draft module declares its own module-scoped tags in the Python
         // model description (``ModelConfig.cache_tag_prefix``); no implicit
         // renaming happens here.  Cross-module duplicates are rejected by
         // ``validateCrossModuleInvariants``.
-        draft_config.main_config.allocation_only = draft_is_allocation_only;
-        config.mtp_sub_configs.push_back(std::move(draft_config.main_config));
+        config.mtp_sub_configs.push_back(std::move(draft_module));
     }
     config.validateCrossModuleInvariants();
     resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights, parallelism_config.pp_size);
@@ -697,7 +693,7 @@ CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline
         const auto& module = config.moduleConfig(module_id);
         number(static_cast<uint64_t>(module.reuse_cache_tail_blocks));
         number(module.enable_linear_cache_reclaim);
-        number(module.allocation_only);
+        number(module.topology().layers().empty());
         number(module.groups().size());
         for (const auto& group : module.groups()) {
             number(group.tag.size());

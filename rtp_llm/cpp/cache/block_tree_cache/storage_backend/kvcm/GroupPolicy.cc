@@ -53,7 +53,8 @@ std::vector<std::string> GroupPolicy::protocolIdentityTags() const {
     const auto               identities = cache_config_->allGroupIdentities();
     tags.reserve(identities.size());
     for (const auto& identity : identities) {
-        if (!cache_config_->isAllocationOnly(identity.module_id) && cache_config_->groupByTagGlobal(identity.tag).policy.enable_prefix_reuse)
+        if (cache_config_->groupByTagGlobal(identity.tag).policy.enable_prefix_reuse
+            && !cache_config_->layerIdsForGroup(identity.tag, identity.module_id).empty())
             tags.push_back(identity.tag);
     }
     return tags;
@@ -62,8 +63,6 @@ std::vector<std::string> GroupPolicy::protocolIdentityTags() const {
 std::vector<std::pair<int, std::string>> GroupPolicy::layerEncounterOrder() const {
     std::vector<std::pair<int, std::string>> encounter;
     for (size_t module_id = 0; module_id < cache_config_->moduleCount(); ++module_id) {
-        if (cache_config_->isAllocationOnly(module_id))
-            continue;
         std::unordered_map<std::string, int> tag_ordinals;
         for (const auto& layer : cache_config_->moduleConfig(module_id).topology().layers()) {
             for (const auto& tag : layer.group_tags) {

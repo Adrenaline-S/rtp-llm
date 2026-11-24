@@ -1863,15 +1863,16 @@ bool CoordinatorCacheManager::doInit() {
         for (const auto& cache_group : module_config.topology().groups()) {
             DeviceBlockPoolConfig pool_config =
                 DeviceBlockPoolConfigHelper::createConfigForGroup(module_config, cache_group);
-            const CacheGroupPolicy policy = cache_group.policy;
-            if (!module_config.allocation_only && policy.memory_placement == CacheMemoryPlacement::DEVICE) {
+            const auto             local_layer_ids = module_config.layerIdsForGroup(cache_group.tag);
+            const CacheGroupPolicy policy          = cache_group.policy;
+            if (!local_layer_ids.empty() && policy.memory_placement == CacheMemoryPlacement::DEVICE) {
                 pool_config.use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
                 pool_config.use_device_malloc_backing =
                     use_device_malloc_block_pool_ && allocation_type_ == AllocationType::DEVICE;
-            } else if (!module_config.allocation_only && policy.memory_placement == CacheMemoryPlacement::HOST_PINNED) {
+            } else if (!local_layer_ids.empty() && policy.memory_placement == CacheMemoryPlacement::HOST_PINNED) {
                 pool_config.use_pinned_cpu_backing    = true;
                 pool_config.use_device_malloc_backing = false;
-            } else if (!module_config.allocation_only) {
+            } else if (!local_layer_ids.empty()) {
                 RTP_LLM_LOG_ERROR("unsupported cache memory placement=%d for group=%d",
                                   static_cast<int>(policy.memory_placement),
                                   group_id);
@@ -1904,8 +1905,7 @@ bool CoordinatorCacheManager::doInit() {
                 full_group_ids_.push_back(group_id);
             }
 
-            RTP_LLM_CHECK_WITH_INFO(
-                group->init(module_config.allocation_only ? LayerIdsType{} : module_config.layerIdsForGroup(cache_group.tag)),
+            RTP_LLM_CHECK_WITH_INFO(group->init(local_layer_ids),
                                     "Failed to initialize SingleTypeCacheManager %s(group_id %d)",
                                     pool_config.pool_name.c_str(),
                                     group_id);
@@ -2198,9 +2198,6 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
         const size_t module_id = config_.moduleOfTag(mapping.tag);
-        if (config_.isAllocationOnly(module_id)) {
-            continue;
-        }
         for (int layer_id : config_.moduleConfig(module_id).layerIdsForGroup(mapping.tag)) {
             const auto& physical_group = config_.moduleConfig(module_id).groupForLayer(layer_id, mapping.tag);
             copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;
@@ -2221,9 +2218,6 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
 
         const size_t module_id = config_.moduleOfTag(mapping.tag);
-        if (config_.isAllocationOnly(module_id)) {
-            continue;
-        }
         for (int layer_id : config_.moduleConfig(module_id).layerIdsForGroup(mapping.tag)) {
             const auto&  physical_group      = config_.moduleConfig(module_id).groupForLayer(layer_id, mapping.tag);
             const size_t kv_block_size_bytes = physical_group.kvBlockStrideBytes();

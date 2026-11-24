@@ -165,7 +165,7 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         auto* item = request.add_copy_items();
         for (const auto& tag : group_tags) {
             item->add_group_tags(tag);
-            if (group_set.allocationOnly(tag))
+            if (group_set.localLayerIdsForMember(tag).empty())
                 item->add_allocation_only_group_tags(tag);
         }
 

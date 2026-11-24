@@ -47,8 +47,7 @@ public:
                                     const std::optional<SpeculativeExecutionConfig>& sp_config          = std::nullopt,
                                     const ModelConfig*                               draft_model_config = nullptr,
                                     bool                                             is_mtp             = false,
-                                    bool                                             is_eagle           = false,
-                                    bool                                             draft_is_allocation_only = false);
+                                    bool                                             is_eagle           = false);
 
     static uint32_t computeLocalBlockNum(const CacheConfig&                               config,
                                          const ModelConfig&                               model_config,
@@ -79,8 +78,7 @@ public:
                                                       int64_t                      expected_layer_num);
 
     static ModelConfig stageScopedModelConfig(const ModelConfig&       model_config,
-                                              const ParallelismConfig& parallelism_config,
-                                              bool                     is_draft_model = false);
+                                              const ParallelismConfig& parallelism_config);
 
 private:
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,

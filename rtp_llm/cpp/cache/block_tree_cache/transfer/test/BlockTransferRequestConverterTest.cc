@@ -54,6 +54,7 @@ std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = t
     disk_config->pool_type       = BlockPoolType::DISK;
     disk_config->pool_name       = "converter_disk";
     disk_config->stride_bytes    = 4096;
+    disk_config->payload_bytes   = disk_config->stride_bytes;
     disk_config->disk_size_bytes = 128 * disk_config->stride_bytes;
     auto disk_pool               = std::make_shared<DiskBlockPool>(disk_config);
 
@@ -397,8 +398,7 @@ TEST(BlockTransferRequestConverterTest, ProjectsAllocationOnlyDraftAcrossThreePi
         std::vector<DeviceBlockPoolPtr>{last->devicePools()[0]}, last->hostPool(), last->diskPool());
     middle->initialize(0, std::make_shared<CacheConfig>(*config), {"group1"});
     auto draft = config->main_config;
-    draft.setTopology({last->group("group2")}, {{0, {"group2"}}});
-    draft.allocation_only = true;
+    draft.setTopology({last->group("group2")}, {});
     config->mtp_sub_configs.push_back(std::move(draft));
     auto first = std::make_shared<FullGroupSet>(last->devicePools(), last->hostPool(), last->diskPool());
     first->initialize(0, config, {"group1", "group2"});

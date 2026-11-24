@@ -1240,7 +1240,7 @@ TEST(P2PDraftRouteTest, LastStageDraftReadsIndependentRootRowAcrossDifferentStag
 
     auto root = main;
     root.mtp_sub_configs.push_back(draft);
-    root.mtp_sub_configs.back().allocation_only = true;
+    root.mtp_sub_configs.back().setTopology(draft.groups(), {});
     const auto config_for = [](const CacheConfig& cfg, RoleType role) {
         PDSepConfig pd;
         pd.role_type = role;
@@ -1249,6 +1249,8 @@ TEST(P2PDraftRouteTest, LastStageDraftReadsIndependentRootRowAcrossDifferentStag
     };
     const auto root_config = config_for(root, RoleType::DECODE);
     EXPECT_EQ(root_config.worker_config.topology->groupTags(), main.groupTags());
+    EXPECT_EQ(root_config.worker_config.module_layers.stage_offsets.at(draft_tag), main.layer_num());
+    EXPECT_NE(root_config.worker_config.wireLayerId(draft_tag, 0), root_config.worker_config.wireLayerId(main_tag, 0));
     KVCacheResource resource;
     resource.initGroups(root);
     resource.cacheKeys() = {101};

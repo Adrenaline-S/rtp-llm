@@ -7,7 +7,6 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
@@ -129,7 +128,7 @@ TEST(PPStageCacheConfigTest, IndependentPoolsUseStageLocalGeometry) {
         const auto config = CacheConfigCreator::createConfig(model, makePpConfig(8, 2, rank), KVCacheConfig{});
         EXPECT_EQ(config.layer_num(), 4u);
         EXPECT_EQ(config.topology().layers().size(), 4u);
-        EXPECT_EQ(config.cacheKeyLayerId(0), static_cast<uint32_t>(rank * 4));
+        EXPECT_EQ(config.global_layer_begin, static_cast<uint32_t>(rank * 4));
         EXPECT_EQ(countLayersOfType(config, CacheGroupType::LINEAR), 3u);
         EXPECT_EQ(countLayersOfType(config, CacheGroupType::FULL), 1u);
     }
@@ -245,7 +244,7 @@ TEST(PPStageCacheConfigTest, MiddleMainStateRingUsesTheSpeculativeRoundSize) {
     speculative.type              = SP_TYPE_MTP;
     speculative.gen_num_per_cycle = 3;
     const auto first = CacheConfigCreator::createConfig(
-        target, makePpConfig(3, 3, 0), KVCacheConfig{}, speculative, &draft, true, false, true);
+        target, makePpConfig(3, 3, 0), KVCacheConfig{}, speculative, &draft, true, false);
     const auto middle = CacheConfigCreator::createConfig(
         target, makePpConfig(3, 3, 1), KVCacheConfig{}, speculative);
     const auto last = CacheConfigCreator::createConfig(
@@ -291,7 +290,7 @@ TEST(PPStageCacheConfigTest, PerTagOverridesReplaceDerivedCounts) {
 
 TEST(PPStageCacheConfigTest, DraftCacheExistsOnlyOnLastStageAndIsNotSliced) {
     const auto target = makeSingleModelConfig(7);
-    auto       draft  = makeSingleModelConfig(2);
+    auto       draft  = makeSingleModelConfig(3);
     for (auto& layer : draft.kv_cache_spec_descs) {
         layer[0].tag = "mtp_full";
     }
@@ -299,25 +298,29 @@ TEST(PPStageCacheConfigTest, DraftCacheExistsOnlyOnLastStageAndIsNotSliced) {
     speculative.type              = SP_TYPE_MTP;
     speculative.gen_num_per_cycle = 2;
 
-    EXPECT_THROW(CacheConfigCreator::createConfig(
-                     target, makePpConfig(7, 3, 1), KVCacheConfig{}, speculative, &draft, true, false),
-                 std::exception);
-
-    auto last_layout                  = makePpConfig(7, 3, 2);
-    last_layout.pp_stage_layer_counts = {2, 3, 2};
-    auto config =
-        CacheConfigCreator::createConfig(target, last_layout, KVCacheConfig{}, speculative, &draft, true, false);
-    EXPECT_EQ(config.layer_num(), 2u);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
-    for (const auto& sub_config : config.mtp_sub_configs) {
-        EXPECT_EQ(sub_config.layer_num, 2u);
+    const std::vector<uint32_t> stage_begins{0, 2, 5};
+    for (size_t rank = 0; rank < stage_begins.size(); ++rank) {
+        SCOPED_TRACE(rank);
+        auto layout                  = makePpConfig(7, 3, rank);
+        layout.pp_stage_layer_counts = {2, 3, 2};
+        const auto config =
+            CacheConfigCreator::createConfig(target, layout, KVCacheConfig{}, speculative, &draft, true, false);
+        EXPECT_EQ(config.global_layer_begin, stage_begins[rank]);
+        EXPECT_EQ(config.layer_num(), static_cast<uint32_t>(layout.pp_stage_layer_counts[rank]));
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+        EXPECT_EQ(config.allGroupNums(), 2);
+        const auto& sub = config.mtp_sub_configs.front();
+        ASSERT_EQ(sub.groupTags(), (std::vector<std::string>{"mtp_full"}));
+        if (rank == 2) {
+            EXPECT_EQ(sub.layer_num, 3u);
+            EXPECT_EQ(sub.layerIdsForGroup("mtp_full"), (std::vector<int>{0, 1, 2}));
+            EXPECT_GT(sub.blockSizeBytesForGroup("mtp_full"), 0u);
+        } else {
+            EXPECT_EQ(sub.layer_num, 0u);
+            EXPECT_TRUE(sub.layerIdsForGroup("mtp_full").empty());
+            EXPECT_EQ(sub.blockSizeBytesForGroup("mtp_full"), 0u);
+        }
     }
-    config.finalizeBlockNums(24, RuntimeConfig{});
-    const KVCacheManager manager(config, false, nullptr, KVCacheConfig{}, last_layout);
-    EXPECT_EQ(manager.cacheStoreKeyLayerId(0, 0), 5u);
-    EXPECT_EQ(manager.cacheStoreKeyLayerId(0, 1), 6u);
-    EXPECT_EQ(manager.cacheStoreKeyLayerId(1, 0), 0u);
-    EXPECT_EQ(manager.cacheStoreKeyLayerId(1, 1), 1u);
 }
 
 TEST(PPStageCacheConfigTest, PerTagOverridesApplyToMainAndDraftIndependently) {

@@ -66,7 +66,7 @@ CanonicalGroupEntry makeCanonicalGroupEntry(const StageCacheGroupSnapshot& group
     entry.seq_size_per_block        = group.seq_size_per_block;
     entry.kernel_seq_size_per_block = group.kernel_seq_size_per_block;
     entry.cache_key_token_stride    = group.cache_key_token_stride;
-    entry.logical_block_num         = group.block_num;
+    entry.logical_block_num         = group.has_local_layers ? group.block_num : 0;
     entry.explicit_block_num        = group.explicit_block_num;
     entry.policy_fingerprint        = group.policy_fingerprint;
     return entry;
@@ -100,8 +100,10 @@ validateAndMergeCanonicalGroup(CanonicalGroupEntry& entry, const StageCacheGroup
         return "stage " + std::to_string(stage_index) + " group [" + group.tag + "] policy [" + group.policy_fingerprint
                + "] != canonical [" + entry.policy_fingerprint + "]";
     }
-    entry.logical_block_num = entry.logical_block_num == 0 ? group.block_num :
-        std::min(entry.logical_block_num, group.block_num);
+    if (group.has_local_layers) {
+        entry.logical_block_num =
+            entry.logical_block_num == 0 ? group.block_num : std::min(entry.logical_block_num, group.block_num);
+    }
     return {};
 }
 
@@ -153,7 +155,7 @@ std::string validateTierSizing(const StageCacheSnapshot& stage, const BlockTreeC
             return "invalid or duplicate BlockTreeCache group-set sizing";
         }
         const bool has_physical_member = std::any_of(stage.groups.begin(), stage.groups.end(), [&](const auto& group) {
-            return group.block_tree_group_member && group.type == member->type && !group.allocation_only;
+            return group.block_tree_group_member && group.type == member->type && group.has_local_layers;
         });
         if (has_physical_member != (group_set.pool_stride > 0)) {
             return "BlockTreeCache group-set sizing does not match physical ownership";
@@ -242,8 +244,8 @@ StageCacheSnapshot StageCacheSnapshot::captureLocalStage(const CacheConfig&     
         captured.block_num                 = group.block_num;
         captured.explicit_block_num        = group.policy.explicit_block_num;
         captured.policy_fingerprint        = group.policy.policyFingerprint();
-        captured.is_draft = identity.module_id != 0;
-        captured.allocation_only = config.isAllocationOnly(identity.module_id);
+        captured.is_draft                  = identity.module_id != 0;
+        captured.has_local_layers          = !config.layerIdsForGroup(identity.tag, identity.module_id).empty();
         snapshot.groups.push_back(std::move(captured));
     }
     snapshot.block_tree = block_tree_sizing;
@@ -328,7 +330,7 @@ std::string StageCacheSnapshot::serialize() const {
         << kFieldSep << joinGroupNums(groups, [](const auto& group) { return group.type; }) << kFieldSep
         << joinGroupNums(groups, [](const auto& group) {
                return (group.block_tree_group_member ? kBlockTreeMember : 0)
-                   | (group.is_draft ? kDraftGroup : 0) | (group.allocation_only ? kAllocationOnlyGroup : 0);
+                   | (group.is_draft ? kDraftGroup : 0) | (group.has_local_layers ? 0 : kAllocationOnlyGroup);
            }) << kFieldSep
         << joinGroupNums(groups, [](const auto& group) { return group.seq_size_per_block; }) << kFieldSep
         << joinGroupNums(groups, [](const auto& group) { return group.kernel_seq_size_per_block; }) << kFieldSep
@@ -388,7 +390,7 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
         group.type                      = group_types[i];
         group.block_tree_group_member   = (group_flags[i] & kBlockTreeMember) != 0;
         group.is_draft                  = (group_flags[i] & kDraftGroup) != 0;
-        group.allocation_only           = (group_flags[i] & kAllocationOnlyGroup) != 0;
+        group.has_local_layers          = (group_flags[i] & kAllocationOnlyGroup) == 0;
         group.seq_size_per_block        = seq_size_per_block[i];
         group.kernel_seq_size_per_block = kernel_seq_size_per_block[i];
         group.cache_key_token_stride    = cache_key_token_strides[i];
@@ -438,21 +440,22 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                             + "]");
             }
             if (stages.size() > 1 && group.is_draft) {
-                if (s == 0 && group.allocation_only && group.block_num == 0) {
-                    draft_allocator_tags.insert(group.tag);
-                } else if (s + 1 == stages.size() && !group.allocation_only) {
-                    physical_draft_tags.insert(group.tag);
-                } else {
+                if (group.has_local_layers != (s + 1 == stages.size())) {
                     return fail("draft cache group [" + group.tag + "] has invalid PP ownership");
                 }
-            } else if (group.allocation_only) {
-                return fail("allocation-only cache group [" + group.tag + "] must be a PP draft group");
+                if (s == 0) {
+                    draft_allocator_tags.insert(group.tag);
+                } else if (group.has_local_layers) {
+                    physical_draft_tags.insert(group.tag);
+                }
+            } else if (!group.has_local_layers) {
+                return fail("cache group [" + group.tag + "] without local layers must be a PP draft group");
             }
-            if (group.block_num == 0 && !group.allocation_only) {
+            if (group.block_num == 0 && group.has_local_layers) {
                 return fail("stage " + std::to_string(s) + " group [" + group.tag
                             + "] has 0 KV blocks; the group could not allocate a single block");
             }
-            // Draft rows are projected onto Stage 0 and the last stage only.
+            // Intermediate stages may omit topology-only draft rows.
             // Keep the existing all-or-none constraint for main group sets.
             if (group.block_tree_group_member && !group.is_draft) {
                 ++local_group_set_member_counts[group.type];

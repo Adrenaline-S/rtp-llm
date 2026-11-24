@@ -11,7 +11,6 @@
 namespace rtp_llm {
 
 struct HostBlockPoolConfig: public BlockPoolConfigBase {
-    bool   allocation_only{false};
     size_t payload_bytes{0};
     size_t stride_bytes{0};
     size_t alignment{4096};

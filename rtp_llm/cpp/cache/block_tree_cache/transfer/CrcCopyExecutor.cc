@@ -55,7 +55,8 @@ CrcCopyExecutor::CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
             throw std::invalid_argument("CRC requires GPU-resident device pools");
         const int device = deviceFor(*group);
         for (size_t i = 0; i < device_pools.size(); ++i) {
-            if (!group->allocationOnly(group->groupTags()[i]) && (device < 0 || device_pools[i]->deviceIndex() != device))
+            if (!group->localLayerIdsForMember(group->groupTags()[i]).empty()
+                && (device < 0 || device_pools[i]->deviceIndex() != device))
                 throw std::invalid_argument("CRC GroupSet requires backings on a single GPU device");
         }
         if ((group->hostPool() && group->hostPool()->strideBytes() < group->storageBytes())

@@ -58,9 +58,6 @@ public:
     const GroupBase& group(std::string_view tag) const {
         return cache_config_->groupByTagGlobal(tag);
     }
-    bool allocationOnly(std::string_view tag) const {
-        return cache_config_->isAllocationOnly(cache_config_->moduleOfTag(tag));
-    }
     const KVCacheSpec& groupSpec(std::string_view tag) const;
     // Local layer IDs for the tag's owning module (module-local, never union).
     std::vector<int> localLayerIdsForMember(std::string_view tag) const;

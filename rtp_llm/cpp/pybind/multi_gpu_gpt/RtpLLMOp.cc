@@ -117,7 +117,7 @@ void RtpLLMOp::init(py::object model,
         && !propose_model.attr("allocation_only_config").is_none()) {
         RTP_LLM_CHECK(params.parallelism_config.pp_size > 1 && params.parallelism_config.pp_rank == 0
                       && propose_model.attr("model").is_none());
-        params.allocation_only_draft_config = propose_model.attr("allocation_only_config").cast<ModelConfig>();
+        params.draft_topology_config = propose_model.attr("allocation_only_config").cast<ModelConfig>();
     } else {
         propose_params = initProposeModel(propose_model, params);
     }

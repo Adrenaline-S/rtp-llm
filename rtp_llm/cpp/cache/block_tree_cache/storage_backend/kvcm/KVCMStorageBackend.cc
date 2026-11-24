@@ -351,7 +351,8 @@ public:
         group_block_size_bytes.reserve(identities.size());
         for (const auto& identity : identities) {
             const auto& group = cache_config->moduleConfig(identity.module_id).group(identity.tag);
-            if (cache_config->isAllocationOnly(identity.module_id) || !group.policy.enable_prefix_reuse) {
+            if (!group.policy.enable_prefix_reuse
+                || cache_config->layerIdsForGroup(identity.tag, identity.module_id).empty()) {
                 continue;
             }
             has_swa_ = has_swa_ || group.policy.group_type == CacheGroupType::SWA;
@@ -544,7 +545,7 @@ public:
         bool has_full_group = false;
         for (const auto& handles : request.handles) {
             for (const auto& handle : handles) {
-                if (cache_config_.group(handle.tag).policy.group_type != CacheGroupType::FULL) {
+                if (cache_config_.groupByTagGlobal(handle.tag).policy.group_type != CacheGroupType::FULL) {
                     return false;
                 }
                 has_full_group = true;

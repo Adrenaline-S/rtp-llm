@@ -456,10 +456,6 @@ const CacheModuleConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_
     return config_.mtp_sub_configs[mtp_module_id];
 }
 
-uint32_t KVCacheManager::cacheStoreKeyLayerId(size_t module_id, int local_layer_id) const {
-    return config_.cacheKeyLayerId(local_layer_id, module_id);
-}
-
 // 显存管理和缓存分配
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
@@ -909,7 +905,7 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
         return reject("P2P layer publication has mismatched key and block counts");
     }
 
-    if (model_id >= config_.moduleCount() || config_.isAllocationOnly(model_id) || local_layer_id < 0
+    if (model_id >= config_.moduleCount() || local_layer_id < 0
         || static_cast<size_t>(local_layer_id) >= config_.topology(model_id).layers().size()) {
         return reject("P2P layer publication cannot map the local layer");
     }
@@ -1528,7 +1524,7 @@ bool KVCacheManager::initP2PConnector() {
         }
     };
     append_layout(0, local_stage.mutable_main_shards());
-    if (config_.moduleCount() > 1 && !config_.isAllocationOnly(1)) {
+    if (config_.moduleCount() > 1 && config_.layer_num(1) > 0) {
         append_layout(1, local_stage.mutable_draft_shards());
     }
     if (pc.pp_rank == 0) {
@@ -1539,7 +1535,7 @@ bool KVCacheManager::initP2PConnector() {
     const bool decode = pd_sep_config_.role_type == RoleType::DECODE;
     if (decode) {
         for (const auto& identity : config_.allGroupIdentities()) {
-            if (!config_.isAllocationOnly(identity.module_id)) {
+            if (!config_.layerIdsForGroup(identity.tag, identity.module_id).empty()) {
                 (*startup.mutable_decode_block_bytes())[identity.tag] =
                     config_.blockSizeBytesForGroup(identity.tag, identity.module_id);
             }

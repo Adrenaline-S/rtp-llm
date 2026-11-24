@@ -1034,7 +1034,7 @@ TEST_F(NormalEngineTest, testPpDecodeWarmupUsesStageCacheAndSpeculativeHeadroom)
                 if (init.cache_manager) {
                     const auto& cache = init.cache_manager->cacheConfig();
                     EXPECT_EQ(cache.layer_num(), 1u);
-                    EXPECT_EQ(init.cache_manager->cacheStoreKeyLayerId(0, 0), static_cast<uint32_t>(stage));
+                    EXPECT_EQ(cache.global_layer_begin, static_cast<uint32_t>(stage));
                     EXPECT_EQ(cache.groupTags(), (std::vector<std::string>{tag}));
                     EXPECT_EQ(cache.group(tag).block_num, 2u);
                 }

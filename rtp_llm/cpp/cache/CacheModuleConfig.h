@@ -41,9 +41,7 @@ public:
 
     // Attention-specific configuration
     bool enable_linear_cache_reclaim = false;
-    // Leading PP stage issues the IDs; only the final stage owns the draft KV buffers.
-    bool allocation_only = false;
-    int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    int  reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
 
     bool use_typed_cache_regions                  = false;
     bool use_opaque_kv_cache_store                = false;

@@ -937,7 +937,8 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
 
 TEST_F(BlockTreeCacheFactoryTest, AllocationOnlyStageKeepsDeviceRefsWithoutChargingDraftPayloadOrTierBackings) {
     auto config = makeHeterogeneousMtpConfig();
-    config.mtp_sub_configs.front().allocation_only = true;
+    auto& draft = config.mtp_sub_configs.front();
+    draft.setTopology(draft.groups(), {});
     auto layout = computeBlockTreeBackingLayout(config, {"default", "mtp_default"}, true, 16);
     EXPECT_EQ(layout.payload_bytes, 32u);
     auto draft_layout = computeBlockTreeBackingLayout(config, {"mtp_default"}, true, 16);
@@ -973,9 +974,13 @@ TEST_F(BlockTreeCacheFactoryTest, AllocationOnlyStageKeepsDeviceRefsWithoutCharg
     auto host_cfg = std::make_shared<HostBlockPoolConfig>();
     host_cfg->pool_type = BlockPoolType::HOST;
     host_cfg->physical_block_count = 4;
-    host_cfg->allocation_only = true;
+    host_cfg->payload_bytes = 0;
+    host_cfg->stride_bytes = 16;
+    EXPECT_ANY_THROW(HostBlockPool(host_cfg).init());
+    host_cfg->stride_bytes = 0;
     HostBlockPool host(host_cfg);
     ASSERT_TRUE(host.init());
+    EXPECT_EQ(host.freeBlocksNum(), 3u);
     auto host_block = host.malloc();
     ASSERT_TRUE(host_block.has_value());
     EXPECT_EQ(host.blockSizeBytes(), 0u);
@@ -984,9 +989,13 @@ TEST_F(BlockTreeCacheFactoryTest, AllocationOnlyStageKeepsDeviceRefsWithoutCharg
     auto disk_cfg = std::make_shared<DiskBlockPoolConfig>();
     disk_cfg->pool_type = BlockPoolType::DISK;
     disk_cfg->physical_block_count = 4;
-    disk_cfg->allocation_only = true;
+    disk_cfg->payload_bytes = 0;
+    disk_cfg->stride_bytes = 16;
+    EXPECT_ANY_THROW(DiskBlockPool(disk_cfg).init());
+    disk_cfg->stride_bytes = 0;
     DiskBlockPool disk(disk_cfg);
     ASSERT_TRUE(disk.init());
+    EXPECT_EQ(disk.freeBlocksNum(), 3u);
     auto disk_block = disk.malloc();
     ASSERT_TRUE(disk_block.has_value());
     EXPECT_TRUE(disk.filePath().empty());

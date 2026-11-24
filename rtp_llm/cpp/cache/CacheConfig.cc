@@ -106,7 +106,7 @@ uint32_t CacheConfig::blockNumForGroup(const GroupBase& group, uint32_t baseline
 uint32_t CacheConfig::maxBaselineBlockNum() const {
     uint64_t maximum = std::numeric_limits<uint32_t>::max();
     for (const auto& identity : allGroupIdentities()) {
-        if (isAllocationOnly(identity.module_id)) {
+        if (layerIdsForGroup(identity.tag, identity.module_id).empty()) {
             continue;
         }
         const auto& group = this->group(identity.tag, identity.module_id);
@@ -139,9 +139,8 @@ void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
     };
     main_config.finalizeBlockNums(block_num_for_group);
     for (auto& sub_cfg : mtp_sub_configs) {
-        // The draft allocation row on stage 0 has no stage-local capacity.
-        // An actual count is assigned by PP negotiation from the owning stage.
-        if (!sub_cfg.allocation_only || pp_overrides != nullptr) {
+        // Draft groups without local layers receive their capacity from the owning PP stage.
+        if (sub_cfg.layer_num > 0 || pp_overrides != nullptr) {
             sub_cfg.finalizeBlockNums(block_num_for_group);
         }
     }

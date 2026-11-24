@@ -18,7 +18,8 @@ inline bool isPlainDeviceTransferGroup(const GroupSet& group) {
     if (device < 0)
         return false;
     for (size_t i = 0; i < pools.size(); ++i)
-        if (!pools[i] || (!group.allocationOnly(group.groupTags()[i]) && pools[i]->deviceIndex() != device))
+        if (!pools[i]
+            || (!group.localLayerIdsForMember(group.groupTags()[i]).empty() && pools[i]->deviceIndex() != device))
             return false;
     return true;
 }
@@ -52,8 +53,6 @@ inline std::vector<DeviceHostCopyTileGeometry> getDeviceHostCopyTiles(const Grou
         if (!pools[member]) {
             throw std::invalid_argument("device-host backing has a null pool");
         }
-        if (group.allocationOnly(tags[member]))
-            continue;
         const auto& base      = group.group(tags[member]);
         const auto  layer_ids = group.localLayerIdsForMember(tags[member]);
         if (layer_ids.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {

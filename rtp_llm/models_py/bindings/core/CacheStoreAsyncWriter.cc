@@ -397,14 +397,22 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         return;
     }
 
+    const auto& stage_config = cache_manager_->cacheConfig();
+    RTP_LLM_CHECK_WITH_INFO(layer_kv.layer_id >= 0
+                                && static_cast<uint32_t>(layer_kv.layer_id) < cache_config_->layer_num,
+                            "invalid cache layer %d for module %zu",
+                            layer_kv.layer_id,
+                            cache_module_id_);
+    const uint32_t cache_key_layer_begin = cache_module_id_ == 0 ? stage_config.global_layer_begin : 0;
+    const uint32_t cache_key_layer_id    = cache_key_layer_begin + static_cast<uint32_t>(layer_kv.layer_id);
+    const bool     group_transfer_policy = stage_config.usesGroupCacheTransferPolicy(cache_module_id_);
+
     // Capture tensors by value so their underlying storage stays alive in the background thread.
     // A torch::Tensor copy only increments the reference count.
-    auto       captured_cache_store_inputs = cache_store_inputs;
-    auto       captured_layer_kv           = layer_kv;
-    const auto cache_key_layer_id          = cache_manager_->cacheStoreKeyLayerId(cache_module_id_, layer_kv.layer_id);
-    const bool group_transfer_policy = cache_manager_->cacheConfig().usesGroupCacheTransferPolicy(cache_module_id_);
-    auto       cache_config          = cache_config_;
-    auto       cache_store           = active_cache_store_;
+    auto                          captured_cache_store_inputs = cache_store_inputs;
+    auto                          captured_layer_kv           = layer_kv;
+    auto                          cache_config                = cache_config_;
+    auto                          cache_store                 = active_cache_store_;
     CacheStoreCompletionRegistrar register_store_completion;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);

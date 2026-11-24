@@ -203,7 +203,6 @@ createHostPool(const std::string& name, const BackingLayout& layout, size_t usab
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = name;
     config->physical_block_count = usable_blocks + 1;
-    config->allocation_only      = layout.payload_bytes == 0;
     config->payload_bytes        = layout.payload_bytes;
     config->stride_bytes         = layout.pool_stride;
     config->alignment            = alignment;
@@ -238,7 +237,6 @@ DiskBlockPoolPtr createDiskPool(const KVCacheConfig&                            
     config->work_dir             = guard ? guard->workDir() : std::string{};
     config->local_rank           = local_rank;
     config->world_rank           = world_rank;
-    config->allocation_only      = layout.payload_bytes == 0;
     config->payload_bytes        = layout.payload_bytes;
     config->stride_bytes         = layout.pool_stride;
     config->physical_block_count = usable_blocks + 1;

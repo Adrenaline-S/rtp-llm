@@ -134,7 +134,7 @@ TEST(PPTopologyValidatorTest, DraftAllocatorCountsComeFromPhysicalLastStage) {
     auto last = makeFullSnapshot(30);
     first.groups.push_back(makeGroupSnapshot("mtp", CacheGroupType::SWA, 0));
     first.groups.back().is_draft = true;
-    first.groups.back().allocation_only = true;
+    first.groups.back().has_local_layers = false;
     last.groups.push_back(makeGroupSnapshot("mtp", CacheGroupType::SWA, 11));
     last.groups.back().is_draft = true;
     first.block_tree.group_sets.push_back({"mtp", 0});
@@ -142,13 +142,24 @@ TEST(PPTopologyValidatorTest, DraftAllocatorCountsComeFromPhysicalLastStage) {
     first.block_tree.host_budget_bytes = middle.block_tree.host_budget_bytes =
         last.block_tree.host_budget_bytes = 32 * 4096;
 
-    const auto received = StageCacheSnapshot::deserialize(first.serialize());
-    ASSERT_TRUE(received.groups.back().allocation_only);
+    const auto payload = first.serialize();
+    EXPECT_EQ(payload.find("full\x1fmtp|1,2|1,7|"), 0u);
+    EXPECT_EQ(last.serialize().find("full\x1fmtp|1,2|1,3|"), 0u);
+    const auto received = StageCacheSnapshot::deserialize(payload);
+    ASSERT_EQ(received.groups.size(), 2u);
+    EXPECT_TRUE(received.groups.front().has_local_layers);
+    ASSERT_FALSE(received.groups.back().has_local_layers);
     const auto agreed = validatePPTopology({received, middle, last});
     ASSERT_TRUE(agreed.ok) << agreed.error;
     EXPECT_EQ(agreed.agreed.block_num_overrides.at("full"), 30u);
     EXPECT_EQ(agreed.agreed.block_num_overrides.at("mtp"), 11u);
     EXPECT_GT(agreed.agreed.block_tree.host.at(CacheGroupType::SWA), 1u);
+
+    middle.groups.push_back(received.groups.back());
+    middle.block_tree.group_sets.push_back({"mtp", 0});
+    const auto with_middle_draft = validatePPTopology({received, middle, last});
+    ASSERT_TRUE(with_middle_draft.ok) << with_middle_draft.error;
+    EXPECT_EQ(with_middle_draft.agreed.block_num_overrides.at("mtp"), 11u);
 
     last.groups.pop_back();
     last.block_tree.group_sets.pop_back();

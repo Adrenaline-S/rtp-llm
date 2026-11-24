@@ -87,12 +87,8 @@ void GroupSet::initialize(size_t                             group_set_id,
         RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(tag).second, "GroupSet has duplicate member tag=%s", tag.c_str());
         const auto& module  = cache_config->moduleConfig(cache_config->moduleOfTag(tag));
         const auto& group   = module.group(tag);
-        has_physical_member = has_physical_member || !module.allocation_only;
+        has_physical_member = has_physical_member || !module.layerIdsForGroup(tag).empty();
         RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "GroupSet member tag=%s has null cache spec", tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(
-            module.allocation_only || !module.layerIdsForGroup(tag).empty(),
-            "GroupSet member tag=%s has no local layers",
-            tag.c_str());
         if (first_group == nullptr) {
             first_group = &group;
         } else {
@@ -110,8 +106,6 @@ void GroupSet::initialize(size_t                             group_set_id,
     size_t physical_payload_bytes = backing_layout.payload_bytes;
     if (physical_payload_bytes == 0) {
         for (const auto& tag : group_tags) {
-            if (cache_config->isAllocationOnly(cache_config->moduleOfTag(tag)))
-                continue;
             const size_t group_bytes =
                 cache_config->moduleConfig(cache_config->moduleOfTag(tag)).blockSizeBytesForGroup(tag);
             RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - physical_payload_bytes,

@@ -86,13 +86,11 @@ const HostBlockPoolConfig& HostBlockPool::config() const {
 
 bool HostBlockPool::init() {
     const auto& cfg = config();
-    if (cfg.allocation_only) {
-        RTP_LLM_CHECK(cfg.payload_bytes == 0 && cfg.stride_bytes == 0);
+    if (cfg.payload_bytes == 0) {
+        RTP_LLM_CHECK(cfg.stride_bytes == 0);
         markInitialized();
         return true;
     }
-    RTP_LLM_CHECK_WITH_INFO(
-        cfg.payload_bytes > 0, "host block pool [%s] payload_bytes must be > 0", cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(cfg.stride_bytes >= cfg.payload_bytes,
                             "host block pool [%s] stride_bytes [%zu] must be >= payload_bytes [%zu]",
                             cfg.pool_name.c_str(),

@@ -19,8 +19,7 @@ CacheGroupType groupTypeForSpec(const KVCacheSpec& spec) {
 
 void CacheModuleConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
     RTP_LLM_CHECK_WITH_INFO(!new_groups.empty(), "CacheModuleConfig::setTopology requires at least one cache group");
-    RTP_LLM_CHECK_WITH_INFO(!new_layers.empty(), "CacheModuleConfig::setTopology requires at least one cache layer");
-    RTP_LLM_CHECK_WITH_INFO(new_layers.size() >= layer_num,
+    RTP_LLM_CHECK_WITH_INFO(new_layers.empty() || new_layers.size() >= layer_num,
                             "CacheModuleConfig::setTopology layer count %zu is less than layer count %u",
                             new_layers.size(),
                             layer_num);
@@ -55,6 +54,9 @@ void CacheModuleConfig::setTopology(std::vector<GroupBase> new_groups, std::vect
     }
 
     cache_topology = CacheTopology::create(std::move(new_groups), std::move(new_layers));
+    if (cache_topology->layers().empty()) {
+        layer_num = 0;
+    }
 }
 
 void CacheModuleConfig::setGroupBlockLayout(const std::vector<std::string>& group_tags,

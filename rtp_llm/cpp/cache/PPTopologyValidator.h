@@ -24,7 +24,7 @@ struct StageCacheGroupSnapshot {
     uint32_t       explicit_block_num        = 0;  // 0 = follows the paged budget
     std::string    policy_fingerprint;
     bool           is_draft = false;
-    bool           allocation_only = false;
+    bool           has_local_layers = true;
 };
 
 /** Per-stage cache geometry exchanged at startup. */

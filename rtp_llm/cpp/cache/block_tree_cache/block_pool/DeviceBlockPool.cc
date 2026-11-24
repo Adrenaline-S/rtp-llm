@@ -319,16 +319,13 @@ std::shared_ptr<const DeviceBlockPoolConfig>
 DeviceBlockPool::normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::DEVICE);
-    if (config->allocation_only) {
-        RTP_LLM_CHECK_WITH_INFO(config->physical_block_count > 1 && config->memory_layouts.empty()
-                                    && config->total_size_bytes == 0 && !config->use_pinned_cpu_backing
-                                    && !config->use_device_malloc_backing,
-                                "invalid allocation-only device block pool [%s]", config->pool_name.c_str());
+    if (config->memory_layouts.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(config->physical_block_count > 1 && config->total_size_bytes == 0
+                                    && !config->use_pinned_cpu_backing && !config->use_device_malloc_backing,
+                                "invalid device block pool [%s] with no local layers",
+                                config->pool_name.c_str());
         return config;
     }
-    RTP_LLM_CHECK_WITH_INFO(!config->memory_layouts.empty(),
-                            "device block pool [%s] memory_layouts must not be empty",
-                            config->pool_name.c_str());
 
     // Every memory layout shares the same block id space, so physical_block_count is
     // reconciled against memory_layouts[*].block_num before IBlockPool construction.
@@ -552,10 +549,10 @@ void DeviceBlockPool::initializeLayerMappings() {
     for (const auto& layout_cfg : cfg.memory_layouts) {
         total_layers += static_cast<size_t>(layout_cfg.layer_num);
     }
-    global_layer_to_local_.assign(total_layers, {-1, -1});
+    pool_layer_to_local_.assign(total_layers, {-1, -1});
     // 待删除: aligned/padded model-facing scale exposure, for legacy-L1 consumers.
-    global_layer_kv_tensors_.assign(total_layers, torch::Tensor());
-    global_layer_kv_scale_tensors_.assign(total_layers, torch::Tensor());
+    pool_layer_kv_tensors_.assign(total_layers, torch::Tensor());
+    pool_layer_kv_scale_tensors_.assign(total_layers, torch::Tensor());
 }
 
 void DeviceBlockPool::initializeLayoutStrategies() {
@@ -564,16 +561,16 @@ void DeviceBlockPool::initializeLayoutStrategies() {
 
     layout_strategies_.resize(cfg.memory_layouts.size());
 
-    size_t global_layer_begin = 0;
+    size_t pool_layer_offset = 0;
     for (size_t layout_idx = 0; layout_idx < cfg.memory_layouts.size(); ++layout_idx) {
-        processMemoryLayout(layout_idx, full_tensor, global_layer_begin);
-        global_layer_begin += static_cast<size_t>(cfg.memory_layouts[layout_idx].layer_num);
+        processMemoryLayout(layout_idx, full_tensor, pool_layer_offset);
+        pool_layer_offset += static_cast<size_t>(cfg.memory_layouts[layout_idx].layer_num);
     }
 }
 
 void DeviceBlockPool::processMemoryLayout(size_t               layout_idx,
                                           const torch::Tensor& full_tensor,
-                                          size_t&              global_layer_begin) {
+                                          size_t&              pool_layer_offset) {
     const auto& layout_cfg = config().memory_layouts[layout_idx];
 
     torch::Tensor kv_cache_tensor = createTensor(full_tensor,
@@ -591,7 +588,7 @@ void DeviceBlockPool::processMemoryLayout(size_t               layout_idx,
     }
 
     initializeLayoutStrategy(layout_idx, layout_cfg, kv_cache_tensor, kv_scale_tensor);
-    processLayerTensors(layout_idx, layout_cfg, global_layer_begin);
+    processLayerTensors(layout_idx, layout_cfg, pool_layer_offset);
 
     RTP_LLM_LOG_INFO("MemoryLayout[%zu] initialized: pool_name=%s layer_num=%u "
                      "block_num=%u kv_off=%zu kv_bytes=%zu scale_off=%zu scale_bytes=%zu",
@@ -636,18 +633,18 @@ void DeviceBlockPool::initializeLayoutStrategy(size_t                    layout_
 
 void DeviceBlockPool::processLayerTensors(size_t                    layout_idx,
                                           const MemoryLayoutConfig& layout_cfg,
-                                          size_t&                   global_layer_begin) {
+                                          size_t&                   pool_layer_offset) {
     auto&      strategy      = layout_strategies_[layout_idx];
     const auto layer_tensors = strategy->getLayerCacheTensors();
     const auto scale_tensors = strategy->getLayerScaleCacheTensors();
     for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
-        const size_t global_layer = global_layer_begin + local_layer;
-        RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
-        global_layer_to_local_[global_layer] = {static_cast<int>(layout_idx), static_cast<int>(local_layer)};
+        const size_t pool_layer = pool_layer_offset + local_layer;
+        RTP_LLM_CHECK_WITH_INFO(pool_layer < pool_layer_to_local_.size(), "pool layer index out of range");
+        pool_layer_to_local_[pool_layer] = {static_cast<int>(layout_idx), static_cast<int>(local_layer)};
 
-        global_layer_kv_tensors_[global_layer] = layer_tensors[local_layer];
+        pool_layer_kv_tensors_[pool_layer] = layer_tensors[local_layer];
         if (layout_cfg.hasScale()) {
-            global_layer_kv_scale_tensors_[global_layer] = scale_tensors[local_layer];
+            pool_layer_kv_scale_tensors_[pool_layer] = scale_tensors[local_layer];
         }
     }
 }
@@ -656,7 +653,7 @@ bool DeviceBlockPool::init() {
     RTP_LLM_CHECK(!initialized());
     const auto& cfg = config();
 
-    if (!cfg.allocation_only) {
+    if (!cfg.memory_layouts.empty()) {
         initializeCacheBuffer();
         initializeLayerMappings();
         initializeLayoutStrategies();
@@ -668,14 +665,14 @@ bool DeviceBlockPool::init() {
                      "total_size=%zu bytes physical_block_count=%zu",
                      cfg.pool_name.c_str(),
                      cfg.memory_layouts.size(),
-                     global_layer_to_local_.size(),
+                     pool_layer_to_local_.size(),
                      cfg.total_size_bytes,
                      cfg.physical_block_count);
     return true;
 }
 
 void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
-    if (config().allocation_only) {
+    if (config().memory_layouts.empty()) {
         return;
     }
     if (cache_store) {
@@ -773,35 +770,35 @@ void DeviceBlockPool::deregisterUserMrForBuffer(std::shared_ptr<MemoryUtil> memo
     }
 }
 
-std::pair<int, int> DeviceBlockPool::mapGlobalLayerIdToLocal(int global_layer_id) const {
-    if (global_layer_id < 0 || static_cast<size_t>(global_layer_id) >= global_layer_to_local_.size()) {
-        RTP_LLM_LOG_ERROR("Global layer_id %d out of range (total layers: %zu), pool_name=%s",
-                          global_layer_id,
-                          global_layer_to_local_.size(),
+std::pair<int, int> DeviceBlockPool::mapPoolLayerToLocal(int pool_layer_id) const {
+    if (pool_layer_id < 0 || static_cast<size_t>(pool_layer_id) >= pool_layer_to_local_.size()) {
+        RTP_LLM_LOG_ERROR("Pool layer_id %d out of range (total layers: %zu), pool_name=%s",
+                          pool_layer_id,
+                          pool_layer_to_local_.size(),
                           config().pool_name.c_str());
         return {-1, -1};
     }
-    return global_layer_to_local_[static_cast<size_t>(global_layer_id)];
+    return pool_layer_to_local_[static_cast<size_t>(pool_layer_id)];
 }
 
 std::vector<torch::Tensor> DeviceBlockPool::allLayerCacheBase() const {
-    return global_layer_kv_tensors_;
+    return pool_layer_kv_tensors_;
 }
 
 std::vector<torch::Tensor> DeviceBlockPool::allLayerScaleCacheBase() const {
-    return global_layer_kv_scale_tensors_;
+    return pool_layer_kv_scale_tensors_;
 }
 
 BlockAddrInfo DeviceBlockPool::convertIndexToAddr(int layer_id, BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+    auto [layout_index, local_layer_id] = mapPoolLayerToLocal(layer_id);
     checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToAddr(local_layer_id, block);
 }
 
 std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+    auto [layout_index, local_layer_id] = mapPoolLayerToLocal(layer_id);
     checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(local_layer_id, block);
 }
@@ -809,14 +806,14 @@ std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, Block
 std::vector<BlockInfo>
 DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
     RTP_LLM_CHECK(initialized());
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+    auto [layout_index, local_layer_id] = mapPoolLayerToLocal(layer_id);
     checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(
         local_layer_id, block, partition_count, partition_id);
 }
 
 MemoryType DeviceBlockPool::where() const {
-    if (config().allocation_only) {
+    if (config().memory_layouts.empty()) {
         return MemoryType::MEMORY_CPU;
     }
     if (cache_aligned_buffer_.is_cuda()) {

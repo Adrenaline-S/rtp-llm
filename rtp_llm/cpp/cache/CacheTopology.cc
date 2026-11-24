@@ -114,7 +114,6 @@ CacheTopology::CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBas
 
 void CacheTopology::validateAndBuildIndex() {
     RTP_LLM_CHECK_WITH_INFO(!groups_.empty(), "CacheTopology requires at least one cache group");
-    RTP_LLM_CHECK_WITH_INFO(!layers_.empty(), "CacheTopology requires at least one cache layer");
 
     tag_to_group_id_.reserve(groups_.size());
     group_tags_.reserve(groups_.size());

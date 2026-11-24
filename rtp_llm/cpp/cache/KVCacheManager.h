@@ -64,7 +64,6 @@ public:
 
     const CacheConfig&       cacheConfig() const;
     const CacheModuleConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
-    uint32_t                 cacheStoreKeyLayerId(size_t module_id, int local_layer_id) const;
 
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);

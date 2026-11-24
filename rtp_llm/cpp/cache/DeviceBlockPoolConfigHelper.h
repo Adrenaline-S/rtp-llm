@@ -37,14 +37,11 @@ public:
                          config.physical_block_count,
                          module_config.groupNums());
 
-        if (module_config.allocation_only) {
-            config.allocation_only = true;
+        const auto layer_num = static_cast<uint32_t>(module_config.layerIdsForGroup(group.tag).size());
+        if (layer_num == 0) {
+            // This stage allocates block IDs for the group without backing KV memory.
             return config;
         }
-
-        const auto group_layer_ids = module_config.layerIdsForGroup(group.tag);
-        RTP_LLM_CHECK_WITH_INFO(!group_layer_ids.empty(), "group tag=%s has no layers", group.tag.c_str());
-        const auto layer_num = static_cast<uint32_t>(group_layer_ids.size());
 
         auto layout                  = createMemoryLayoutConfig(false,
                                                layer_num,
