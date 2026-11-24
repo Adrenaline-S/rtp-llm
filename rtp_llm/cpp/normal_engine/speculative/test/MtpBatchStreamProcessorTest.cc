@@ -2618,6 +2618,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSparseSnapshotOverlayDoesNotResurrectHos
     GenerateStream::MtpAsyncDeviceState state;
     state.next_kv_cache_block_id_gpu        = physical.to(torch::kCUDA);
     state.next_kv_cache_kernel_block_id_gpu = kernel.to(torch::kCUDA);
+    state.next_kv_cache_row_tags            = cache_config.allGroupTags();
     steady->setMtpAsyncDeviceState(std::move(state));
 
     GptModelInputs model_input;
